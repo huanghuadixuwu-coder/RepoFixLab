@@ -5,6 +5,25 @@ $script:CliArguments = @($args)
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $script:TranscriptWriter = $null
 
+function Repair-ProcessPathEnvironment {
+    $processEnvironment = [Environment]::GetEnvironmentVariables("Process")
+    $pathNames = @($processEnvironment.Keys | Where-Object {
+        [String]::Equals([string]$_, "PATH", [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($pathNames.Count -le 1) {
+        return
+    }
+
+    $pathValue = [Environment]::GetEnvironmentVariable("PATH", "Process")
+    if ([String]::IsNullOrWhiteSpace($pathValue)) {
+        throw "Process environment contains duplicate PATH entries but no usable PATH value"
+    }
+    [Environment]::SetEnvironmentVariable("Path", $null, "Process")
+    [Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
+}
+
+Repair-ProcessPathEnvironment
+
 function Show-Usage {
     [Console]::Out.WriteLine("RepoFixLab host orchestration")
     [Console]::Out.WriteLine("")
@@ -13,6 +32,7 @@ function Show-Usage {
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 dataset self-check [--config <path>]")
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 images lock-input")
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 images prepare-axios")
+    [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m1 [--config configs/experiments/m1-axios.yaml]")
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 --help")
 }
 
@@ -240,6 +260,27 @@ function New-DatasetSelfCheckOperationDirectory {
         }
     }
     throw "Unable to allocate a unique Dataset Preparer self-check artifact directory"
+}
+
+function New-M1RunOperationDirectory {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
+
+    $root = Join-Path $RepositoryRoot "artifacts/m1-host-run"
+    [IO.Directory]::CreateDirectory($root) | Out-Null
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ")
+        $suffix = [Guid]::NewGuid().ToString("N").Substring(0, 12)
+        $candidate = Join-Path $root "$timestamp-$suffix"
+        try {
+            [IO.Directory]::CreateDirectory($candidate) | Out-Null
+            if ([IO.Directory]::GetFileSystemEntries($candidate).Count -eq 0) {
+                return $candidate
+            }
+        }
+        catch [IO.IOException] {
+        }
+    }
+    throw "Unable to allocate a unique M1 host-run artifact directory"
 }
 
 function New-TaskImageOperationPaths {
@@ -2133,6 +2174,948 @@ function Assert-ExactStringSet {
     }
 }
 
+function New-M1ProviderSecretFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$SecretValue
+    )
+
+    if ($SecretValue.Length -gt 4096 -or $SecretValue.Trim() -cne $SecretValue) {
+        throw "ZHIPU_API_KEY must be at most 4096 characters and contain no leading or trailing whitespace"
+    }
+    foreach ($character in $SecretValue.ToCharArray()) {
+        if ([char]::IsControl($character)) {
+            throw "ZHIPU_API_KEY must not contain control characters"
+        }
+    }
+
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $repositoryPath = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $secretDirectory = [IO.Path]::GetFullPath((Join-Path $tempRoot "repofixlab-m1-secret-$([Guid]::NewGuid().ToString('N'))"))
+    $repositoryPrefix = "$repositoryPath$([IO.Path]::DirectorySeparatorChar)"
+    if (
+        $secretDirectory.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        [String]::Equals($secretDirectory, $repositoryPath, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "The host temporary directory resolves inside the RepoFixLab workspace"
+    }
+
+    [IO.Directory]::CreateDirectory($secretDirectory) | Out-Null
+    $secretPath = Join-Path $secretDirectory "zhipu_api_key"
+    try {
+        $secretBytes = $script:Utf8NoBom.GetBytes($SecretValue)
+        $stream = New-Object IO.FileStream($secretPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $stream.Write($secretBytes, 0, $secretBytes.Length)
+            $stream.Flush($true)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        return [pscustomobject]@{
+            Directory = $secretDirectory
+            Path = $secretPath
+            Bytes = $secretBytes.Length
+        }
+    }
+    catch {
+        if ([IO.Directory]::Exists($secretDirectory)) {
+            [IO.Directory]::Delete($secretDirectory, $true)
+        }
+        throw
+    }
+}
+
+function Remove-M1ProviderSecretFile {
+    param([Parameter(Mandatory = $true)][object]$SecretFile)
+
+    $path = [string]$SecretFile.Path
+    if ([IO.File]::Exists($path)) {
+        try {
+            $length = [IO.FileInfo]::new($path).Length
+            $stream = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+                $zeros = New-Object byte[] 4096
+                while ($length -gt 0) {
+                    $count = [Math]::Min([Int64]$zeros.Length, $length)
+                    $stream.Write($zeros, 0, [int]$count)
+                    $length -= $count
+                }
+                $stream.Flush($true)
+            }
+            finally {
+                $stream.Dispose()
+            }
+        }
+        finally {
+            [IO.File]::Delete($path)
+        }
+    }
+    $directory = [string]$SecretFile.Directory
+    if ([IO.Directory]::Exists($directory)) {
+        [IO.Directory]::Delete($directory, $false)
+    }
+}
+
+function Invoke-M1RunnerResidueCleanup {
+    param(
+        [Parameter(Mandatory = $true)][string]$DockerPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$OperationRoot
+    )
+
+    $filters = @(
+        "label=com.docker.compose.project=repofixlab",
+        "label=com.docker.compose.service=m1-runner",
+        "label=com.docker.compose.oneoff=True"
+    )
+    $beforeIds = @()
+    $listExitCodes = [ordered]@{}
+    foreach ($status in @("created", "exited", "dead")) {
+        $outputPath = Join-Path $OperationRoot "m1-runner-residue-before-$status.txt"
+        $arguments = @("container", "ls", "--all", "--quiet")
+        foreach ($filter in $filters) {
+            $arguments += @("--filter", $filter)
+        }
+        $arguments += @("--filter", "status=$status")
+        $exitCode = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-runner-residue-before-$status" `
+            -Arguments $arguments `
+            -StandardOutputPath $outputPath `
+            -StandardErrorPath (Join-Path $OperationRoot "m1-runner-residue-before-$status.stderr.log")
+        $listExitCodes[$status] = $exitCode
+        if ($exitCode -ne 0) {
+            throw "Unable to audit stopped M1 runner containers with status $status"
+        }
+        foreach ($line in [IO.File]::ReadAllLines($outputPath, $script:Utf8NoBom)) {
+            $id = $line.Trim()
+            if ($id.Length -eq 0) {
+                continue
+            }
+            if ($id -notmatch '^[0-9a-f]{12,64}$') {
+                throw "Docker returned an invalid M1 runner container ID"
+            }
+            if ($beforeIds -notcontains $id) {
+                $beforeIds += $id
+            }
+        }
+    }
+
+    $inspectExitCode = $null
+    $removeExitCode = $null
+    if ($beforeIds.Count -gt 0) {
+        $inspectExitCode = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-runner-residue-inspect" `
+            -Arguments (@("container", "inspect") + $beforeIds) `
+            -StandardOutputPath (Join-Path $OperationRoot "m1-runner-residue-inspect.json") `
+            -StandardErrorPath (Join-Path $OperationRoot "m1-runner-residue-inspect.stderr.log")
+        if ($inspectExitCode -ne 0) {
+            throw "Unable to inspect stopped M1 runner container residue"
+        }
+        $removeExitCode = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-runner-residue-remove" `
+            -Arguments (@("container", "rm", "--force") + $beforeIds) `
+            -StandardOutputPath (Join-Path $OperationRoot "m1-runner-residue-remove.stdout.log") `
+            -StandardErrorPath (Join-Path $OperationRoot "m1-runner-residue-remove.stderr.log")
+        if ($removeExitCode -ne 0) {
+            throw "Unable to remove stopped M1 runner container residue"
+        }
+    }
+
+    $afterIds = @()
+    foreach ($status in @("created", "exited", "dead")) {
+        $outputPath = Join-Path $OperationRoot "m1-runner-residue-after-$status.txt"
+        $arguments = @("container", "ls", "--all", "--quiet")
+        foreach ($filter in $filters) {
+            $arguments += @("--filter", $filter)
+        }
+        $arguments += @("--filter", "status=$status")
+        $exitCode = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-runner-residue-after-$status" `
+            -Arguments $arguments `
+            -StandardOutputPath $outputPath `
+            -StandardErrorPath (Join-Path $OperationRoot "m1-runner-residue-after-$status.stderr.log")
+        if ($exitCode -ne 0) {
+            throw "Unable to verify M1 runner cleanup for status $status"
+        }
+        foreach ($line in [IO.File]::ReadAllLines($outputPath, $script:Utf8NoBom)) {
+            $id = $line.Trim()
+            if ($id.Length -gt 0) {
+                $afterIds += $id
+            }
+        }
+    }
+    Write-AtomicUniqueJson (Join-Path $OperationRoot "m1-runner-cleanup.json") ([ordered]@{
+        schema_version = "v1"
+        compose_project = "repofixlab"
+        compose_service = "m1-runner"
+        compose_oneoff = "True"
+        stopped_statuses = @("created", "exited", "dead")
+        before_container_ids = $beforeIds
+        list_exit_codes = $listExitCodes
+        inspect_exit_code = $inspectExitCode
+        remove_exit_code = $removeExitCode
+        after_container_ids = $afterIds
+    })
+    if ($afterIds.Count -gt 0) {
+        throw "Stopped M1 runner containers remain after exact-label cleanup"
+    }
+    Write-TranscriptLine "M1 stopped one-off runner residue verified at zero"
+}
+function Assert-M1ComposePlan {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$PublicVolume,
+        [Parameter(Mandatory = $true)][string]$ControlVolume,
+        [Parameter(Mandatory = $true)][string]$PrivateVolume,
+        [Parameter(Mandatory = $true)][string]$SecretFile
+    )
+
+    try {
+        $composeConfig = [IO.File]::ReadAllText($Path, $script:Utf8NoBom) | ConvertFrom-Json
+    }
+    catch {
+        throw "Resolved M1 Docker Compose configuration is not valid JSON"
+    }
+    if ([string](Get-RequiredObjectProperty $composeConfig "name" "M1 Compose config") -cne "repofixlab") {
+        throw "M1 Compose project must equal repofixlab"
+    }
+
+    $services = Get-RequiredObjectProperty $composeConfig "services" "M1 Compose config"
+    $runnerProperty = $services.PSObject.Properties["m1-runner"]
+    if ($null -eq $runnerProperty) {
+        throw "M1 Compose config does not contain m1-runner"
+    }
+    $runner = $runnerProperty.Value
+    Assert-ExactStringSet @(Get-RequiredObjectProperty $runner "profiles" "m1-runner") @("m1") "m1-runner profiles"
+    if ([string](Get-RequiredObjectProperty $runner "image" "m1-runner") -cne "repofixlab-orchestrator") {
+        throw "m1-runner must reuse the fixed repofixlab-orchestrator image"
+    }
+    if ($null -ne $runner.PSObject.Properties["build"]) {
+        throw "m1-runner must not define an independent image build"
+    }
+    if ([string](Get-RequiredObjectProperty $runner "user" "m1-runner") -cne "node") {
+        throw "m1-runner must use the non-root node user"
+    }
+    if ((Get-RequiredObjectProperty $runner "read_only" "m1-runner") -isnot [bool] -or -not [bool]$runner.read_only) {
+        throw "m1-runner root filesystem must be read-only"
+    }
+    Assert-ExactStringSet @(Get-RequiredObjectProperty $runner "cap_drop" "m1-runner") @("ALL") "m1-runner cap_drop"
+    Assert-ExactStringSet @(Get-RequiredObjectProperty $runner "security_opt" "m1-runner") @("no-new-privileges:true") "m1-runner security_opt"
+    Assert-ExactStringSet @((Get-RequiredObjectProperty $runner "networks" "m1-runner").PSObject.Properties.Name) @(
+        "provider-egress", "repofix-control"
+    ) "m1-runner networks"
+
+    $environment = Get-RequiredObjectProperty $runner "environment" "m1-runner"
+    Assert-ExactStringSet @($environment.PSObject.Properties.Name) @(
+        "REPOFIX_ARTIFACTS_PATH", "REPOFIX_CONTROLLER_URL", "REPOFIX_DATASET_PUBLIC_PATH", "ZHIPU_API_KEY_FILE"
+    ) "m1-runner environment"
+    $expectedEnvironment = [ordered]@{
+        REPOFIX_ARTIFACTS_PATH = "/artifacts"
+        REPOFIX_CONTROLLER_URL = "http://controller:8000"
+        REPOFIX_DATASET_PUBLIC_PATH = "/data/public"
+        ZHIPU_API_KEY_FILE = "/run/secrets/zhipu_api_key"
+    }
+    foreach ($entry in $expectedEnvironment.GetEnumerator()) {
+        if ([string]$environment.PSObject.Properties[$entry.Key].Value -cne $entry.Value) {
+            throw "m1-runner environment drifted: $($entry.Key)"
+        }
+    }
+
+    $runnerSecrets = @(Get-RequiredObjectProperty $runner "secrets" "m1-runner")
+    if (
+        $runnerSecrets.Count -ne 1 -or
+        [string](Get-RequiredObjectProperty $runnerSecrets[0] "source" "m1-runner secret") -cne "zhipu_api_key" -or
+        [string](Get-RequiredObjectProperty $runnerSecrets[0] "target" "m1-runner secret") -cne "/run/secrets/zhipu_api_key"
+    ) {
+        throw "m1-runner must mount only the zhipu_api_key Compose secret at the frozen path"
+    }
+
+    $runnerVolumes = @(Get-RequiredObjectProperty $runner "volumes" "m1-runner")
+    if ($runnerVolumes.Count -ne 2) {
+        throw "m1-runner must mount exactly artifacts and the frozen public dataset volume"
+    }
+    $seenTargets = @{}
+    foreach ($volume in $runnerVolumes) {
+        $target = [string](Get-RequiredObjectProperty $volume "target" "m1-runner volume")
+        if ($seenTargets.ContainsKey($target)) {
+            throw "m1-runner contains a duplicate volume target: $target"
+        }
+        if ($target -ceq "/artifacts") {
+            if ([string](Get-RequiredObjectProperty $volume "type" "m1-runner artifacts volume") -cne "bind") {
+                throw "m1-runner artifacts storage must be a host bind"
+            }
+            $readOnlyProperty = $volume.PSObject.Properties["read_only"]
+            if ($null -ne $readOnlyProperty -and [bool]$readOnlyProperty.Value) {
+                throw "m1-runner artifacts storage must be writable"
+            }
+        }
+        elseif ($target -ceq "/data/public") {
+            if (
+                [string](Get-RequiredObjectProperty $volume "type" "m1-runner public volume") -cne "volume" -or
+                [string](Get-RequiredObjectProperty $volume "source" "m1-runner public volume") -cne "dataset-public" -or
+                $null -eq $volume.PSObject.Properties["read_only"] -or
+                -not [bool]$volume.read_only
+            ) {
+                throw "m1-runner public dataset volume must be the logical dataset-public volume mounted read-only"
+            }
+        }
+        else {
+            throw "m1-runner contains a forbidden volume target: $target"
+        }
+        $seenTargets[$target] = $true
+    }
+    Assert-ExactStringSet @($seenTargets.Keys) @("/artifacts", "/data/public") "m1-runner volume targets"
+
+    $dependsOn = Get-RequiredObjectProperty $runner "depends_on" "m1-runner"
+    Assert-ExactStringSet @($dependsOn.PSObject.Properties.Name) @("controller") "m1-runner dependencies"
+    if ([string](Get-RequiredObjectProperty $dependsOn.controller "condition" "m1-runner controller dependency") -cne "service_healthy") {
+        throw "m1-runner must depend on a healthy Controller"
+    }
+
+    foreach ($serviceName in @("controller", "orchestrator")) {
+        $serviceProperty = $services.PSObject.Properties[$serviceName]
+        if ($null -eq $serviceProperty) {
+            throw "M1 Compose config is missing $serviceName"
+        }
+        $service = $serviceProperty.Value
+        $secretProperty = $service.PSObject.Properties["secrets"]
+        if ($null -ne $secretProperty -and @($secretProperty.Value).Count -gt 0) {
+            throw "$serviceName must not receive the provider secret"
+        }
+        $serviceEnvironmentProperty = $service.PSObject.Properties["environment"]
+        if ($null -ne $serviceEnvironmentProperty) {
+            foreach ($name in @($serviceEnvironmentProperty.Value.PSObject.Properties.Name)) {
+                if ($name -like "*ZHIPU*" -or $name -like "*API_KEY*") {
+                    throw "$serviceName must not receive provider credentials"
+                }
+            }
+        }
+        $serviceVolumesProperty = $service.PSObject.Properties["volumes"]
+        if ($null -ne $serviceVolumesProperty) {
+            foreach ($volume in @($serviceVolumesProperty.Value)) {
+                if ([string]$volume.target -ceq "/data/public") {
+                    throw "$serviceName must not receive the M1 public dataset mount"
+                }
+            }
+        }
+    }
+    Assert-ExactStringSet @($services.controller.networks.PSObject.Properties.Name) @("repofix-control") "Controller networks"
+
+    $secrets = Get-RequiredObjectProperty $composeConfig "secrets" "M1 Compose config"
+    Assert-ExactStringSet @($secrets.PSObject.Properties.Name) @("zhipu_api_key") "M1 Compose secrets"
+    $secretDefinition = $secrets.zhipu_api_key
+    if ($null -ne $secretDefinition.PSObject.Properties["environment"]) {
+        throw "zhipu_api_key must not use an environment-backed Compose secret"
+    }
+    $resolvedSecretFile = [IO.Path]::GetFullPath([string](Get-RequiredObjectProperty $secretDefinition "file" "zhipu_api_key secret"))
+    if (-not [String]::Equals($resolvedSecretFile, [IO.Path]::GetFullPath($SecretFile), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "zhipu_api_key must use the unique host temporary secret file"
+    }
+
+    $volumes = Get-RequiredObjectProperty $composeConfig "volumes" "M1 Compose config"
+    $expectedVolumeNames = [ordered]@{
+        "controller-candidates-v1" = "repofixlab_controller-candidates-v1"
+        "dataset-public" = $PublicVolume
+        "dataset-control" = $ControlVolume
+        "dataset-private" = $PrivateVolume
+    }
+    foreach ($entry in $expectedVolumeNames.GetEnumerator()) {
+        $definition = $volumes.PSObject.Properties[$entry.Key]
+        if ($null -eq $definition -or [string](Get-RequiredObjectProperty $definition.Value "name" "M1 volume $($entry.Key)") -cne $entry.Value) {
+            throw "M1 Compose volume name drifted: $($entry.Key)"
+        }
+    }
+}
+
+function Invoke-M1PrerequisiteChecks {
+    param(
+        [Parameter(Mandatory = $true)][string]$DockerPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$OperationRoot,
+        [Parameter(Mandatory = $true)][string]$PublicVolume,
+        [Parameter(Mandatory = $true)][string]$ControlVolume,
+        [Parameter(Mandatory = $true)][string]$PrivateVolume
+    )
+
+    $volumeChecks = @(
+        [pscustomobject]@{ Key = "public"; Name = $PublicVolume; Hint = ".\scripts\repofixlab.ps1 dataset prepare" },
+        [pscustomobject]@{ Key = "control"; Name = $ControlVolume; Hint = ".\scripts\repofixlab.ps1 dataset prepare" },
+        [pscustomobject]@{ Key = "private"; Name = $PrivateVolume; Hint = ".\scripts\repofixlab.ps1 dataset prepare" },
+        [pscustomobject]@{ Key = "controller-candidates"; Name = "repofixlab_controller-candidates-v1"; Hint = "restore the approved M0 Controller candidate volume; do not create an empty replacement" }
+    )
+    foreach ($volume in $volumeChecks) {
+        $exitCode = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-$($volume.Key)-volume-preflight" `
+            -Arguments @("volume", "inspect", $volume.Name) `
+            -StandardOutputPath (Join-Path $OperationRoot "$($volume.Key)-volume-inspect.json") `
+            -StandardErrorPath (Join-Path $OperationRoot "$($volume.Key)-volume-inspect.stderr.log")
+        if ($exitCode -ne 0) {
+            throw "Required M1 Docker volume is missing: $($volume.Name). Prerequisite: $($volume.Hint)"
+        }
+    }
+
+    $imageChecks = @(
+        [pscustomobject]@{
+            Key = "worker"
+            Reference = "repofixlab-axios-5892-worker-sanitized:v1"
+            ExpectedId = "sha256:2ebfd777d35cc2126d4c072b9a47cae7efc05062d2b762f6b052de9dc2aa9457"
+        },
+        [pscustomobject]@{
+            Key = "evaluator"
+            Reference = "repofixlab-axios-5892-sanitized:v1"
+            ExpectedId = "sha256:1ec1230faa109d7d89c819740cc8f9daa6c80dade0e30e5a91834fa20feb54f1"
+        }
+    )
+    foreach ($image in $imageChecks) {
+        $inspectPath = Join-Path $OperationRoot "$($image.Key)-image-id.txt"
+        $exitCode = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-$($image.Key)-image-preflight" `
+            -Arguments @("image", "inspect", "--format={{.Id}}", $image.Reference) `
+            -StandardOutputPath $inspectPath `
+            -StandardErrorPath (Join-Path $OperationRoot "$($image.Key)-image-inspect.stderr.log")
+        if ($exitCode -ne 0) {
+            throw "Required M1 $($image.Key) image is missing: $($image.Reference). Run: .\scripts\repofixlab.ps1 images prepare-axios"
+        }
+        if ([IO.File]::ReadAllText($inspectPath, $script:Utf8NoBom).Trim() -cne $image.ExpectedId) {
+            throw "Required M1 $($image.Key) image ID drifted for $($image.Reference). Run: .\scripts\repofixlab.ps1 images prepare-axios"
+        }
+    }
+}
+
+function Invoke-M1BootstrapImageBuilds {
+    param(
+        [Parameter(Mandatory = $true)][string]$DockerPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$OperationRoot
+    )
+
+    $composeHashes = [ordered]@{}
+    foreach ($service in @("controller", "orchestrator")) {
+        $hashPath = Join-Path $OperationRoot "$service-compose-hash.txt"
+        $hashExit = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-$service-compose-hash-before-build" `
+            -Arguments @("compose", "-f", "compose.yaml", "config", "--hash", $service) `
+            -StandardOutputPath $hashPath `
+            -StandardErrorPath (Join-Path $OperationRoot "$service-compose-hash.stderr.log")
+        if ($hashExit -ne 0) {
+            throw "Unable to read Docker Compose config hash for $service before M1 build"
+        }
+        $composeHashes[$service] = Get-ComposeServiceHash $hashPath $service
+        Write-TranscriptLine "$service compose config hash fixed before M1 build: $($composeHashes[$service])"
+    }
+
+    foreach ($service in @("controller", "orchestrator")) {
+        $buildExit = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-$service-image-build-with-compose-hash" `
+            -Arguments @(
+                "compose", "-f", "compose.yaml", "build", "--build-arg",
+                "REPOFIXLAB_COMPOSE_CONFIG_SHA256=$($composeHashes[$service])", $service
+            ) `
+            -StandardOutputPath (Join-Path $OperationRoot "$service-build.stdout.log") `
+            -StandardErrorPath (Join-Path $OperationRoot "$service-build.stderr.log") `
+            -EchoOutput
+        if ($buildExit -ne 0) {
+            throw "$service image build failed with exit code $buildExit"
+        }
+
+        $imageReference = "repofixlab-$service"
+        $labelPath = Join-Path $OperationRoot "$service-image-inspect.json"
+        $labelExit = Invoke-DockerCommand `
+            -DockerPath $DockerPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Label "m1-$service-compose-hash-label" `
+            -Arguments @("image", "inspect", $imageReference) `
+            -StandardOutputPath $labelPath `
+            -StandardErrorPath (Join-Path $OperationRoot "$service-compose-hash-label.stderr.log")
+        if ($labelExit -ne 0) {
+            throw "Unable to inspect the built $service image"
+        }
+        $builtImage = Read-SingleDockerInspection $labelPath "$service built image"
+        $labels = Get-RequiredObjectProperty (Get-RequiredObjectProperty $builtImage "Config" "$service built image") "Labels" "$service built image config"
+        $composeHashLabel = $labels.PSObject.Properties["io.repofixlab.compose-config-sha256"]
+        if ($null -eq $composeHashLabel -or [string]$composeHashLabel.Value -cne $composeHashes[$service]) {
+            throw "$service built image does not carry the pre-build Compose config hash"
+        }
+    }
+}
+
+function Assert-M1PublicVolumePermissionReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet("audit", "normalize")][string]$ExpectedAction
+    )
+
+    try {
+        $report = [IO.File]::ReadAllText($Path, $script:Utf8NoBom) | ConvertFrom-Json
+    }
+    catch {
+        throw "M1 public volume permission $ExpectedAction output is not valid JSON"
+    }
+    Assert-ExactStringSet @($report.PSObject.Properties.Name) @(
+        "action", "aggregate_sha256", "files", "schema_version", "status"
+    ) "M1 public volume permission $ExpectedAction report properties"
+    if (
+        [string]$report.schema_version -cne "v1" -or
+        [string]$report.status -cne "pass" -or
+        [string]$report.action -cne $ExpectedAction -or
+        [string]$report.aggregate_sha256 -cne "e451237925674fc683c100af9bec4d68db88d529e8d5638d3649841369a34f55" -or
+        [int]$report.files -ne 47
+    ) {
+        throw "M1 public volume permission $ExpectedAction report differs from the frozen public generation contract"
+    }
+    return $report
+}
+
+function Invoke-M1PublicVolumePermissionGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$DockerPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$OperationRoot,
+        [Parameter(Mandatory = $true)][string]$PublicVolume
+    )
+
+    $permissionScript = "/workspace/packages/repofixlab/docker/public-volume-permissions.mjs"
+    $commonArguments = @(
+        "run", "--rm",
+        "--network", "none",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true",
+        "--pids-limit", "64",
+        "--memory", "536870912",
+        "--memory-swap", "536870912",
+        "--cpus", "1"
+    )
+    $firstAuditExit = Invoke-DockerCommand `
+        -DockerPath $DockerPath `
+        -RepositoryRoot $RepositoryRoot `
+        -Label "m1-public-volume-first-audit" `
+        -Arguments ($commonArguments + @(
+            "--user", "1000:1000",
+            "--mount", "type=volume,source=$PublicVolume,target=/data/public,readonly",
+            "--entrypoint", "node",
+            "repofixlab-orchestrator", $permissionScript, "audit"
+        )) `
+        -StandardOutputPath (Join-Path $OperationRoot "public-volume-first-audit.stdout.log") `
+        -StandardErrorPath (Join-Path $OperationRoot "public-volume-first-audit.stderr.log")
+    if ($firstAuditExit -eq 0) {
+        [void](Assert-M1PublicVolumePermissionReport `
+            -Path (Join-Path $OperationRoot "public-volume-first-audit.stdout.log") `
+            -ExpectedAction "audit")
+        return [pscustomobject]@{
+            Status = "already_compliant"
+            FirstAuditExitCode = 0
+            NormalizeExitCode = $null
+            FinalAuditExitCode = $null
+        }
+    }
+
+    Write-TranscriptLine "M1 public volume first read-only audit failed; attempting owner-only permission normalization"
+    $normalizeExit = Invoke-DockerCommand `
+        -DockerPath $DockerPath `
+        -RepositoryRoot $RepositoryRoot `
+        -Label "m1-public-volume-normalize" `
+        -Arguments ($commonArguments + @(
+            "--user", "65532:65532",
+            "--mount", "type=volume,source=$PublicVolume,target=/data/public",
+            "--entrypoint", "node",
+            "repofixlab-orchestrator", $permissionScript, "normalize"
+        )) `
+        -StandardOutputPath (Join-Path $OperationRoot "public-volume-normalize.stdout.log") `
+        -StandardErrorPath (Join-Path $OperationRoot "public-volume-normalize.stderr.log")
+    if ($normalizeExit -ne 0) {
+        throw "M1 public volume permission normalization failed with exit code $normalizeExit"
+    }
+    [void](Assert-M1PublicVolumePermissionReport `
+        -Path (Join-Path $OperationRoot "public-volume-normalize.stdout.log") `
+        -ExpectedAction "normalize")
+
+    $finalAuditExit = Invoke-DockerCommand `
+        -DockerPath $DockerPath `
+        -RepositoryRoot $RepositoryRoot `
+        -Label "m1-public-volume-final-audit" `
+        -Arguments ($commonArguments + @(
+            "--user", "1000:1000",
+            "--mount", "type=volume,source=$PublicVolume,target=/data/public,readonly",
+            "--entrypoint", "node",
+            "repofixlab-orchestrator", $permissionScript, "audit"
+        )) `
+        -StandardOutputPath (Join-Path $OperationRoot "public-volume-final-audit.stdout.log") `
+        -StandardErrorPath (Join-Path $OperationRoot "public-volume-final-audit.stderr.log")
+    if ($finalAuditExit -ne 0) {
+        throw "M1 public volume final read-only permission audit failed with exit code $finalAuditExit"
+    }
+    [void](Assert-M1PublicVolumePermissionReport `
+        -Path (Join-Path $OperationRoot "public-volume-final-audit.stdout.log") `
+        -ExpectedAction "audit")
+    return [pscustomobject]@{
+        Status = "normalized"
+        FirstAuditExitCode = $firstAuditExit
+        NormalizeExitCode = 0
+        FinalAuditExitCode = 0
+    }
+}
+
+function Assert-M1PrivateVolumePermissionReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet("audit", "normalize")][string]$ExpectedAction
+    )
+
+    try {
+        $report = [IO.File]::ReadAllText($Path, $script:Utf8NoBom) | ConvertFrom-Json
+    }
+    catch {
+        throw "M1 private volume permission $ExpectedAction output is not valid JSON"
+    }
+    Assert-ExactStringSet @($report.PSObject.Properties.Name) @(
+        "action", "aggregate_sha256", "files", "schema_version", "status"
+    ) "M1 private volume permission $ExpectedAction report properties"
+    if (
+        [string]$report.schema_version -cne "v1" -or
+        [string]$report.status -cne "pass" -or
+        [string]$report.action -cne $ExpectedAction -or
+        [string]$report.aggregate_sha256 -cne "e451237925674fc683c100af9bec4d68db88d529e8d5638d3649841369a34f55" -or
+        [int]$report.files -ne 47
+    ) {
+        throw "M1 private volume permission $ExpectedAction report differs from the frozen private generation contract"
+    }
+    return $report
+}
+
+function Invoke-M1PrivateVolumePermissionGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$DockerPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$OperationRoot,
+        [Parameter(Mandatory = $true)][string]$PrivateVolume
+    )
+
+    $permissionScript = "/workspace/packages/repofixlab/docker/private-volume-permissions.mjs"
+    $commonArguments = @(
+        "run", "--rm",
+        "--network", "none",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true",
+        "--pids-limit", "64",
+        "--memory", "536870912",
+        "--memory-swap", "536870912",
+        "--cpus", "1"
+    )
+    $firstAuditExit = Invoke-DockerCommand `
+        -DockerPath $DockerPath `
+        -RepositoryRoot $RepositoryRoot `
+        -Label "m1-private-volume-first-audit" `
+        -Arguments ($commonArguments + @(
+            "--user", "0:0",
+            "--mount", "type=volume,source=$PrivateVolume,target=/data/private,readonly",
+            "--entrypoint", "node",
+            "repofixlab-orchestrator", $permissionScript, "audit"
+        )) `
+        -StandardOutputPath (Join-Path $OperationRoot "private-volume-first-audit.stdout.log") `
+        -StandardErrorPath (Join-Path $OperationRoot "private-volume-first-audit.stderr.log")
+    if ($firstAuditExit -eq 0) {
+        [void](Assert-M1PrivateVolumePermissionReport `
+            -Path (Join-Path $OperationRoot "private-volume-first-audit.stdout.log") `
+            -ExpectedAction "audit")
+        return [pscustomobject]@{
+            Status = "already_compliant"
+            FirstAuditExitCode = 0
+            NormalizeExitCode = $null
+            FinalAuditExitCode = $null
+        }
+    }
+
+    Write-TranscriptLine "M1 private volume first read-only evaluator audit failed; attempting producer-owned permission normalization"
+    $normalizeExit = Invoke-DockerCommand `
+        -DockerPath $DockerPath `
+        -RepositoryRoot $RepositoryRoot `
+        -Label "m1-private-volume-normalize" `
+        -Arguments ($commonArguments + @(
+            "--user", "65532:65532",
+            "--mount", "type=volume,source=$PrivateVolume,target=/data/private",
+            "--entrypoint", "node",
+            "repofixlab-orchestrator", $permissionScript, "normalize"
+        )) `
+        -StandardOutputPath (Join-Path $OperationRoot "private-volume-normalize.stdout.log") `
+        -StandardErrorPath (Join-Path $OperationRoot "private-volume-normalize.stderr.log")
+    if ($normalizeExit -ne 0) {
+        throw "M1 private volume permission normalization failed with exit code $normalizeExit"
+    }
+    [void](Assert-M1PrivateVolumePermissionReport `
+        -Path (Join-Path $OperationRoot "private-volume-normalize.stdout.log") `
+        -ExpectedAction "normalize")
+
+    $finalAuditExit = Invoke-DockerCommand `
+        -DockerPath $DockerPath `
+        -RepositoryRoot $RepositoryRoot `
+        -Label "m1-private-volume-final-audit" `
+        -Arguments ($commonArguments + @(
+            "--user", "0:0",
+            "--mount", "type=volume,source=$PrivateVolume,target=/data/private,readonly",
+            "--entrypoint", "node",
+            "repofixlab-orchestrator", $permissionScript, "audit"
+        )) `
+        -StandardOutputPath (Join-Path $OperationRoot "private-volume-final-audit.stdout.log") `
+        -StandardErrorPath (Join-Path $OperationRoot "private-volume-final-audit.stderr.log")
+    if ($finalAuditExit -ne 0) {
+        throw "M1 private volume final read-only evaluator permission audit failed with exit code $finalAuditExit"
+    }
+    [void](Assert-M1PrivateVolumePermissionReport `
+        -Path (Join-Path $OperationRoot "private-volume-final-audit.stdout.log") `
+        -ExpectedAction "audit")
+    return [pscustomobject]@{
+        Status = "normalized"
+        FirstAuditExitCode = $firstAuditExit
+        NormalizeExitCode = 0
+        FinalAuditExitCode = 0
+    }
+}
+
+function Invoke-M1Run {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
+
+    $apiKey = [Environment]::GetEnvironmentVariable("ZHIPU_API_KEY", "Process")
+    if ([String]::IsNullOrWhiteSpace($apiKey)) {
+        [Console]::Error.WriteLine("run m1 requires a non-empty host ZHIPU_API_KEY environment variable")
+        return 2
+    }
+    if ($apiKey.Length -gt 4096 -or $apiKey.Trim() -cne $apiKey) {
+        [Console]::Error.WriteLine("run m1 requires ZHIPU_API_KEY without surrounding whitespace and at most 4096 characters")
+        return 2
+    }
+    foreach ($character in $apiKey.ToCharArray()) {
+        if ([char]::IsControl($character)) {
+            [Console]::Error.WriteLine("run m1 requires ZHIPU_API_KEY without control characters")
+            return 2
+        }
+    }
+
+    $publicVolume = "dataset-public-g-20260718-135934-066a8f5b6f6b"
+    $controlVolume = "dataset-control-g-20260718-135934-066a8f5b6f6b"
+    $privateVolume = "dataset-private-g-20260718-135934-066a8f5b6f6b"
+    $operationRoot = New-M1RunOperationDirectory $RepositoryRoot
+    $operationId = Split-Path -Leaf $operationRoot
+    $transcriptPath = Join-Path $operationRoot "transcript.log"
+    $transcriptStream = New-Object IO.FileStream($transcriptPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $parentTranscriptWriter = $script:TranscriptWriter
+    $script:TranscriptWriter = New-Object IO.StreamWriter($transcriptStream, $script:Utf8NoBom)
+    $script:TranscriptWriter.AutoFlush = $true
+
+    $environmentNames = @(
+        "COMPOSE_DISABLE_ENV_FILE", "REPOFIX_PUBLIC_VOLUME", "REPOFIX_CONTROL_VOLUME",
+        "REPOFIX_PRIVATE_VOLUME", "REPOFIX_ZHIPU_SECRET_FILE", "ZHIPU_API_KEY"
+    )
+    $previousEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    }
+    [Environment]::SetEnvironmentVariable("COMPOSE_DISABLE_ENV_FILE", "1", "Process")
+    [Environment]::SetEnvironmentVariable("REPOFIX_PUBLIC_VOLUME", $publicVolume, "Process")
+    [Environment]::SetEnvironmentVariable("REPOFIX_CONTROL_VOLUME", $controlVolume, "Process")
+    [Environment]::SetEnvironmentVariable("REPOFIX_PRIVATE_VOLUME", $privateVolume, "Process")
+
+    $secretFile = $null
+    $dockerPath = $null
+    $runExit = $null
+    $failureMessage = $null
+    $runnerCleanupStatus = "not_attempted"
+    $secretCleanupStatus = "not_attempted"
+    $publicVolumePermissionMigrationStatus = "not_attempted"
+    $privateVolumePermissionMigrationStatus = "not_attempted"
+    try {
+        try {
+            $secretFile = New-M1ProviderSecretFile $RepositoryRoot $apiKey
+            [Environment]::SetEnvironmentVariable("REPOFIX_ZHIPU_SECRET_FILE", [string]$secretFile.Path, "Process")
+            [Environment]::SetEnvironmentVariable("ZHIPU_API_KEY", $null, "Process")
+            Remove-Variable apiKey
+
+            Write-TranscriptLine "operation_id=$operationId"
+            Write-TranscriptLine "config=configs/experiments/m1-axios.yaml"
+            Write-TranscriptLine "public_volume=$publicVolume"
+            Write-TranscriptLine "control_volume=$controlVolume"
+            Write-TranscriptLine "private_volume=$privateVolume"
+            Write-TranscriptLine "provider_secret_source=unique_host_temporary_file"
+
+            $dockerPath = (Get-Command docker -ErrorAction Stop).Source
+            $composeConfigPath = Join-Path $operationRoot "compose-config.json"
+            $configExit = Invoke-DockerCommandAtomic `
+                -DockerPath $dockerPath `
+                -RepositoryRoot $RepositoryRoot `
+                -Label "m1-compose-config" `
+                -Arguments @(
+                    "compose", "-f", "compose.yaml", "--profile", "m1", "--profile", "dataset-prepare", "config", "--format", "json"
+                ) `
+                -StandardOutputPath $composeConfigPath `
+                -StandardErrorPath (Join-Path $operationRoot "compose-config.stderr.log")
+            if ($configExit -ne 0) {
+                throw "Unable to read the resolved M1 Docker Compose configuration"
+            }
+            Assert-M1ComposePlan $composeConfigPath $publicVolume $controlVolume $privateVolume ([string]$secretFile.Path)
+            Write-TranscriptLine "M1 file-backed secret, environment, volume, and network boundaries verified"
+
+            Invoke-M1PrerequisiteChecks $dockerPath $RepositoryRoot $operationRoot $publicVolume $controlVolume $privateVolume
+            Write-TranscriptLine "M1 frozen data volumes, Controller candidate volume, and task images verified"
+            Invoke-M1BootstrapImageBuilds $dockerPath $RepositoryRoot $operationRoot
+            $publicVolumePermissionMigrationStatus = "in_progress"
+            $publicVolumePermissionGate = Invoke-M1PublicVolumePermissionGate `
+                -DockerPath $dockerPath `
+                -RepositoryRoot $RepositoryRoot `
+                -OperationRoot $operationRoot `
+                -PublicVolume $publicVolume
+            $publicVolumePermissionMigrationStatus = [string]$publicVolumePermissionGate.Status
+            Write-TranscriptLine "public_volume_permission_migration_status=$publicVolumePermissionMigrationStatus"
+            $privateVolumePermissionMigrationStatus = "in_progress"
+            $privateVolumePermissionGate = Invoke-M1PrivateVolumePermissionGate `
+                -DockerPath $dockerPath `
+                -RepositoryRoot $RepositoryRoot `
+                -OperationRoot $operationRoot `
+                -PrivateVolume $privateVolume
+            $privateVolumePermissionMigrationStatus = [string]$privateVolumePermissionGate.Status
+            Write-TranscriptLine "private_volume_permission_migration_status=$privateVolumePermissionMigrationStatus"
+
+            $controllerExit = Invoke-DockerCommand `
+                -DockerPath $dockerPath `
+                -RepositoryRoot $RepositoryRoot `
+                -Label "m1-controller-up-and-wait" `
+                -Arguments @("compose", "-f", "compose.yaml", "--profile", "m1", "up", "-d", "--wait", "controller") `
+                -StandardOutputPath (Join-Path $operationRoot "controller-up.stdout.log") `
+                -StandardErrorPath (Join-Path $operationRoot "controller-up.stderr.log") `
+                -EchoOutput
+            if ($controllerExit -ne 0) {
+                throw "Controller failed to become healthy before M1 run (exit code $controllerExit)"
+            }
+
+            $runExit = Invoke-DockerCommand `
+                -DockerPath $dockerPath `
+                -RepositoryRoot $RepositoryRoot `
+                -Label "m1-orchestrator-run" `
+                -Arguments @(
+                    "compose", "-f", "compose.yaml", "--profile", "m1", "run", "--rm", "--no-deps", "--pull", "never",
+                    "m1-runner", "run", "--config", "configs/experiments/m1-axios.yaml"
+                ) `
+                -StandardOutputPath (Join-Path $operationRoot "orchestrator.stdout.log") `
+                -StandardErrorPath (Join-Path $operationRoot "orchestrator.stderr.log") `
+                -EchoOutput
+        }
+        catch {
+            $failureMessage = $_.Exception.Message
+            if ($publicVolumePermissionMigrationStatus -ceq "in_progress") {
+                $publicVolumePermissionMigrationStatus = "failed"
+                Write-TranscriptLine "public_volume_permission_migration_status=failed"
+            }
+            if ($privateVolumePermissionMigrationStatus -ceq "in_progress") {
+                $privateVolumePermissionMigrationStatus = "failed"
+                Write-TranscriptLine "private_volume_permission_migration_status=failed"
+            }
+            Write-TranscriptLine "failure: $failureMessage"
+        }
+
+        if ($null -ne $dockerPath) {
+            try {
+                Invoke-M1RunnerResidueCleanup $dockerPath $RepositoryRoot $operationRoot
+                $runnerCleanupStatus = "pass"
+            }
+            catch {
+                $runnerCleanupStatus = "failed"
+                $cleanupMessage = $_.Exception.Message
+                Write-TranscriptLine "M1 runner residue cleanup failure: $cleanupMessage"
+                if ($null -eq $failureMessage) {
+                    $failureMessage = $cleanupMessage
+                }
+                else {
+                    $failureMessage = "$failureMessage; runner cleanup: $cleanupMessage"
+                }
+            }
+        }
+
+        if ($null -ne $secretFile) {
+            try {
+                Remove-M1ProviderSecretFile $secretFile
+                $secretFile = $null
+                $secretCleanupStatus = "pass"
+            }
+            catch {
+                $secretCleanupStatus = "failed"
+                $secretMessage = $_.Exception.Message
+                Write-TranscriptLine "M1 temporary provider secret cleanup failed"
+                if ($null -eq $failureMessage) {
+                    $failureMessage = "Temporary provider secret cleanup failed: $secretMessage"
+                }
+                else {
+                    $failureMessage = "$failureMessage; temporary provider secret cleanup failed: $secretMessage"
+                }
+            }
+        }
+
+        $operationStatus = if ($null -eq $failureMessage -and $null -ne $runExit -and $runExit -eq 0) { "pass" } else { "failed" }
+        $result = [ordered]@{
+            schema_version = "v1"
+            operation_type = "m1_host_run"
+            status = $operationStatus
+            config = "configs/experiments/m1-axios.yaml"
+            public_volume_permission_migration_status = $publicVolumePermissionMigrationStatus
+            private_volume_permission_migration_status = $privateVolumePermissionMigrationStatus
+            runner_cleanup_status = $runnerCleanupStatus
+            secret_cleanup_status = $secretCleanupStatus
+        }
+        if ($null -ne $runExit) {
+            $result["orchestrator_exit_code"] = $runExit
+        }
+        if ($null -ne $failureMessage) {
+            $result["message"] = $failureMessage
+        }
+        Write-AtomicUniqueJson (Join-Path $operationRoot "result.json") $result
+
+        if ($null -ne $failureMessage) {
+            [Console]::Error.WriteLine("M1 host run failed: $failureMessage")
+            [Console]::Error.WriteLine("Artifacts: $operationRoot")
+            return 1
+        }
+        if ($runExit -ne 0) {
+            [Console]::Error.WriteLine("M1 orchestrator failed with exit code $runExit. Artifacts: $operationRoot")
+            return $runExit
+        }
+        [Console]::Out.WriteLine("M1 run completed. Artifacts: $operationRoot")
+        return 0
+    }
+    finally {
+        if ($null -ne $secretFile) {
+            try {
+                Remove-M1ProviderSecretFile $secretFile
+            }
+            catch {
+                [Console]::Error.WriteLine("M1 emergency temporary provider secret cleanup failed")
+            }
+        }
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], "Process")
+        }
+        if ($null -ne $script:TranscriptWriter) {
+            $script:TranscriptWriter.Dispose()
+        }
+        $script:TranscriptWriter = $parentTranscriptWriter
+        $transcriptStream.Dispose()
+    }
+}
 function Assert-DatasetPreparerComposePlan {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -2809,6 +3792,26 @@ if ($script:CliArguments.Count -eq 1 -and $script:CliArguments[0] -in @("--help"
 }
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "run" -and $script:CliArguments[1] -ceq "m1") {
+    if ($script:CliArguments.Count -eq 2) {
+        $m1Config = "configs/experiments/m1-axios.yaml"
+    }
+    elseif (
+        $script:CliArguments.Count -eq 4 -and
+        $script:CliArguments[2] -ceq "--config" -and
+        $script:CliArguments[3] -ceq "configs/experiments/m1-axios.yaml"
+    ) {
+        $m1Config = $script:CliArguments[3]
+    }
+    else {
+        Stop-ForUsage "run m1 accepts only the frozen --config configs/experiments/m1-axios.yaml option or no options"
+    }
+    if ($m1Config -cne "configs/experiments/m1-axios.yaml") {
+        Stop-ForUsage "run m1 config must equal configs/experiments/m1-axios.yaml"
+    }
+    $exitCode = Invoke-M1Run $repositoryRoot
+    exit $exitCode
+}
 if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "images" -and $script:CliArguments[1] -ceq "lock-input") {
     if ($script:CliArguments.Count -ne 2) {
         Stop-ForUsage "images lock-input does not accept options"
@@ -2849,7 +3852,7 @@ if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "dataset"
     exit $selfCheckResult.ExitCode
 }
 if ($script:CliArguments.Count -lt 2 -or $script:CliArguments[0] -cne "dataset" -or $script:CliArguments[1] -cne "prepare") {
-    Stop-ForUsage "Expected command: dataset prepare, dataset self-check, images lock-input, or images prepare-axios"
+    Stop-ForUsage "Expected command: run m1, dataset prepare, dataset self-check, images lock-input, or images prepare-axios"
 }
 
 $configRequest = "configs/dataset/v1.yaml"

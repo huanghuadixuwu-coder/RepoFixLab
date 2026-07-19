@@ -1,0 +1,270 @@
+{
+	"$id": "urn:repofixlab:schema:v1:run-result",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"artifact_index_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"attempt_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"attempt_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"evaluation_result_sha256": {
+			"anyOf": [
+				{
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"failure": {
+			"anyOf": [
+				{
+					"additionalProperties": false,
+					"properties": {
+						"message": {
+							"maxLength": 2000,
+							"minLength": 1,
+							"type": "string"
+						},
+						"stage": {
+							"anyOf": [
+								{
+									"const": "orchestrator",
+									"type": "string"
+								},
+								{
+									"const": "agent",
+									"type": "string"
+								},
+								{
+									"const": "snapshot",
+									"type": "string"
+								},
+								{
+									"const": "cleanup",
+									"type": "string"
+								},
+								{
+									"const": "official_evaluate",
+									"type": "string"
+								},
+								{
+									"const": "report",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"stage",
+						"message"
+					],
+					"type": "object"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"finished_at": {
+			"maxLength": 64,
+			"minLength": 20,
+			"pattern": "^\\d{4}-\\d{2}-\\d{2}T.*Z$",
+			"type": "string"
+		},
+		"manifest_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"patch_snapshot_sha256": {
+			"anyOf": [
+				{
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"resolved": {
+			"type": "boolean"
+		},
+		"result_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"result_type": {
+			"const": "run",
+			"type": "string"
+		},
+		"run_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"started_at": {
+			"maxLength": 64,
+			"minLength": 20,
+			"pattern": "^\\d{4}-\\d{2}-\\d{2}T.*Z$",
+			"type": "string"
+		},
+		"terminal_status": {
+			"anyOf": [
+				{
+					"const": "completed",
+					"type": "string"
+				},
+				{
+					"const": "failed",
+					"type": "string"
+				},
+				{
+					"const": "aborted",
+					"type": "string"
+				}
+			]
+		},
+		"termination_reason": {
+			"anyOf": [
+				{
+					"const": "official_resolved",
+					"type": "string"
+				},
+				{
+					"const": "official_unresolved",
+					"type": "string"
+				},
+				{
+					"const": "no_patch",
+					"type": "string"
+				},
+				{
+					"const": "model_error",
+					"type": "string"
+				},
+				{
+					"const": "tool_error",
+					"type": "string"
+				},
+				{
+					"const": "budget_exhausted",
+					"type": "string"
+				},
+				{
+					"const": "wall_time_exceeded",
+					"type": "string"
+				},
+				{
+					"const": "policy_violation",
+					"type": "string"
+				},
+				{
+					"const": "infrastructure_error",
+					"type": "string"
+				},
+				{
+					"const": "evaluation_error",
+					"type": "string"
+				},
+				{
+					"const": "user_abort",
+					"type": "string"
+				}
+			]
+		},
+		"usage": {
+			"additionalProperties": false,
+			"properties": {
+				"accounted_tokens": {
+					"minimum": 0,
+					"type": "integer"
+				},
+				"cost_complete": {
+					"type": "boolean"
+				},
+				"estimated_cost_cny_nano": {
+					"anyOf": [
+						{
+							"minimum": 0,
+							"type": "integer"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"model_turns": {
+					"minimum": 0,
+					"type": "integer"
+				},
+				"provider_actual_tokens": {
+					"anyOf": [
+						{
+							"minimum": 0,
+							"type": "integer"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"tool_calls": {
+					"minimum": 0,
+					"type": "integer"
+				},
+				"usage_complete": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"accounted_tokens",
+				"provider_actual_tokens",
+				"usage_complete",
+				"cost_complete",
+				"estimated_cost_cny_nano",
+				"model_turns",
+				"tool_calls"
+			],
+			"type": "object"
+		},
+		"wall_time_ms": {
+			"minimum": 0,
+			"type": "integer"
+		}
+	},
+	"required": [
+		"schema_version",
+		"result_type",
+		"run_id",
+		"attempt_id",
+		"manifest_sha256",
+		"terminal_status",
+		"termination_reason",
+		"resolved",
+		"started_at",
+		"finished_at",
+		"wall_time_ms",
+		"usage",
+		"attempt_sha256",
+		"patch_snapshot_sha256",
+		"evaluation_result_sha256",
+		"artifact_index_sha256",
+		"failure",
+		"result_sha256"
+	],
+	"type": "object"
+}

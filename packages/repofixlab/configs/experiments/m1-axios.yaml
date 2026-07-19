@@ -1,0 +1,18 @@
+schema_version: v1
+plan_type: experiment_capacity
+experiment_id: m1-axios
+task_selection:
+  status: frozen
+  declared_task_count: 1
+  instance_ids:
+    - axios__axios-5892
+matrix:
+  - group_id: m1-smoke
+    task_count: 1
+    config_ids:
+      - pi-general
+    replicates: 1
+budget:
+  per_run_accounted_admission_cap_tokens: null
+  total_accounted_admission_cap_tokens: null
+runtime_status: m1_single_run_available

@@ -16,7 +16,8 @@ export type CliCommand =
 			output: string;
 	  }
 	| { kind: "provenance-lock"; input: string; output: string }
-	| { kind: "help"; topic?: "doctor" }
+	| { kind: "run"; config: string; dryRun: boolean }
+	| { kind: "help"; topic?: "doctor" | "run" }
 	| { kind: "version" };
 
 export type CliParseErrorCode =
@@ -28,6 +29,7 @@ export type CliParseErrorCode =
 	| "invalid_input"
 	| "invalid_candidate"
 	| "invalid_operation_id"
+	| "invalid_config"
 	| "invalid_output"
 	| "unexpected_argument"
 	| "conflicting_action";
@@ -76,6 +78,8 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 				candidate: { type: "string" },
 				"operation-id": { type: "string" },
 				output: { type: "string" },
+				config: { type: "string" },
+				"dry-run": { type: "boolean" },
 			},
 		});
 	} catch (error) {
@@ -90,7 +94,9 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 		values.input !== undefined ||
 		values.candidate !== undefined ||
 		values["operation-id"] !== undefined ||
-		values.output !== undefined;
+		values.output !== undefined ||
+		values.config !== undefined ||
+		values["dry-run"] !== undefined;
 
 	if (values.help === true || command === "help") {
 		if (values.version === true || hasActionOptions) {
@@ -101,8 +107,8 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 		if (helpArguments.length === 0) {
 			return { ok: true, command: { kind: "help" } };
 		}
-		if (helpArguments.length === 1 && helpArguments[0] === "doctor") {
-			return { ok: true, command: { kind: "help", topic: "doctor" } };
+		if (helpArguments.length === 1 && (helpArguments[0] === "doctor" || helpArguments[0] === "run")) {
+			return { ok: true, command: { kind: "help", topic: helpArguments[0] } };
 		}
 		return failure("unexpected_argument", `Unexpected help argument: ${helpArguments.join(" ")}`);
 	}
@@ -116,6 +122,28 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 
 	if (command === undefined) {
 		return failure("missing_command", "A command is required");
+	}
+	if (command !== "run" && (values.config !== undefined || values["dry-run"] !== undefined)) {
+		return failure("conflicting_action", `${command} cannot be combined with run options`);
+	}
+	if (command === "run") {
+		if (extraPositionals.length > 0) {
+			return failure("unexpected_argument", `Unexpected run argument: ${extraPositionals.join(" ")}`);
+		}
+		if (
+			values.profile !== undefined ||
+			values.input !== undefined ||
+			values.candidate !== undefined ||
+			values["operation-id"] !== undefined ||
+			values.output !== undefined
+		) {
+			return failure("conflicting_action", "run cannot be combined with doctor or file-transform options");
+		}
+		const config = values.config;
+		if (typeof config !== "string" || config.trim().length === 0) {
+			return failure("invalid_config", "run requires a non-empty --config path");
+		}
+		return { ok: true, command: { kind: "run", config, dryRun: values["dry-run"] === true } };
 	}
 	if (command === "candidate-create" || command === "environment-lock-create" || command === "provenance-lock") {
 		if (extraPositionals.length > 0) {

@@ -4,8 +4,10 @@ RepoFixLab is the containerized code-repair agent and evaluation platform descri
 [`docs/designs/repofixlab.md`](../../docs/designs/repofixlab.md). This private workspace package owns the Node
 orchestrator, versioned cross-language contracts, experiment state, metrics, and static reports.
 
-The current implementation milestone establishes the v1 contract boundary, containerized bootstrap and smoke
-doctors, and the sealed task-environment publication path.
+The current implementation milestone is the M1 vertical slice: one frozen Axios SWE-bench task runs through the
+Pi general-agent session, Controller-managed container lifecycle, immutable patch capture, independent evaluator,
+CNY cost accounting, and offline static report. The bootstrap and smoke doctors plus the sealed task-environment
+publication path remain admission prerequisites.
 TypeBox definitions under `src/contracts` are the source of truth; generated JSON Schema documents under
 `schemas/v1` are enforced by both the Node orchestrator and the trusted Python Controller.
 
@@ -87,6 +89,61 @@ canonical JSON-plus-LF rules. Startup inspects each exact local image and reject
 probe, sanitizer, instance, base-commit, sensitive-environment, or environment-allowlist drift before admitting any
 operation. The adapter hash remains candidate-bound and is not claimed as an image label.
 
+## M2 security probe
+
+From the repository root in PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repofixlab-m2-security-probe.ps1
+```
+
+The probe writes a random host canary beneath the permitted `artifacts/` bind mount, runs a real Controller-created
+Worker/Evaluator factory probe, then verifies that the canary hash is unchanged. It also verifies the actual role
+inspect evidence (no host bind, network, socket, sensitive environment, added capability, published port, or
+residue) and sends an illegal `host_mount`/`canary_path` RPC request that Controller must reject with HTTP 422.
+The resulting immutable evidence directory is `artifacts/m2-security-probes/<operation-id>/` and contains the
+canary, FactoryProbeReport, rejection response, command transcript, and hash-sealed security report.
+
+This is M2 lifecycle evidence, not a passing `doctor --profile formal` result. The formal doctor remains fail-closed
+until M6, when it consumes the frozen M2 security evidence together with the M3 43-task environment locks.
+
+## M1 vertical slice
+
+M1 publishes strict experiment plans, computes capacity, and exposes one admitted single-run lifecycle. Capacity
+can be inspected without starting a model run:
+
+```bash
+repofixlab run --dry-run --config configs/experiments/m1-axios.yaml
+repofixlab run --dry-run --config configs/experiments/v1.yaml
+```
+
+The packaged plans resolve only from a single YAML filename beneath `configs/experiments`; other config paths are
+resolved as regular files beneath `REPOFIX_ARTIFACTS_PATH`. Both paths reject symbolic-link traversal. The M1 plan
+is one frozen Axios task using `pi-general`, one run, and a 200,000-token accounted admission cap. Unknown YAML
+fields, duplicate keys, aliases, inconsistent matrix totals, and inconsistent budgets are rejected. The formal v1
+plan remains unavailable and fails closed.
+
+From the repository root in PowerShell, run the admitted M1 workflow with:
+
+```powershell
+.\scripts\repofixlab.ps1 run m1
+```
+
+Prerequisites are Docker Desktop running Linux containers, the exact frozen dataset volumes and Controller
+candidate volume already published, and the admitted worker and evaluator images already built. The only provider
+credential accepted by this host path is a non-empty `ZHIPU_API_KEY` in the host process. Docker Compose
+materializes it as a secret file mounted only in the short-lived `m1-runner`; the Controller and the task worker and
+evaluator containers are not passed that credential.
+
+Host lifecycle evidence and the terminal host result are written beneath `artifacts/m1-host-run/<operation-id>/`.
+Immutable run evidence is written beneath `artifacts/m1-axios/runs/<run-id>/`; open its self-contained
+`report.html` directly in a browser.
+
+M1 validates the vertical integration on one real Axios issue, `axios__axios-5892`, with one `pi-general`
+replicate. It does not establish comparative agent quality or statistical generalization. The complete RepoFix
+state machine, Pi baseline comparison and ablations, repeated trials, and formal evaluation over the frozen
+43-task corpus remain later milestones.
+
 ## Contract workflow
 
 ```bash
@@ -98,5 +155,5 @@ npm test
 Generated schemas are committed. `check:schemas` is read-only and fails when a generated document is missing,
 stale, or unexpected.
 
-RepoFixLab does not modify Pi's agent loop. Later milestones integrate through the public
-`@earendil-works/pi-coding-agent` session API.
+RepoFixLab does not modify Pi's agent loop. M1 integrates through the public
+`@earendil-works/pi-coding-agent` session API; RepoFix workflow extensions remain later milestones.

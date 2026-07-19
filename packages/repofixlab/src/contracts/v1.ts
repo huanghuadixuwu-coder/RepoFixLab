@@ -1,4 +1,14 @@
 import { type Static, type TSchema, Type } from "typebox";
+import { ExperimentPlanSchema } from "./experiment-plan.ts";
+import {
+	ArtifactIndexSchema,
+	AttemptSchema,
+	EvaluationResultSchema,
+	PatchSnapshotSchema,
+	RunEventSchema,
+	RunManifestSchema,
+	RunResultSchema,
+} from "./run-contracts.ts";
 
 export const CONTRACT_VERSION = "v1" as const;
 export const DATASET_PREPARER_SELF_CHECK_CONSTANTS = {
@@ -1360,16 +1370,24 @@ export interface VersionedSchema {
 }
 
 export const V1_SCHEMAS = [
+	{ fileName: "artifact-index.schema.json", schema: ArtifactIndexSchema },
+	{ fileName: "attempt.schema.json", schema: AttemptSchema },
 	{ fileName: "bootstrap-doctor-report.schema.json", schema: BootstrapDoctorReportSchema },
 	{ fileName: "controller-bootstrap-health.schema.json", schema: ControllerBootstrapHealthSchema },
 	{ fileName: "dataset-lock.schema.json", schema: DatasetLockSchema },
 	{ fileName: "dataset-preparer-self-check-report.schema.json", schema: DatasetPreparerSelfCheckReportSchema },
+	{ fileName: "evaluation-result.schema.json", schema: EvaluationResultSchema },
+	{ fileName: "experiment-plan.schema.json", schema: ExperimentPlanSchema },
 	{ fileName: "official-image-source-lock.schema.json", schema: OfficialImageSourceLockSchema },
 	{ fileName: "official-harness-source-lock.schema.json", schema: OfficialHarnessSourceLockSchema },
 	{ fileName: "harness-probe-report.schema.json", schema: HarnessProbeReportSchema },
 	{ fileName: "harness-equivalence-report.schema.json", schema: HarnessEquivalenceReportSchema },
+	{ fileName: "patch-snapshot.schema.json", schema: PatchSnapshotSchema },
 	{ fileName: "pristine-runtime-lock.schema.json", schema: PristineRuntimeLockSchema },
 	{ fileName: "public-task-manifest.schema.json", schema: PublicTaskManifestSchema },
+	{ fileName: "run-event.schema.json", schema: RunEventSchema },
+	{ fileName: "run-manifest.schema.json", schema: RunManifestSchema },
+	{ fileName: "run-result.schema.json", schema: RunResultSchema },
 	{ fileName: "smoke-doctor-report.schema.json", schema: SmokeDoctorReportSchema },
 	{ fileName: "task-environment-candidate-build-input.schema.json", schema: TaskEnvironmentCandidateBuildInputSchema },
 	{ fileName: "task-environment-candidate.schema.json", schema: TaskEnvironmentCandidateSchema },

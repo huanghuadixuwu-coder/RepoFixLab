@@ -1,0 +1,38 @@
+{
+  "schema_version": "v1",
+  "result_type": "evaluation",
+  "evaluation_id": "evaluation-cross-language-1",
+  "job_id": "job-cross-language-1",
+  "run_id": "run-cross-language-1",
+  "attempt_id": "attempt-cross-language-1",
+  "instance_id": "axios__axios-5892",
+  "harness_mode": "adapted",
+  "harness_revision": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+  "status": "completed",
+  "resolved": true,
+  "candidate_patch_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "candidate_patch_apply_status": "applied",
+  "test_patch_apply_status": "applied",
+  "test_executed": true,
+  "test_collected": true,
+  "fail_to_pass": {
+    "success": ["fixes compression"],
+    "failure": []
+  },
+  "pass_to_pass": {
+    "success": ["preserves redirects"],
+    "failure": []
+  },
+  "exit_code": 0,
+  "timed_out": false,
+  "duration_ms": 41,
+  "test_log": {
+    "path": "evaluator.log",
+    "bytes": 54,
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "official_report_sha256": null,
+  "error_class": null,
+  "finished_at": "2026-07-19T00:00:00.000Z",
+  "evaluation_sha256": "f853dfe48cd447600d99a91f005d5f31f25317a6af08634e99f67ccb46b59df2"
+}

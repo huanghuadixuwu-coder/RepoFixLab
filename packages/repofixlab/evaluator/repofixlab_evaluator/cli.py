@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from .agent_patch import evaluate_agent_patch
 from .canonical import canonical_json
 from .errors import EvaluationError
 from .official_oracle import normalize_pristine_report, run_official_oracle
@@ -99,6 +100,23 @@ def _pristine(args: argparse.Namespace) -> dict[str, object]:
     )
 
 
+def _agent_patch(args: argparse.Namespace) -> dict[str, object]:
+    return evaluate_agent_patch(
+        private_spec_path=args.private_spec,
+        private_root=args.private_root,
+        workspace=args.workspace,
+        candidate_root=args.candidate_root,
+        evidence_root=args.evidence_root,
+        candidate_patch_sha256=args.candidate_patch_sha256,
+        private_spec_sha256=args.private_spec_sha256,
+        evaluation_id=args.evaluation_id,
+        job_id=args.job_id,
+        run_id=args.run_id,
+        attempt_id=args.attempt_id,
+        timeout_seconds=args.timeout_seconds,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="repofixlab-evaluator")
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -124,12 +142,30 @@ def build_parser() -> argparse.ArgumentParser:
     pristine.add_argument("--test-log", type=Path)
     pristine.add_argument("--metadata", type=Path, required=True)
     pristine.add_argument("--pristine-runtime-lock-sha256", required=True)
+    agent_patch = subparsers.add_parser("agent-patch")
+    agent_patch.add_argument("--private-spec", type=Path, required=True)
+    agent_patch.add_argument("--private-root", type=Path, required=True)
+    agent_patch.add_argument("--workspace", type=Path, required=True)
+    agent_patch.add_argument("--candidate-root", type=Path, required=True)
+    agent_patch.add_argument("--candidate-patch-sha256", required=True)
+    agent_patch.add_argument("--private-spec-sha256", required=True)
+    agent_patch.add_argument("--evidence-root", type=Path, required=True)
+    agent_patch.add_argument("--evaluation-id", required=True)
+    agent_patch.add_argument("--job-id", required=True)
+    agent_patch.add_argument("--run-id", required=True)
+    agent_patch.add_argument("--attempt-id", required=True)
+    agent_patch.add_argument("--timeout-seconds", type=int, default=300, choices=range(1, 301))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.mode == "agent-patch":
+            report = _agent_patch(args)
+            content = canonical_json(report)
+            sys.stdout.buffer.write(content)
+            return 0
         _validate_output(args.report_output, args.evidence_root)
         report = _adapted(args) if args.mode == "adapted" else _pristine(args)
         content = canonical_json(report)

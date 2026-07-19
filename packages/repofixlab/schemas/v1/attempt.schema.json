@@ -1,0 +1,194 @@
+{
+	"$id": "urn:repofixlab:schema:v1:attempt",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"accounted_tokens": {
+			"minimum": 0,
+			"type": "integer"
+		},
+		"attempt_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"attempt_number": {
+			"minimum": 1,
+			"type": "integer"
+		},
+		"attempt_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"evaluator_job_id": {
+			"anyOf": [
+				{
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"finished_at": {
+			"anyOf": [
+				{
+					"maxLength": 64,
+					"minLength": 20,
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T.*Z$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"provider_actual_tokens": {
+			"anyOf": [
+				{
+					"minimum": 0,
+					"type": "integer"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"record_type": {
+			"const": "attempt",
+			"type": "string"
+		},
+		"run_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"started_at": {
+			"anyOf": [
+				{
+					"maxLength": 64,
+					"minLength": 20,
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T.*Z$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "queued",
+					"type": "string"
+				},
+				{
+					"const": "preparing",
+					"type": "string"
+				},
+				{
+					"const": "running",
+					"type": "string"
+				},
+				{
+					"const": "evaluating",
+					"type": "string"
+				},
+				{
+					"const": "completed",
+					"type": "string"
+				},
+				{
+					"const": "failed",
+					"type": "string"
+				},
+				{
+					"const": "aborted",
+					"type": "string"
+				}
+			]
+		},
+		"termination_reason": {
+			"anyOf": [
+				{
+					"anyOf": [
+						{
+							"const": "agent_completed",
+							"type": "string"
+						},
+						{
+							"const": "model_error",
+							"type": "string"
+						},
+						{
+							"const": "tool_error",
+							"type": "string"
+						},
+						{
+							"const": "budget_exhausted",
+							"type": "string"
+						},
+						{
+							"const": "wall_time_exceeded",
+							"type": "string"
+						},
+						{
+							"const": "policy_violation",
+							"type": "string"
+						},
+						{
+							"const": "infrastructure_error",
+							"type": "string"
+						},
+						{
+							"const": "evaluation_error",
+							"type": "string"
+						},
+						{
+							"const": "user_abort",
+							"type": "string"
+						}
+					]
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"usage_complete": {
+			"type": "boolean"
+		},
+		"worker_lease_id": {
+			"anyOf": [
+				{
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		}
+	},
+	"required": [
+		"schema_version",
+		"record_type",
+		"attempt_id",
+		"run_id",
+		"attempt_number",
+		"status",
+		"started_at",
+		"finished_at",
+		"worker_lease_id",
+		"evaluator_job_id",
+		"termination_reason",
+		"accounted_tokens",
+		"provider_actual_tokens",
+		"usage_complete",
+		"attempt_sha256"
+	],
+	"type": "object"
+}

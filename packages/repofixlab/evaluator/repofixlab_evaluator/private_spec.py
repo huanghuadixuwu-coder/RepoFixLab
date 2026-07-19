@@ -10,6 +10,7 @@ from .errors import PrivateSpecError
 INSTANCE_ID = "axios__axios-5892"
 BASE_COMMIT = "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b"
 MAX_PATCH_BYTES = 1024 * 1024
+MAX_CANDIDATE_PATCH_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)

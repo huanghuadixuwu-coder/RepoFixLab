@@ -18,22 +18,33 @@ from .private_spec import MAX_PATCH_BYTES
 
 _DIFF_HEADER = re.compile(r"^diff --git a/([^\s]+) b/([^\s]+)$")
 _FILE_HEADER = re.compile(r"^(---|\+\+\+) (a/|b/)([^\s]+)(?:\t.*)?$")
-_DENIED_COMPONENTS = {".git", ".repofixlab", "node_modules"}
+_PATH_METADATA_HEADER = re.compile(r"^(?:rename|copy) (?:from|to) ([^\s]+)$")
+_DENIED_PATCH_MODE = re.compile(r"^(?:old|new|deleted file|new file) mode (?:120000|160000)$")
+_DENIED_INDEX_MODE = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+ (?:120000|160000)$")
+_DENIED_COMPONENTS = {".git", ".gitmodules", ".repofixlab", "node_modules"}
 
 
 def _validate_relative_path(value: str) -> str:
     path = PurePosixPath(value)
     if not value or value.startswith("/") or "\\" in value or path.is_absolute():
         raise PatchPolicyError("patch path is not a relative POSIX path")
-    if any(part in {"", ".", ".."} or part in _DENIED_COMPONENTS for part in path.parts):
+    if value != path.as_posix() or any(
+        part in {"", ".", ".."} or part in _DENIED_COMPONENTS for part in path.parts
+    ):
         raise PatchPolicyError("patch path contains a denied component")
     return path.as_posix()
 
 
-def validate_patch(patch: bytes, workspace: Path, *, test_patch: bool) -> frozenset[str]:
+def validate_patch(
+    patch: bytes,
+    workspace: Path,
+    *,
+    test_patch: bool,
+    maximum_bytes: int = MAX_PATCH_BYTES,
+) -> frozenset[str]:
     error_type = TestPatchPolicyError if test_patch else PatchPolicyError
     try:
-        if not patch or len(patch) > MAX_PATCH_BYTES or b"\x00" in patch:
+        if not patch or len(patch) > maximum_bytes or b"\x00" in patch:
             raise PatchPolicyError("patch violates size or content policy")
         text = patch.decode("utf-8")
         paths: set[str] = set()
@@ -47,8 +58,15 @@ def validate_patch(patch: bytes, workspace: Path, *, test_patch: bool) -> frozen
                 continue
             header = _FILE_HEADER.match(line)
             if header is not None:
+                if (header.group(1), header.group(2)) not in {("---", "a/"), ("+++", "b/")}:
+                    raise PatchPolicyError("patch contains a non-canonical file header")
                 paths.add(_validate_relative_path(header.group(3)))
-            if line in {"new file mode 120000", "deleted file mode 120000", "new file mode 160000", "deleted file mode 160000"}:
+            elif line.startswith(("--- ", "+++ ")) and line not in {"--- /dev/null", "+++ /dev/null"}:
+                raise PatchPolicyError("patch contains a non-canonical file header")
+            metadata_header = _PATH_METADATA_HEADER.match(line)
+            if metadata_header is not None:
+                paths.add(_validate_relative_path(metadata_header.group(1)))
+            if _DENIED_PATCH_MODE.match(line) is not None or _DENIED_INDEX_MODE.match(line) is not None:
                 raise PatchPolicyError("symlink and submodule patch modes are denied")
         if diff_count == 0 or not paths:
             raise PatchPolicyError("patch has no strict git diff headers")

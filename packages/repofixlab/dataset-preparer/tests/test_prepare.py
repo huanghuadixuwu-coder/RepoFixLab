@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +72,18 @@ class PrepareTest(unittest.TestCase):
             verify_generation(lock, roots)
             self.assertEqual(lock["record_count"], 43)
             self.assertEqual(len(make_rows()), EXPECTED_SOURCE_RECORD_COUNT)
+            for scope_root in roots.values():
+                self.assertEqual(stat.S_IMODE(scope_root.stat().st_mode), 0o755)
+                for path in scope_root.rglob("*"):
+                    if path.is_dir():
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+                    elif path.is_file():
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+                    else:
+                        self.fail(f"unexpected dataset entry type: {path}")
+            # Dataset volume topology controls scope authorization; readable immutable
+            # files allow authorized containers with distinct non-root UIDs to consume it.
+
             self.assertTrue(all((path / "SEAL").is_file() for path in roots.values()))
             public_text = (request.public_root / "tasks.jsonl").read_text(encoding="utf-8")
             self.assertNotIn("gold_patch", public_text)

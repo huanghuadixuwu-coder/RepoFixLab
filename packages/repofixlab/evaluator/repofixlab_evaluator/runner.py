@@ -16,7 +16,7 @@ from .errors import (
     TapParseError,
 )
 from .patches import GitRepository, reject_path_conflict, validate_patch
-from .private_spec import MAX_PATCH_BYTES, PrivateEvaluationSpec
+from .private_spec import MAX_CANDIDATE_PATCH_BYTES, MAX_PATCH_BYTES, PrivateEvaluationSpec
 from .tap import parse_tap
 
 HARNESS_REVISION = "726c5461e2ef52d83cf1ea2107870a8bb3328d57"
@@ -31,6 +31,7 @@ TEST_COMMAND = (
     "compression",
 )
 MAX_TEST_LOG_BYTES = 32 * 1024 * 1024
+MAX_PERSISTED_EVALUATOR_LOG_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,21 @@ def _write_log_exclusive(path: Path, evidence_root: Path, content: bytes) -> Non
         os.close(descriptor)
 
 
+def _persisted_log(log: bytes, maximum_bytes: int | None) -> bytes:
+    if maximum_bytes is None or len(log) <= maximum_bytes:
+        return log
+    marker = (
+        "\n--- REPOFIXLAB EVALUATOR LOG TRUNCATED "
+        f"original_bytes={len(log)} retained=head+tail ---\n"
+    ).encode("ascii")
+    if len(marker) >= maximum_bytes:
+        raise EvaluationError("persisted evaluator log limit cannot contain its marker")
+    retained_bytes = maximum_bytes - len(marker)
+    head_bytes = retained_bytes // 2
+    tail_bytes = retained_bytes - head_bytes
+    return log[:head_bytes] + marker + log[-tail_bytes:]
+
+
 def _partition(expected: tuple[str, ...], statuses: dict[str, str]) -> dict[str, list[str]]:
     success = sorted(name for name in expected if statuses.get(name) in {"passed", "xfailed"})
     failure = sorted(name for name in expected if name not in success)
@@ -247,6 +263,47 @@ class EvaluationKernel:
             candidate_patch = None
         if probe_kind == "no_op" and candidate_patch != b"":
             raise ValueError("no-op probe must use the empty patch")
+        return self._evaluate_loaded_patch(
+            probe_kind=probe_kind,
+            spec=spec,
+            official_source_lock_sha256=official_source_lock_sha256,
+            pristine_runtime_lock_sha256=pristine_runtime_lock_sha256,
+            candidate_patch=candidate_patch,
+            log_output_path=log_output_path,
+            candidate_patch_max_bytes=MAX_PATCH_BYTES,
+            persisted_log_max_bytes=None,
+        )
+
+    def evaluate_agent_patch(
+        self,
+        *,
+        spec: PrivateEvaluationSpec,
+        candidate_patch: bytes,
+        log_output_path: Path,
+    ) -> dict[str, object]:
+        return self._evaluate_loaded_patch(
+            probe_kind="agent_patch",
+            spec=spec,
+            official_source_lock_sha256="0" * 64,
+            pristine_runtime_lock_sha256="0" * 64,
+            candidate_patch=candidate_patch,
+            log_output_path=log_output_path,
+            candidate_patch_max_bytes=MAX_CANDIDATE_PATCH_BYTES,
+            persisted_log_max_bytes=MAX_PERSISTED_EVALUATOR_LOG_BYTES,
+        )
+
+    def _evaluate_loaded_patch(
+        self,
+        *,
+        probe_kind: str,
+        spec: PrivateEvaluationSpec,
+        official_source_lock_sha256: str,
+        pristine_runtime_lock_sha256: str,
+        candidate_patch: bytes | None,
+        log_output_path: Path,
+        candidate_patch_max_bytes: int,
+        persisted_log_max_bytes: int | None,
+    ) -> dict[str, object]:
         candidate_hash = None if candidate_patch is None else sha256_bytes(candidate_patch)
         test_patch_hash = sha256_bytes(spec.test_patch)
         report = _base_report(
@@ -262,7 +319,12 @@ class EvaluationKernel:
             test_paths = validate_patch(spec.test_patch, self.workspace, test_patch=True)
             if candidate_patch is not None and candidate_patch:
                 try:
-                    candidate_paths = validate_patch(candidate_patch, self.workspace, test_patch=False)
+                    candidate_paths = validate_patch(
+                        candidate_patch,
+                        self.workspace,
+                        test_patch=False,
+                        maximum_bytes=candidate_patch_max_bytes,
+                    )
                 except PatchPolicyError as error:
                     if probe_kind == "malformed":
                         raise PatchApplyError("malformed probe failed patch application") from error
@@ -274,14 +336,15 @@ class EvaluationKernel:
             self.repository.apply_test_patch(spec.test_patch)
             report["test_patch_apply_status"] = "applied"
             result = self.executor.execute(TEST_COMMAND, self.workspace, self.timeout_seconds)
-            _write_log_exclusive(log_output_path, self.evidence_root, result.log)
+            persisted_log = _persisted_log(result.log, persisted_log_max_bytes)
+            _write_log_exclusive(log_output_path, self.evidence_root, persisted_log)
             report.update(
                 {
                     "test_executed": True,
                     "exit_code": result.exit_code,
                     "timed_out": result.timed_out,
                     "duration_ms": result.duration_ms,
-                    "test_log_sha256": sha256_bytes(result.log),
+                    "test_log_sha256": sha256_bytes(persisted_log),
                 }
             )
             parsed = parse_tap(result.log)
@@ -331,7 +394,7 @@ class EvaluationKernel:
         finally:
             try:
                 self.repository.reset_and_verify_base()
-            except EvaluationError:
+            except (EvaluationError, OSError, subprocess.SubprocessError):
                 if report["error_class"] is None:
                     report["error_class"] = "base_state_error"
                     report["resolved"] = False

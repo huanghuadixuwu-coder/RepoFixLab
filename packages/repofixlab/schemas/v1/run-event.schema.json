@@ -1,0 +1,229 @@
+{
+	"$id": "urn:repofixlab:schema:v1:run-event",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"artifact_sha256": {
+			"anyOf": [
+				{
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"at": {
+			"maxLength": 64,
+			"minLength": 20,
+			"pattern": "^\\d{4}-\\d{2}-\\d{2}T.*Z$",
+			"type": "string"
+		},
+		"attempt_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"event_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"event_type": {
+			"anyOf": [
+				{
+					"const": "manifest_loaded",
+					"type": "string"
+				},
+				{
+					"const": "attempt_started",
+					"type": "string"
+				},
+				{
+					"const": "worker_prepared",
+					"type": "string"
+				},
+				{
+					"const": "tool_started",
+					"type": "string"
+				},
+				{
+					"const": "tool_finished",
+					"type": "string"
+				},
+				{
+					"const": "agent_finished",
+					"type": "string"
+				},
+				{
+					"const": "patch_snapshotted",
+					"type": "string"
+				},
+				{
+					"const": "worker_destroyed",
+					"type": "string"
+				},
+				{
+					"const": "evaluation_started",
+					"type": "string"
+				},
+				{
+					"const": "evaluation_finished",
+					"type": "string"
+				},
+				{
+					"const": "artifact_published",
+					"type": "string"
+				},
+				{
+					"const": "run_finished",
+					"type": "string"
+				},
+				{
+					"const": "failure",
+					"type": "string"
+				}
+			]
+		},
+		"message": {
+			"anyOf": [
+				{
+					"maxLength": 2000,
+					"minLength": 1,
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"operation_id": {
+			"anyOf": [
+				{
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"parameters_sha256": {
+			"anyOf": [
+				{
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"previous_record_sha256": {
+			"anyOf": [
+				{
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"record_type": {
+			"const": "run_event",
+			"type": "string"
+		},
+		"result_sha256": {
+			"anyOf": [
+				{
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"run_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"sequence": {
+			"minimum": 0,
+			"type": "integer"
+		},
+		"stage": {
+			"anyOf": [
+				{
+					"const": "orchestrator",
+					"type": "string"
+				},
+				{
+					"const": "agent",
+					"type": "string"
+				},
+				{
+					"const": "snapshot",
+					"type": "string"
+				},
+				{
+					"const": "cleanup",
+					"type": "string"
+				},
+				{
+					"const": "official_evaluate",
+					"type": "string"
+				},
+				{
+					"const": "report",
+					"type": "string"
+				}
+			]
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "info",
+					"type": "string"
+				},
+				{
+					"const": "success",
+					"type": "string"
+				},
+				{
+					"const": "error",
+					"type": "string"
+				}
+			]
+		},
+		"subject": {
+			"maxLength": 200,
+			"minLength": 1,
+			"type": "string"
+		}
+	},
+	"required": [
+		"schema_version",
+		"record_type",
+		"run_id",
+		"attempt_id",
+		"sequence",
+		"at",
+		"stage",
+		"event_type",
+		"status",
+		"operation_id",
+		"subject",
+		"message",
+		"parameters_sha256",
+		"result_sha256",
+		"artifact_sha256",
+		"previous_record_sha256",
+		"event_sha256"
+	],
+	"type": "object"
+}

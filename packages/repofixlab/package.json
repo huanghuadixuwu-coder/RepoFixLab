@@ -17,6 +17,7 @@
 	},
 	"files": [
 		"dist",
+		"configs",
 		"schemas",
 		"README.md",
 		"CHANGELOG.md"
@@ -31,6 +32,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
+		"@earendil-works/pi-ai": "^0.80.3",
 		"@earendil-works/pi-coding-agent": "^0.80.3",
 		"typebox": "1.1.38",
 		"yaml": "2.9.0"

@@ -2,37 +2,16 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TSchema } from "typebox";
+import { stableStringify } from "./canonical-json.ts";
 import { V1_SCHEMAS } from "./v1.ts";
 
-const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
+export { stableStringify } from "./canonical-json.ts";
 
-type JsonPrimitive = boolean | null | number | string;
-type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
 
 export interface GeneratedSchemaFile {
 	content: string;
 	fileName: string;
-}
-
-function normalizeJson(value: unknown): JsonValue {
-	if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
-		return value;
-	}
-	if (Array.isArray(value)) {
-		return value.map(normalizeJson);
-	}
-	if (typeof value === "object") {
-		return Object.fromEntries(
-			Object.entries(value as Record<string, unknown>)
-				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-				.map(([key, nestedValue]) => [key, normalizeJson(nestedValue)]),
-		);
-	}
-	throw new Error(`Cannot serialize non-JSON schema value of type ${typeof value}`);
-}
-
-export function stableStringify(value: unknown): string {
-	return `${JSON.stringify(normalizeJson(value), undefined, "\t")}\n`;
 }
 
 function renderSchema(schema: TSchema): string {

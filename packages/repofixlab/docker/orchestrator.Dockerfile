@@ -16,9 +16,20 @@ LABEL io.repofixlab.compose-config-sha256="${REPOFIXLAB_COMPOSE_CONFIG_SHA256}"
 ENV NODE_ENV=development
 WORKDIR /workspace
 
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages ./packages
 RUN npm ci --ignore-scripts
+# The pi-ai npm build refreshes model catalogs from the network. Compile the
+# repository-locked generated sources directly for a deterministic offline image.
+RUN --network=none npm --prefix packages/tui run build \
+	&& ./node_modules/.bin/tsgo -p packages/ai/tsconfig.build.json \
+	&& npm --prefix packages/agent run build \
+	&& npm --prefix packages/coding-agent run build \
+	&& npm --prefix packages/repofixlab run build
+RUN --network=none node --check packages/repofixlab/docker/public-volume-permissions.mjs \
+	&& node --check packages/repofixlab/docker/private-volume-permissions.mjs \
+	&& node packages/repofixlab/docker/orchestrator-module-smoke.mjs
 
+ENV NODE_ENV=production
 USER node
-ENTRYPOINT ["node", "packages/repofixlab/src/cli/main.ts"]
+ENTRYPOINT ["node", "packages/repofixlab/dist/cli/main.js"]

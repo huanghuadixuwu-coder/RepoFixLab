@@ -122,9 +122,20 @@ describe("parseCliArgs", () => {
 	});
 
 	it.each([
+		[["run", "--config", "configs/experiments/m1-axios.yaml"], false],
+		[["run", "--config", "plans/custom.yaml", "--dry-run"], true],
+	] as const)("parses run args %j", (args, dryRun) => {
+		expect(parseCliArgs(args)).toEqual({
+			ok: true,
+			command: { kind: "run", config: args[2], dryRun },
+		});
+	});
+
+	it.each([
 		[["--help"], { kind: "help" }],
 		[["-h", "doctor"], { kind: "help", topic: "doctor" }],
 		[["help", "doctor"], { kind: "help", topic: "doctor" }],
+		[["help", "run"], { kind: "help", topic: "run" }],
 		[["--version"], { kind: "version" }],
 		[["version"], { kind: "version" }],
 	] as const)("parses informational args %j", (args, command) => {
@@ -137,7 +148,7 @@ describe("parseCliArgs", () => {
 		if (!result.ok) expect(result.error.code).toBe("unknown_option");
 	});
 
-	it.each(["--profile", "--input", "--candidate", "--operation-id", "--output"])(
+	it.each(["--profile", "--input", "--candidate", "--operation-id", "--output", "--config"])(
 		"rejects a missing value for %s",
 		(option) => {
 			const result = parseCliArgs(["doctor", option]);
@@ -257,8 +268,19 @@ describe("parseCliArgs", () => {
 		if (!result.ok) expect(result.error.code).toBe("unknown_option");
 	});
 
+	it.each([
+		[["run"], "invalid_config"],
+		[["run", "--config", ""], "invalid_config"],
+		[["run", "--config", "plan.yaml", "--profile", "formal"], "conflicting_action"],
+		[["doctor", "--profile", "formal", "--dry-run"], "conflicting_action"],
+	] as const)("rejects invalid run args %j", (args, errorCode) => {
+		const result = parseCliArgs(args);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.code).toBe(errorCode);
+	});
+
 	it("rejects an unknown command", () => {
-		const result = parseCliArgs(["run"]);
+		const result = parseCliArgs(["unsupported"]);
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error.code).toBe("unknown_command");
 	});

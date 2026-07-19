@@ -413,6 +413,11 @@ class TrustedCandidate:
     base_commit: str
     probe_sha256: str
     sanitizer_sha256: str
+    adapter_sha256: str
+    dataset_lock_id: str
+    dataset_lock_sha256: str
+    official_image_source_lock_id: str
+    filesystem_profile_sha256: str
     definition: CandidateLaunchDefinition
 
 
@@ -498,6 +503,30 @@ class TrustedCandidateCatalog:
             sanitizer_sha256 = _required_string(
                 value.get("sanitizer_sha256"), "candidate sanitizer SHA-256"
             )
+            adapter_sha256 = _required_string(
+                value.get("adapter_sha256"), "candidate adapter SHA-256"
+            )
+            dataset_lock = _required_mapping(
+                value.get("dataset_lock"), "candidate dataset lock"
+            )
+            official_lock = _required_mapping(
+                value.get("official_image_source_lock"),
+                "candidate official image source lock",
+            )
+            filesystem_profile_sha256 = _canonical_sha256(
+                {
+                    "schema_version": "v1",
+                    "aggregate_type": "task_environment_filesystem_profiles",
+                    "worker": _required_mapping(
+                        worker_value.get("filesystem_profile"),
+                        "worker filesystem profile",
+                    ),
+                    "evaluator": _required_mapping(
+                        evaluator_value.get("filesystem_profile"),
+                        "evaluator filesystem profile",
+                    ),
+                }
+            )
             definition = CandidateLaunchDefinition(
                 candidate_sha256=candidate_sha256,
                 instance_id=instance_id,
@@ -513,6 +542,19 @@ class TrustedCandidateCatalog:
                 base_commit=base_commit,
                 probe_sha256=probe_sha256,
                 sanitizer_sha256=sanitizer_sha256,
+                adapter_sha256=adapter_sha256,
+                dataset_lock_id=_required_string(
+                    dataset_lock.get("lock_id"), "candidate dataset lock ID"
+                ),
+                dataset_lock_sha256=_required_string(
+                    dataset_lock.get("lock_sha256"),
+                    "candidate dataset lock SHA-256",
+                ),
+                official_image_source_lock_id=_required_string(
+                    official_lock.get("lock_id"),
+                    "candidate official image source lock ID",
+                ),
+                filesystem_profile_sha256=filesystem_profile_sha256,
                 definition=definition,
             )
         return cls(candidates)

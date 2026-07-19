@@ -1,0 +1,269 @@
+{
+	"$id": "urn:repofixlab:schema:v1:evaluation-result",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"attempt_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"candidate_patch_apply_status": {
+			"anyOf": [
+				{
+					"const": "applied",
+					"type": "string"
+				},
+				{
+					"const": "rejected",
+					"type": "string"
+				},
+				{
+					"const": "error",
+					"type": "string"
+				}
+			]
+		},
+		"candidate_patch_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"duration_ms": {
+			"minimum": 0,
+			"type": "integer"
+		},
+		"error_class": {
+			"anyOf": [
+				{
+					"pattern": "^[a-z][a-z0-9_]{0,99}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"evaluation_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"evaluation_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"exit_code": {
+			"anyOf": [
+				{
+					"type": "integer"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"fail_to_pass": {
+			"additionalProperties": false,
+			"properties": {
+				"failure": {
+					"items": {
+						"maxLength": 1000,
+						"minLength": 1,
+						"type": "string"
+					},
+					"maxItems": 10000,
+					"type": "array"
+				},
+				"success": {
+					"items": {
+						"maxLength": 1000,
+						"minLength": 1,
+						"type": "string"
+					},
+					"maxItems": 10000,
+					"type": "array"
+				}
+			},
+			"required": [
+				"success",
+				"failure"
+			],
+			"type": "object"
+		},
+		"finished_at": {
+			"maxLength": 64,
+			"minLength": 20,
+			"pattern": "^\\d{4}-\\d{2}-\\d{2}T.*Z$",
+			"type": "string"
+		},
+		"harness_mode": {
+			"const": "adapted",
+			"type": "string"
+		},
+		"harness_revision": {
+			"pattern": "^[a-f0-9]{40}$",
+			"type": "string"
+		},
+		"instance_id": {
+			"maxLength": 200,
+			"minLength": 1,
+			"type": "string"
+		},
+		"job_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"official_report_sha256": {
+			"anyOf": [
+				{
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"pass_to_pass": {
+			"additionalProperties": false,
+			"properties": {
+				"failure": {
+					"items": {
+						"maxLength": 1000,
+						"minLength": 1,
+						"type": "string"
+					},
+					"maxItems": 10000,
+					"type": "array"
+				},
+				"success": {
+					"items": {
+						"maxLength": 1000,
+						"minLength": 1,
+						"type": "string"
+					},
+					"maxItems": 10000,
+					"type": "array"
+				}
+			},
+			"required": [
+				"success",
+				"failure"
+			],
+			"type": "object"
+		},
+		"resolved": {
+			"type": "boolean"
+		},
+		"result_type": {
+			"const": "evaluation",
+			"type": "string"
+		},
+		"run_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "completed",
+					"type": "string"
+				},
+				{
+					"const": "failed",
+					"type": "string"
+				}
+			]
+		},
+		"test_collected": {
+			"type": "boolean"
+		},
+		"test_executed": {
+			"type": "boolean"
+		},
+		"test_log": {
+			"anyOf": [
+				{
+					"additionalProperties": false,
+					"properties": {
+						"bytes": {
+							"minimum": 0,
+							"type": "integer"
+						},
+						"path": {
+							"pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+							"type": "string"
+						},
+						"sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						}
+					},
+					"required": [
+						"path",
+						"bytes",
+						"sha256"
+					],
+					"type": "object"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"test_patch_apply_status": {
+			"anyOf": [
+				{
+					"const": "applied",
+					"type": "string"
+				},
+				{
+					"const": "rejected",
+					"type": "string"
+				},
+				{
+					"const": "error",
+					"type": "string"
+				},
+				{
+					"const": "not_run",
+					"type": "string"
+				}
+			]
+		},
+		"timed_out": {
+			"type": "boolean"
+		}
+	},
+	"required": [
+		"schema_version",
+		"result_type",
+		"evaluation_id",
+		"job_id",
+		"run_id",
+		"attempt_id",
+		"instance_id",
+		"harness_mode",
+		"harness_revision",
+		"status",
+		"resolved",
+		"candidate_patch_sha256",
+		"candidate_patch_apply_status",
+		"test_patch_apply_status",
+		"test_executed",
+		"test_collected",
+		"fail_to_pass",
+		"pass_to_pass",
+		"exit_code",
+		"timed_out",
+		"duration_ms",
+		"test_log",
+		"official_report_sha256",
+		"error_class",
+		"finished_at",
+		"evaluation_sha256"
+	],
+	"type": "object"
+}

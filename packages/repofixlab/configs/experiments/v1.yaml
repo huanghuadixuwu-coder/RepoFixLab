@@ -1,0 +1,33 @@
+schema_version: v1
+plan_type: experiment_capacity
+experiment_id: repofixlab-v1
+task_selection:
+  status: pending_m3
+  declared_task_count: 30
+matrix:
+  - group_id: main
+    task_count: 30
+    config_ids:
+      - pi-general
+      - repofix-full
+    replicates: 1
+  - group_id: ablation-no-localize
+    task_count: 15
+    config_ids:
+      - repofix-no-localize
+    replicates: 1
+  - group_id: ablation-no-verify-feedback
+    task_count: 15
+    config_ids:
+      - repofix-no-verify-feedback
+    replicates: 1
+  - group_id: stability-additional
+    task_count: 10
+    config_ids:
+      - pi-general
+      - repofix-full
+    replicates: 2
+budget:
+  per_run_accounted_admission_cap_tokens: 200000
+  total_accounted_admission_cap_tokens: 26000000
+runtime_status: lifecycle_unavailable

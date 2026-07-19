@@ -38,6 +38,8 @@ out.html
 packages/coding-agent/binaries/
 todo.md
 plans/
+!docs/plans/
+!docs/plans/repofixlab-execution-plan.md
 .pi/hf-sessions/
 .pi/hf-sessions-backup/
 collect.sh

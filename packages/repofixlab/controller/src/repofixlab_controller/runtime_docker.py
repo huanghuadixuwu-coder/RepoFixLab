@@ -1,0 +1,1512 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+import base64
+import hashlib
+import io
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import socket
+import tarfile
+from time import monotonic, sleep
+from types import MappingProxyType
+
+from jsonschema import Draft202012Validator
+
+from .container_factory import DockerClientProtocol, RoleLaunchPolicy
+from .factory_service import (
+    TrustedCandidate,
+    TrustedCandidateCatalog,
+    validate_candidate_images,
+)
+from .runtime_service import (
+    RuntimeCleanupResult,
+    RuntimeJobStatus,
+    RuntimePreflightManifest,
+    RuntimeServiceUnavailable,
+)
+from .runtime_tools import (
+    RUNTIME_TOOL_NAMES,
+    RuntimeSnapshotEvidence,
+    RuntimeSnapshotFile,
+    RuntimeToolError,
+    RuntimeToolName,
+    RuntimeToolResult,
+)
+
+
+RUNTIME_PRIVATE_VOLUME = "dataset-private-g-20260718-135934-066a8f5b6f6b"
+RUNTIME_PRIVATE_TASK_PATH = "tasks/axios__axios-5892.json"
+RUNTIME_PRIVATE_TASK_BYTES = 5_936
+RUNTIME_PRIVATE_TASK_SHA256 = (
+    "a592340952c75bf326d9ca45bdef7a2e635dcb5648c674e6a9fae25bae165f50"
+)
+RUNTIME_EVALUATOR_ARTIFACTS = (
+    "evaluation.json",
+    "evaluator.log",
+    "patch-apply.json",
+)
+
+_MANAGED_LABEL = "io.repofixlab.runtime.managed"
+_ATTEMPT_LABEL = "io.repofixlab.runtime.attempt-id"
+_CANDIDATE_LABEL = "io.repofixlab.runtime.candidate-id"
+_ROLE_LABEL = "io.repofixlab.runtime.role"
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_IMAGE_ID = re.compile(r"^sha256:[a-f0-9]{64}$")
+_CONTAINER_ID = re.compile(r"^[a-f0-9]{64}$")
+_VOLUME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_GIT_OBJECT_ID = re.compile(r"^[a-f0-9]{40}$")
+_KERNEL_LIMIT_BYTES = 2 * 1024 * 1024
+_KERNEL_FILE_LIMIT = 128
+_ARCHIVE_LIMIT_BYTES = 4 * 1024 * 1024
+_ARTIFACT_LIMIT_BYTES = 1024 * 1024
+_WORKER_HELPER_ROOT = "/tmp/repofixlab-runtime-worker"
+_WORKER_ENTRY = f"{_WORKER_HELPER_ROOT}/runtime_worker_entry.py"
+_EVALUATOR_KERNEL_ROOT = "/tmp/repofixlab-runtime"
+_PRIVATE_ROOT = "/run/repofixlab/private"
+_INPUT_ROOT = "/run/repofixlab/input"
+_EVIDENCE_ROOT = "/run/repofixlab/evidence"
+_WORKSPACE_ROOT = "/testbed"
+
+_KEEPALIVE_SCRIPT = "import signal; signal.pause()"
+_STDIN_WRITE_SCRIPT = r"""
+import hashlib
+import os
+from pathlib import PurePosixPath
+import stat
+import sys
+
+root, relative, expected_size_text, expected_sha256 = sys.argv[1:]
+expected_size = int(expected_size_text)
+pure = PurePosixPath(relative)
+if pure.is_absolute() or not pure.parts or any(part in {'', '.', '..'} for part in pure.parts):
+    raise SystemExit(64)
+flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0)
+directory = os.open(root, flags)
+try:
+    for part in pure.parts[:-1]:
+        try:
+            os.mkdir(part, 0o700, dir_fd=directory)
+        except FileExistsError:
+            pass
+        child = os.open(part, flags, dir_fd=directory)
+        os.close(directory)
+        directory = child
+    target_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(pure.parts[-1], target_flags, 0o400, dir_fd=directory)
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        while received < expected_size:
+            chunk = sys.stdin.buffer.read(min(65536, expected_size - received))
+            if not chunk:
+                raise SystemExit(65)
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(descriptor, chunk[offset:])
+            digest.update(chunk)
+            received += len(chunk)
+        if sys.stdin.buffer.read(1):
+            raise SystemExit(66)
+        os.fsync(descriptor)
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode) or observed.st_size != expected_size:
+            raise SystemExit(67)
+    except BaseException:
+        os.close(descriptor)
+        os.unlink(pure.parts[-1], dir_fd=directory)
+        raise
+    os.close(descriptor)
+    if digest.hexdigest() != expected_sha256:
+        os.unlink(pure.parts[-1], dir_fd=directory)
+        raise SystemExit(68)
+finally:
+    os.close(directory)
+""".strip()
+_VERIFY_FILE_SCRIPT = r"""
+import hashlib
+import os
+import stat
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+try:
+    observed = os.fstat(descriptor)
+    if not stat.S_ISREG(observed.st_mode):
+        raise SystemExit(64)
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = os.read(descriptor, 65536)
+        if not chunk:
+            break
+        size += len(chunk)
+        digest.update(chunk)
+finally:
+    os.close(descriptor)
+print(f'{size}:{digest.hexdigest()}')
+""".strip()
+_PUBLISH_READY_SCRIPT = r"""
+import hashlib
+import os
+import stat
+import sys
+
+source, target, expected_size_text, expected_sha256 = sys.argv[1:]
+descriptor = os.open(source, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+try:
+    observed = os.fstat(descriptor)
+    content = os.read(descriptor, int(expected_size_text) + 1)
+finally:
+    os.close(descriptor)
+if (
+    not stat.S_ISREG(observed.st_mode)
+    or observed.st_size != int(expected_size_text)
+    or hashlib.sha256(content).hexdigest() != expected_sha256
+):
+    raise SystemExit(64)
+os.link(source, target, follow_symlinks=False)
+os.unlink(source)
+print(expected_sha256)
+""".strip()
+_EVALUATOR_WAIT_SCRIPT = r"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+root = Path('/tmp/repofixlab-runtime/repofixlab_evaluator')
+marker = Path('/tmp/repofixlab-runtime/.ready')
+deadline = time.monotonic() + 30
+while not marker.is_file():
+    if time.monotonic() >= deadline:
+        raise SystemExit(70)
+    time.sleep(0.05)
+entries = []
+for path in sorted(root.rglob('*')):
+    relative = path.relative_to(root)
+    if '__pycache__' in relative.parts or path.suffix == '.pyc':
+        continue
+    if path.is_symlink():
+        raise SystemExit(71)
+    if path.is_file():
+        content = path.read_bytes()
+        entries.append({'path': relative.as_posix(), 'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()})
+canonical = (json.dumps({'files': entries}, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
+actual = hashlib.sha256(canonical).hexdigest()
+expected = os.environ.get('REPOFIXLAB_EVALUATOR_KERNEL_SHA256')
+if actual != expected or marker.read_text(encoding='ascii').strip() != expected:
+    raise SystemExit(72)
+environment = dict(os.environ)
+environment['PYTHONPATH'] = '/tmp/repofixlab-runtime'
+os.execvpe('python3', ['python3', '-m', 'repofixlab_evaluator', *sys.argv[1:]], environment)
+""".strip()
+
+
+class RuntimeDockerError(RuntimeError):
+    """The production Docker runtime violated a trusted server-side policy."""
+
+
+@dataclass(frozen=True)
+class RuntimeTaskEnvironmentLock:
+    lock_id: str
+    seal_sha256: str
+    instance_id: str
+    candidate_id: str
+    candidate_sha256: str
+
+
+@dataclass(frozen=True)
+class RuntimeDockerConfiguration:
+    task_environment_lock_path: Path
+    task_environment_lock_schema_path: Path
+    dataset_lock_path: Path
+    dataset_lock_schema_path: Path
+    evaluator_kernel_root: Path
+    evaluator_kernel_sha256: str
+
+
+@dataclass
+class DockerRuntimeWorker:
+    attempt_id: str
+    candidate: TrustedCandidate
+    container: object
+    volumes: tuple[object, ...]
+    labels: Mapping[str, str]
+
+
+@dataclass
+class DockerRuntimeJob:
+    attempt_id: str
+    run_id: str
+    job_id: str
+    evaluation_id: str
+    candidate: TrustedCandidate
+    container: object
+    volumes: tuple[object, ...]
+    labels: Mapping[str, str]
+    artifacts: dict[str, bytes] | None = field(default=None)
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _strict_json(path: Path, maximum_bytes: int) -> Mapping[str, object]:
+    if (
+        not path.is_absolute()
+        or path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size > maximum_bytes
+    ):
+        raise RuntimeDockerError("trusted runtime JSON path violates policy")
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for name, item in pairs:
+            if name in value:
+                raise RuntimeDockerError("trusted runtime JSON contains a duplicate key")
+            value[name] = item
+        return value
+
+    try:
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                RuntimeDockerError("trusted runtime JSON contains a non-finite value")
+            ),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeDockerError("trusted runtime JSON is unreadable") from error
+    if not isinstance(value, Mapping):
+        raise RuntimeDockerError("trusted runtime JSON root is malformed")
+    return value
+
+
+def load_runtime_task_environment_lock(
+    configuration: RuntimeDockerConfiguration,
+    catalog: TrustedCandidateCatalog,
+    *,
+    read_only_check: Callable[[Path], bool],
+) -> RuntimeTaskEnvironmentLock:
+    if not read_only_check(configuration.task_environment_lock_path):
+        raise RuntimeDockerError("TaskEnvironmentLock is not read-only")
+    value = _strict_json(configuration.task_environment_lock_path, 128 * 1024)
+    schema = _strict_json(configuration.task_environment_lock_schema_path, 256 * 1024)
+    Draft202012Validator.check_schema(dict(schema))
+    errors = tuple(Draft202012Validator(dict(schema)).iter_errors(value))
+    if errors:
+        raise RuntimeDockerError("TaskEnvironmentLock does not satisfy its schema")
+    semantic = dict(value)
+    semantic.pop("lock_id", None)
+    semantic.pop("seal_sha256", None)
+    semantic.pop("created_at", None)
+    verification = semantic.get("verification")
+    if not isinstance(verification, Mapping):
+        raise RuntimeDockerError("TaskEnvironmentLock verification is malformed")
+    stable_verification = dict(verification)
+    stable_verification.pop("completed_at", None)
+    semantic["verification"] = stable_verification
+    seal_sha256 = value.get("seal_sha256")
+    lock_id = value.get("lock_id")
+    if (
+        not isinstance(seal_sha256, str)
+        or seal_sha256 != _canonical_sha256(semantic)
+        or not isinstance(lock_id, str)
+        or lock_id
+        != f"task-environment-v1-axios-5892-{seal_sha256[:16]}"
+    ):
+        raise RuntimeDockerError("TaskEnvironmentLock semantic seal is invalid")
+    candidate_id = value.get("candidate_id")
+    if not isinstance(candidate_id, str):
+        raise RuntimeDockerError("TaskEnvironmentLock candidate is malformed")
+    try:
+        candidate = catalog.candidate(candidate_id)
+    except Exception as error:
+        raise RuntimeDockerError("TaskEnvironmentLock candidate is not trusted") from error
+    worker_image = value.get("worker_image")
+    evaluator_image = value.get("evaluator_image")
+    resource_profile = value.get("resource_profile")
+    if not all(
+        isinstance(item, Mapping)
+        for item in (worker_image, evaluator_image, resource_profile)
+    ):
+        raise RuntimeDockerError("TaskEnvironmentLock role bindings are malformed")
+    worker_policy = candidate.definition.worker
+    evaluator_policy = candidate.definition.evaluator
+    assert isinstance(worker_image, Mapping)
+    assert isinstance(evaluator_image, Mapping)
+    assert isinstance(resource_profile, Mapping)
+    if (
+        value.get("instance_id") != candidate.instance_id
+        or value.get("candidate_sha256") != candidate.candidate_sha256
+        or value.get("dataset_lock_id") != candidate.dataset_lock_id
+        or value.get("official_image_source_lock_id")
+        != candidate.official_image_source_lock_id
+        or value.get("filesystem_profile_sha256")
+        != candidate.filesystem_profile_sha256
+        or value.get("sanitizer_sha256") != candidate.sanitizer_sha256
+        or value.get("adapter_sha256") != candidate.adapter_sha256
+        or worker_image.get("local_image_id") != worker_policy.image_id
+        or worker_image.get("provenance_sha256")
+        != worker_policy.provenance_sha256
+        or evaluator_image.get("local_image_id") != evaluator_policy.image_id
+        or evaluator_image.get("provenance_sha256")
+        != evaluator_policy.provenance_sha256
+        or worker_image.get("platform") != "linux/amd64"
+        or evaluator_image.get("platform") != "linux/amd64"
+        or resource_profile.get("cpu_count")
+        != worker_policy.nano_cpus / 1_000_000_000
+        or resource_profile.get("memory_bytes") != worker_policy.memory_bytes
+        or resource_profile.get("pids_limit") != worker_policy.pids_limit
+        or resource_profile.get("network_mode") != "none"
+        or resource_profile.get("read_only_root_filesystem") is not True
+        or worker_policy.nano_cpus != evaluator_policy.nano_cpus
+        or worker_policy.memory_bytes != evaluator_policy.memory_bytes
+        or worker_policy.pids_limit != evaluator_policy.pids_limit
+    ):
+        raise RuntimeDockerError("TaskEnvironmentLock trusted bindings drifted")
+    return RuntimeTaskEnvironmentLock(
+        lock_id=lock_id,
+        seal_sha256=seal_sha256,
+        instance_id=candidate.instance_id,
+        candidate_id=candidate.candidate_id,
+        candidate_sha256=candidate.candidate_sha256,
+    )
+
+
+def validate_runtime_dataset_lock(
+    configuration: RuntimeDockerConfiguration,
+    candidate: TrustedCandidate,
+    *,
+    read_only_check: Callable[[Path], bool],
+) -> None:
+    path = configuration.dataset_lock_path
+    if not read_only_check(path):
+        raise RuntimeDockerError("DatasetLock is not read-only")
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise RuntimeDockerError("DatasetLock is unreadable") from error
+    if len(raw) > 1024 * 1024:
+        raise RuntimeDockerError("DatasetLock exceeds the fixed size limit")
+    value = _strict_json(path, 1024 * 1024)
+    schema = _strict_json(configuration.dataset_lock_schema_path, 256 * 1024)
+    Draft202012Validator.check_schema(dict(schema))
+    if tuple(Draft202012Validator(dict(schema)).iter_errors(value)):
+        raise RuntimeDockerError("DatasetLock does not satisfy its schema")
+    volumes = value.get("volumes")
+    files = value.get("files")
+    if not isinstance(volumes, Mapping) or not isinstance(files, list):
+        raise RuntimeDockerError("DatasetLock runtime bindings are malformed")
+    matching = [
+        item
+        for item in files
+        if isinstance(item, Mapping)
+        and item.get("scope") == "private"
+        and item.get("path") == RUNTIME_PRIVATE_TASK_PATH
+    ]
+    if (
+        value.get("lock_id") != candidate.dataset_lock_id
+        or hashlib.sha256(raw).hexdigest() != candidate.dataset_lock_sha256
+        or volumes.get("private") != RUNTIME_PRIVATE_VOLUME
+        or len(matching) != 1
+        or matching[0].get("bytes") != RUNTIME_PRIVATE_TASK_BYTES
+        or matching[0].get("sha256") != RUNTIME_PRIVATE_TASK_SHA256
+    ):
+        raise RuntimeDockerError("DatasetLock private task binding drifted")
+
+
+def _kernel_entries(root: Path) -> tuple[list[dict[str, object]], int]:
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise RuntimeDockerError("evaluator kernel root violates path policy")
+    resolved = root.resolve(strict=True)
+    entries: list[dict[str, object]] = []
+    total = 0
+    for path in sorted(resolved.rglob("*")):
+        relative = path.relative_to(resolved)
+        if "__pycache__" in relative.parts or path.suffix == ".pyc":
+            continue
+        if path.is_symlink():
+            raise RuntimeDockerError("evaluator kernel contains a symbolic link")
+        if not path.is_file():
+            continue
+        content = path.read_bytes()
+        total += len(content)
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    if not entries or len(entries) > _KERNEL_FILE_LIMIT or total > _KERNEL_LIMIT_BYTES:
+        raise RuntimeDockerError("evaluator kernel exceeds the fixed policy")
+    return entries, total
+
+
+def evaluator_kernel_aggregate(root: Path) -> str:
+    entries, _total = _kernel_entries(root)
+    return _canonical_sha256({"files": entries})
+
+
+def _tar_bytes(files: Mapping[str, bytes]) -> bytes:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        directories: set[str] = set()
+        for name in sorted(files):
+            pure = PurePosixPath(name)
+            if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+                raise RuntimeDockerError("runtime archive path is malformed")
+            current = PurePosixPath()
+            for part in pure.parts[:-1]:
+                current /= part
+                directories.add(current.as_posix())
+        for name in sorted(directories):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o555
+            info.mtime = 0
+            archive.addfile(info)
+        for name, content in sorted(files.items()):
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = 0o444
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(content))
+    value = stream.getvalue()
+    if len(value) > _ARCHIVE_LIMIT_BYTES:
+        raise RuntimeDockerError("runtime archive exceeds the fixed policy")
+    return value
+
+
+def _kernel_material(root: Path, aggregate_sha256: str) -> Mapping[str, bytes]:
+    entries, _total = _kernel_entries(root)
+    files = {
+        f"repofixlab-runtime/repofixlab_evaluator/{entry['path']}": (
+            root / str(entry["path"])
+        ).read_bytes()
+        for entry in entries
+    }
+    files["repofixlab-runtime/.ready.pending"] = (
+        f"{aggregate_sha256}\n".encode("ascii")
+    )
+    return MappingProxyType(files)
+
+
+def _worker_helper_material() -> tuple[Mapping[str, bytes], str]:
+    root = Path(__file__).resolve().parent
+    names = ("runtime_tools.py", "runtime_worker_entry.py")
+    files: dict[str, bytes] = {}
+    entries: list[dict[str, object]] = []
+    for name in names:
+        content = (root / name).read_bytes()
+        files[f"repofixlab-runtime-worker/{name}"] = content
+        entries.append(
+            {
+                "path": name,
+                "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    return MappingProxyType(files), _canonical_sha256({"files": entries})
+
+
+def _labels(attempt_id: str, candidate_id: str, role: str) -> Mapping[str, str]:
+    if _IDENTIFIER.fullmatch(attempt_id) is None:
+        raise RuntimeDockerError("runtime attempt ID is malformed")
+    return MappingProxyType(
+        {
+            _MANAGED_LABEL: "true",
+            _ATTEMPT_LABEL: attempt_id,
+            _CANDIDATE_LABEL: candidate_id,
+            _ROLE_LABEL: role,
+        }
+    )
+
+
+def _filters(attempt_id: str) -> Mapping[str, object]:
+    return {
+        "label": [
+            f"{_MANAGED_LABEL}=true",
+            f"{_ATTEMPT_LABEL}={attempt_id}",
+        ]
+    }
+
+
+def runtime_path_is_read_only(path: Path) -> bool:
+    try:
+        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except OSError as error:
+        raise RuntimeDockerError("trusted runtime mount flags are unavailable") from error
+
+
+class DockerRuntimeBackend:
+    def __init__(
+        self,
+        client: DockerClientProtocol,
+        catalog: TrustedCandidateCatalog,
+        configuration: RuntimeDockerConfiguration,
+        *,
+        read_only_check: Callable[[Path], bool] = runtime_path_is_read_only,
+    ) -> None:
+        if _SHA256.fullmatch(configuration.evaluator_kernel_sha256) is None:
+            raise RuntimeDockerError("evaluator kernel SHA-256 is malformed")
+        aggregate = evaluator_kernel_aggregate(configuration.evaluator_kernel_root)
+        if aggregate != configuration.evaluator_kernel_sha256:
+            raise RuntimeDockerError("evaluator kernel aggregate drifted")
+        validate_candidate_images(client, catalog)
+        self._client = client
+        self._catalog = catalog
+        self._configuration = configuration
+        self._kernel_files = _kernel_material(
+            configuration.evaluator_kernel_root,
+            aggregate,
+        )
+        self._worker_files, self._worker_aggregate = _worker_helper_material()
+        self._task_lock = load_runtime_task_environment_lock(
+            configuration,
+            catalog,
+            read_only_check=read_only_check,
+        )
+        validate_runtime_dataset_lock(
+            configuration,
+            catalog.candidate(self._task_lock.candidate_id),
+            read_only_check=read_only_check,
+        )
+        self._require_private_volume()
+
+    def preflight(
+        self, candidate_id: str, instance_id: str
+    ) -> RuntimePreflightManifest:
+        candidate = self._candidate(candidate_id, instance_id)
+        self._validate_local_images()
+        policy = {
+            "schema_version": "v1",
+            "candidate_sha256": candidate.candidate_sha256,
+            "task_environment_lock_sha256": self._task_lock.seal_sha256,
+            "worker_image_id": candidate.definition.worker.image_id,
+            "evaluator_image_id": candidate.definition.evaluator.image_id,
+            "worker_resources": _resource_identity(candidate.definition.worker),
+            "evaluator_resources": _resource_identity(candidate.definition.evaluator),
+            "worker_helper_sha256": self._worker_aggregate,
+            "evaluator_kernel_sha256": self._configuration.evaluator_kernel_sha256,
+            "private_task_sha256": RUNTIME_PRIVATE_TASK_SHA256,
+            "tools": list(RUNTIME_TOOL_NAMES),
+        }
+        policy_sha256 = _canonical_sha256(policy)
+        return RuntimePreflightManifest(
+            manifest_id=f"runtime-manifest-v1-{policy_sha256[:32]}",
+            candidate_id=candidate.candidate_id,
+            instance_id=candidate.instance_id,
+            policy_sha256=policy_sha256,
+            task_environment_lock_id=self._task_lock.lock_id,
+            task_environment_lock_sha256=self._task_lock.seal_sha256,
+            candidate_sha256=candidate.candidate_sha256,
+            base_commit=candidate.base_commit,
+        )
+
+    def prepare_worker(
+        self, attempt_id: str, candidate_id: str, instance_id: str
+    ) -> object:
+        candidate = self._candidate(candidate_id, instance_id)
+        self._validate_local_images()
+        labels = _labels(attempt_id, candidate_id, "worker")
+        volumes: list[object] = []
+        container: object | None = None
+        try:
+            volume_bindings: dict[str, dict[str, str]] = {}
+            for mount in candidate.definition.worker.managed_volumes:
+                volume = self._create_volume(
+                    _resource_name(attempt_id, "worker", mount.key), labels
+                )
+                volumes.append(volume)
+                volume_bindings[_volume_name(volume)] = {
+                    "bind": mount.target,
+                    "mode": "rw",
+                }
+            container = self._run_container(
+                candidate.definition.worker,
+                name=_resource_name(attempt_id, "worker", "container"),
+                labels=labels,
+                volumes=volume_bindings,
+                command=["-c", _KEEPALIVE_SCRIPT],
+                entrypoint=["python3"],
+                environment={},
+            )
+            worker_roots = _policy_writable_roots(candidate.definition.worker)
+            for relative, content in self._worker_files.items():
+                _inject_file(
+                    container,
+                    f"/tmp/{relative}",
+                    content,
+                    user=candidate.definition.worker.user,
+                    writable_roots=worker_roots,
+                )
+            output = self._exec_json(
+                container,
+                ["python3", _WORKER_ENTRY, "self-check"],
+                user=candidate.definition.worker.user,
+            )
+            if (
+                set(output)
+                != {"schema_version", "response_type", "aggregate_sha256"}
+                or output.get("schema_version") != "v1"
+                or output.get("response_type") != "runtime_worker_self_check"
+                or output.get("aggregate_sha256") != self._worker_aggregate
+            ):
+                raise RuntimeDockerError("worker helper self-check drifted")
+            return DockerRuntimeWorker(
+                attempt_id=attempt_id,
+                candidate=candidate,
+                container=container,
+                volumes=tuple(volumes),
+                labels=labels,
+            )
+        except Exception:
+            self._remove_resources(container, tuple(volumes), attempt_id)
+            raise
+
+    def execute_tool(
+        self,
+        worker: object,
+        tool: RuntimeToolName,
+        arguments: Mapping[str, object],
+    ) -> RuntimeToolResult:
+        handle = _worker_handle(worker)
+        encoded = base64.b64encode(
+            _canonical_bytes({"tool": tool, "input": dict(arguments)})
+        ).decode("ascii")
+        output = self._exec_json(
+            handle.container,
+            ["python3", _WORKER_ENTRY, "tool", encoded],
+            user=handle.candidate.definition.worker.user,
+            tool_error=True,
+        )
+        if (
+            set(output) != {"schema_version", "response_type", "result"}
+            or output.get("schema_version") != "v1"
+            or output.get("response_type") != "runtime_worker_tool_result"
+        ):
+            raise RuntimeDockerError("worker tool response envelope drifted")
+        result = output.get("result")
+        if not isinstance(result, Mapping):
+            raise RuntimeDockerError("worker tool result is malformed")
+        return _runtime_tool_result(result, tool)
+
+    def snapshot_patch(self, worker: object) -> RuntimeSnapshotEvidence:
+        handle = _worker_handle(worker)
+        output = self._exec_json(
+            handle.container,
+            ["python3", _WORKER_ENTRY, "snapshot"],
+            user=handle.candidate.definition.worker.user,
+        )
+        return _snapshot_evidence(output)
+
+    def destroy_worker(self, worker: object) -> RuntimeCleanupResult:
+        handle = _worker_handle(worker)
+        return self._remove_resources(
+            handle.container,
+            handle.volumes,
+            handle.attempt_id,
+        )
+
+    def start_evaluation(
+        self,
+        attempt_id: str,
+        run_id: str,
+        job_id: str,
+        evaluation_id: str,
+        candidate_id: str,
+        instance_id: str,
+        patch: bytes,
+    ) -> object:
+        candidate = self._candidate(candidate_id, instance_id)
+        for identifier in (run_id, job_id, evaluation_id):
+            if _IDENTIFIER.fullmatch(identifier) is None:
+                raise RuntimeDockerError("evaluation identity is malformed")
+        self._validate_local_images()
+        self._require_private_volume()
+        labels = _labels(attempt_id, candidate_id, "evaluator")
+        created: list[object] = []
+        seed: object | None = None
+        evaluator: object | None = None
+        try:
+            workspace = self._create_volume(
+                _resource_name(attempt_id, "evaluator", "testbed"), labels
+            )
+            input_volume = self._create_volume(
+                _resource_name(attempt_id, "evaluator", "input"), labels
+            )
+            evidence = self._create_volume(
+                _resource_name(attempt_id, "evaluator", "evidence"), labels
+            )
+            created.extend((workspace, input_volume, evidence))
+            seed = self._run_container(
+                candidate.definition.evaluator,
+                name=_resource_name(attempt_id, "evaluator", "seed"),
+                labels=labels,
+                volumes={
+                    _volume_name(input_volume): {
+                        "bind": _INPUT_ROOT,
+                        "mode": "rw",
+                    }
+                },
+                command=["-c", _KEEPALIVE_SCRIPT],
+                entrypoint=["python3"],
+                environment={},
+            )
+            patch_path = f"{_INPUT_ROOT}/candidate.patch"
+            _inject_file(
+                seed,
+                patch_path,
+                patch,
+                user=candidate.definition.evaluator.user,
+                writable_roots=(_INPUT_ROOT,),
+            )
+            staged_hash = _verified_file_identity(
+                seed,
+                patch_path,
+                user=candidate.definition.evaluator.user,
+            ).split(":", 1)[1]
+            if staged_hash != hashlib.sha256(patch).hexdigest():
+                raise RuntimeDockerError("candidate patch staging hash drifted")
+            _remove_container(seed)
+            seed = None
+            evaluator_command = [
+                "agent-patch",
+                "--private-spec",
+                f"{_PRIVATE_ROOT}/{RUNTIME_PRIVATE_TASK_PATH}",
+                "--private-spec-sha256",
+                RUNTIME_PRIVATE_TASK_SHA256,
+                "--private-root",
+                _PRIVATE_ROOT,
+                "--workspace",
+                _WORKSPACE_ROOT,
+                "--candidate-root",
+                _INPUT_ROOT,
+                "--candidate-patch-sha256",
+                hashlib.sha256(patch).hexdigest(),
+                "--evidence-root",
+                _EVIDENCE_ROOT,
+                "--run-id",
+                run_id,
+                "--attempt-id",
+                attempt_id,
+                "--job-id",
+                job_id,
+                "--evaluation-id",
+                evaluation_id,
+                "--timeout-seconds",
+                str(min(candidate.definition.evaluator.timeout_seconds, 300)),
+            ]
+            evaluator = self._run_container(
+                candidate.definition.evaluator,
+                name=_resource_name(attempt_id, "evaluator", "container"),
+                labels=labels,
+                volumes={
+                    _volume_name(workspace): {
+                        "bind": _WORKSPACE_ROOT,
+                        "mode": "rw",
+                    },
+                    _volume_name(input_volume): {
+                        "bind": _INPUT_ROOT,
+                        "mode": "ro",
+                    },
+                    _volume_name(evidence): {
+                        "bind": _EVIDENCE_ROOT,
+                        "mode": "rw",
+                    },
+                    RUNTIME_PRIVATE_VOLUME: {
+                        "bind": _PRIVATE_ROOT,
+                        "mode": "ro",
+                    },
+                },
+                command=["-c", _EVALUATOR_WAIT_SCRIPT, *evaluator_command],
+                entrypoint=["python3"],
+                environment={
+                    "REPOFIXLAB_EVALUATOR_KERNEL_SHA256": (
+                        self._configuration.evaluator_kernel_sha256
+                    )
+                },
+            )
+            evaluator_roots = _policy_writable_roots(
+                candidate.definition.evaluator
+            )
+            for relative, content in self._kernel_files.items():
+                _inject_file(
+                    evaluator,
+                    f"/tmp/{relative}",
+                    content,
+                    user=candidate.definition.evaluator.user,
+                    writable_roots=evaluator_roots,
+                )
+            _publish_ready_marker(
+                evaluator,
+                f"{_EVALUATOR_KERNEL_ROOT}/.ready.pending",
+                f"{_EVALUATOR_KERNEL_ROOT}/.ready",
+                f"{self._configuration.evaluator_kernel_sha256}\n".encode(
+                    "ascii"
+                ),
+                user=candidate.definition.evaluator.user,
+                writable_roots=evaluator_roots,
+            )
+            return DockerRuntimeJob(
+                attempt_id=attempt_id,
+                run_id=run_id,
+                job_id=job_id,
+                evaluation_id=evaluation_id,
+                candidate=candidate,
+                container=evaluator,
+                volumes=tuple(created),
+                labels=labels,
+            )
+        except Exception:
+            if seed is not None:
+                try:
+                    _remove_container(seed)
+                except Exception:
+                    pass
+            self._remove_resources(evaluator, tuple(created), attempt_id)
+            raise
+
+    def get_job(self, job: object) -> RuntimeJobStatus:
+        handle = _job_handle(job)
+        _reload(handle.container)
+        state = _container_state(handle.container)
+        status = state.get("Status")
+        if status in {"created", "restarting"}:
+            return RuntimeJobStatus("queued", None, None)
+        if status in {"running", "paused"}:
+            return RuntimeJobStatus("running", None, None)
+        if status not in {"exited", "dead"}:
+            raise RuntimeDockerError("evaluator container state is malformed")
+        exit_code = state.get("ExitCode")
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            raise RuntimeDockerError("evaluator exit code is malformed")
+        if exit_code != 0:
+            return RuntimeJobStatus("failed", False, "evaluator_process_failed")
+        artifacts = self.get_artifacts(handle)
+        try:
+            report = json.loads(artifacts["evaluation.json"].decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise RuntimeDockerError("evaluation artifact is malformed") from error
+        resolved = report.get("resolved") if isinstance(report, Mapping) else None
+        if not isinstance(resolved, bool):
+            raise RuntimeDockerError("evaluation resolution is malformed")
+        return RuntimeJobStatus("completed", resolved, None)
+
+    def get_artifacts(self, job: object) -> Mapping[str, bytes]:
+        handle = _job_handle(job)
+        if handle.artifacts is None:
+            artifacts = {
+                name: _read_container_file(
+                    handle.container,
+                    f"{_EVIDENCE_ROOT}/{name}",
+                    _ARTIFACT_LIMIT_BYTES,
+                )
+                for name in RUNTIME_EVALUATOR_ARTIFACTS
+            }
+            handle.artifacts = artifacts
+        return MappingProxyType(dict(handle.artifacts))
+
+    def acknowledge_artifacts(self, job: object) -> RuntimeCleanupResult:
+        handle = _job_handle(job)
+        if handle.artifacts is None:
+            self.get_artifacts(handle)
+        return self._remove_resources(
+            handle.container,
+            handle.volumes,
+            handle.attempt_id,
+        )
+
+    def recover_attempt(self, attempt_id: str) -> RuntimeCleanupResult:
+        errors: list[str] = []
+        try:
+            containers = list(
+                self._client.containers.list(all=True, filters=_filters(attempt_id))
+            )
+        except Exception as error:
+            containers = []
+            errors.append(f"container_list:{type(error).__name__}")
+        for container in containers:
+            try:
+                _remove_container(container)
+            except Exception as error:
+                errors.append(f"container_remove:{type(error).__name__}")
+        try:
+            volumes = list(self._client.volumes.list(filters=_filters(attempt_id)))
+        except Exception as error:
+            volumes = []
+            errors.append(f"volume_list:{type(error).__name__}")
+        for volume in volumes:
+            try:
+                volume.remove(force=True)
+            except Exception as error:
+                errors.append(f"volume_remove:{type(error).__name__}")
+        residual_containers, residual_volumes, audit_errors = self._audit(attempt_id)
+        errors.extend(audit_errors)
+        return RuntimeCleanupResult(
+            residual_container_count=residual_containers,
+            residual_volume_count=residual_volumes,
+            errors=tuple(errors),
+        )
+
+    def _candidate(self, candidate_id: str, instance_id: str) -> TrustedCandidate:
+        if candidate_id != self._task_lock.candidate_id:
+            raise RuntimeDockerError("runtime candidate is not TaskEnvironmentLock bound")
+        candidate = self._catalog.candidate(candidate_id)
+        if instance_id != candidate.instance_id or instance_id != self._task_lock.instance_id:
+            raise RuntimeDockerError("runtime instance is not TaskEnvironmentLock bound")
+        return candidate
+
+    def _validate_local_images(self) -> None:
+        validate_candidate_images(self._client, self._catalog)
+
+    def _require_private_volume(self) -> object:
+        get = getattr(self._client.volumes, "get", None)
+        if not callable(get):
+            raise RuntimeDockerError("Docker volume lookup is unavailable")
+        try:
+            volume = get(RUNTIME_PRIVATE_VOLUME)
+        except Exception as error:
+            raise RuntimeDockerError("trusted private task volume is unavailable") from error
+        if _volume_name(volume) != RUNTIME_PRIVATE_VOLUME:
+            raise RuntimeDockerError("trusted private task volume identity drifted")
+        return volume
+
+    def _create_volume(
+        self, name: str, labels: Mapping[str, str]
+    ) -> object:
+        volume = self._client.volumes.create(name=name, labels=dict(labels))
+        if _volume_name(volume) != name:
+            raise RuntimeDockerError("Docker volume name drifted")
+        return volume
+
+    def _run_container(
+        self,
+        policy: RoleLaunchPolicy,
+        *,
+        name: str,
+        labels: Mapping[str, str],
+        volumes: Mapping[str, object],
+        command: list[str],
+        entrypoint: list[str],
+        environment: Mapping[str, str],
+    ) -> object:
+        container = self._client.containers.run(
+            policy.image_id,
+            command,
+            entrypoint=entrypoint,
+            name=name,
+            detach=True,
+            remove=False,
+            auto_remove=False,
+            platform="linux/amd64",
+            network_mode="none",
+            read_only=True,
+            cap_drop=["ALL"],
+            cap_add=[],
+            security_opt=["no-new-privileges:true"],
+            privileged=False,
+            devices=[],
+            ports={},
+            tty=False,
+            stdin_open=False,
+            user=policy.user,
+            nano_cpus=policy.nano_cpus,
+            mem_limit=policy.memory_bytes,
+            memswap_limit=policy.memory_swap_bytes,
+            pids_limit=policy.pids_limit,
+            volumes=dict(volumes),
+            tmpfs={mount.target: mount.options for mount in policy.tmpfs},
+            environment=dict(environment),
+            labels=dict(labels),
+        )
+        container_id = getattr(container, "id", None)
+        if not isinstance(container_id, str) or _CONTAINER_ID.fullmatch(container_id) is None:
+            raise RuntimeDockerError("Docker container ID is malformed")
+        return container
+
+    def _exec_json(
+        self,
+        container: object,
+        command: list[str],
+        *,
+        user: str,
+        tool_error: bool = False,
+    ) -> Mapping[str, object]:
+        exit_code, stdout, _stderr = _exec(container, command, user=user)
+        if exit_code != 0:
+            if tool_error and exit_code == 2:
+                raise RuntimeToolError("worker tool request was rejected")
+            raise RuntimeDockerError("runtime container command failed")
+        try:
+            value = json.loads(stdout.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise RuntimeDockerError("runtime container JSON is malformed") from error
+        if not isinstance(value, Mapping):
+            raise RuntimeDockerError("runtime container JSON root is malformed")
+        return value
+
+    def _exec_text(
+        self, container: object, command: list[str], *, user: str
+    ) -> str:
+        return _exec_text_static(container, command, user=user)
+
+    def _remove_resources(
+        self,
+        container: object | None,
+        volumes: tuple[object, ...],
+        attempt_id: str,
+    ) -> RuntimeCleanupResult:
+        errors: list[str] = []
+        if container is not None:
+            try:
+                _remove_container(container)
+            except Exception as error:
+                errors.append(f"container_remove:{type(error).__name__}")
+        for volume in reversed(volumes):
+            try:
+                volume.remove(force=True)
+            except Exception as error:
+                errors.append(f"volume_remove:{type(error).__name__}")
+        residual_containers, residual_volumes, audit_errors = self._audit(attempt_id)
+        errors.extend(audit_errors)
+        return RuntimeCleanupResult(
+            residual_container_count=residual_containers,
+            residual_volume_count=residual_volumes,
+            errors=tuple(errors),
+        )
+
+    def _audit(self, attempt_id: str) -> tuple[int, int, list[str]]:
+        errors: list[str] = []
+        try:
+            containers = self._client.containers.list(
+                all=True, filters=_filters(attempt_id)
+            )
+            container_count = len(containers)
+        except Exception as error:
+            container_count = 1
+            errors.append(f"container_audit:{type(error).__name__}")
+        try:
+            volumes = self._client.volumes.list(filters=_filters(attempt_id))
+            volume_count = len(volumes)
+        except Exception as error:
+            volume_count = 1
+            errors.append(f"volume_audit:{type(error).__name__}")
+        return container_count, volume_count, errors
+
+
+def _resource_identity(policy: RoleLaunchPolicy) -> Mapping[str, object]:
+    return {
+        "nano_cpus": policy.nano_cpus,
+        "memory_bytes": policy.memory_bytes,
+        "memory_swap_bytes": policy.memory_swap_bytes,
+        "pids_limit": policy.pids_limit,
+        "timeout_seconds": policy.timeout_seconds,
+        "user": policy.user,
+    }
+
+
+def _resource_name(attempt_id: str, role: str, kind: str) -> str:
+    digest = hashlib.sha256(
+        f"{attempt_id}\0{role}\0{kind}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"repofixlab-runtime-{role}-{kind}-{digest}"
+
+
+def _volume_name(volume: object) -> str:
+    name = getattr(volume, "name", None)
+    if not isinstance(name, str) or _VOLUME_NAME.fullmatch(name) is None:
+        raise RuntimeDockerError("Docker volume name is malformed")
+    return name
+
+
+def _policy_writable_roots(policy: RoleLaunchPolicy) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                *(mount.target for mount in policy.managed_volumes),
+                *(mount.target for mount in policy.tmpfs),
+            }
+        )
+    )
+
+
+def _injection_binding(
+    target: str,
+    writable_roots: tuple[str, ...],
+) -> tuple[str, str]:
+    pure_target = PurePosixPath(target)
+    if (
+        not pure_target.is_absolute()
+        or any(part in {"", ".", ".."} for part in pure_target.parts)
+    ):
+        raise RuntimeDockerError("runtime injection target is malformed")
+    matches: list[tuple[str, str]] = []
+    for root in writable_roots:
+        pure_root = PurePosixPath(root)
+        if (
+            not pure_root.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure_root.parts)
+        ):
+            raise RuntimeDockerError("runtime writable root is malformed")
+        try:
+            relative = pure_target.relative_to(pure_root)
+        except ValueError:
+            continue
+        if relative.parts:
+            matches.append((pure_root.as_posix(), relative.as_posix()))
+    if not matches:
+        raise RuntimeDockerError("runtime injection target is outside writable policy")
+    return max(matches, key=lambda item: len(item[0]))
+
+
+def _inject_file(
+    container: object,
+    target: str,
+    content: bytes,
+    *,
+    user: str,
+    writable_roots: tuple[str, ...],
+) -> None:
+    if not isinstance(content, bytes) or len(content) > _KERNEL_LIMIT_BYTES:
+        raise RuntimeDockerError("runtime injected file exceeds policy")
+    root, relative = _injection_binding(target, writable_roots)
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    execute = getattr(container, "exec_run", None)
+    if not callable(execute):
+        raise RuntimeDockerError("Docker stdin injection is unavailable")
+    result = execute(
+        [
+            "python3",
+            "-c",
+            _STDIN_WRITE_SCRIPT,
+            root,
+            relative,
+            str(len(content)),
+            expected_sha256,
+        ],
+        stdout=False,
+        stderr=False,
+        stdin=True,
+        tty=False,
+        privileged=False,
+        user=user,
+        environment={
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME": "/tmp/repofixlab-home",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        },
+        workdir=_WORKSPACE_ROOT,
+        socket=True,
+        demux=False,
+    )
+    if getattr(result, "exit_code", object()) is not None:
+        raise RuntimeDockerError("Docker stdin injection session drifted")
+    stream = getattr(result, "output", None)
+    transport = getattr(stream, "_sock", stream)
+    try:
+        sendall = getattr(transport, "sendall", None)
+        if callable(sendall):
+            sendall(content)
+        else:
+            write = getattr(stream, "write", None)
+            if not callable(write) or write(content) != len(content):
+                raise RuntimeDockerError("Docker stdin injection write failed")
+            flush = getattr(stream, "flush", None)
+            if callable(flush):
+                flush()
+        shutdown = getattr(transport, "shutdown", None)
+        if not callable(shutdown):
+            raise RuntimeDockerError("Docker stdin injection cannot signal EOF")
+        shutdown(socket.SHUT_WR)
+        deadline = monotonic() + 30
+        expected_identity = f"{len(content)}:{expected_sha256}"
+        while True:
+            try:
+                observed = _verified_file_identity(
+                    container,
+                    target,
+                    user=user,
+                )
+            except RuntimeDockerError:
+                observed = None
+            if observed == expected_identity:
+                return
+            if monotonic() >= deadline:
+                raise RuntimeDockerError(
+                    "runtime injected file identity did not converge"
+                )
+            sleep(0.02)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+
+def _verified_file_identity(container: object, path: str, *, user: str) -> str:
+    return _exec_text_static(
+        container,
+        ["python3", "-c", _VERIFY_FILE_SCRIPT, path],
+        user=user,
+    ).strip()
+
+
+def _publish_ready_marker(
+    container: object,
+    source: str,
+    target: str,
+    content: bytes,
+    *,
+    user: str,
+    writable_roots: tuple[str, ...],
+) -> None:
+    source_root, _source_relative = _injection_binding(source, writable_roots)
+    target_root, _target_relative = _injection_binding(target, writable_roots)
+    if source_root != target_root:
+        raise RuntimeDockerError("runtime ready marker crosses writable roots")
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    observed = _exec_text_static(
+        container,
+        [
+            "python3",
+            "-c",
+            _PUBLISH_READY_SCRIPT,
+            source,
+            target,
+            str(len(content)),
+            expected_sha256,
+        ],
+        user=user,
+    ).strip()
+    if observed != expected_sha256:
+        raise RuntimeDockerError("runtime ready marker publication drifted")
+
+
+def _exec(
+    container: object,
+    command: list[str],
+    *,
+    user: str,
+) -> tuple[int, bytes, bytes]:
+    execute = getattr(container, "exec_run", None)
+    if not callable(execute):
+        raise RuntimeDockerError("Docker exec is unavailable")
+    result = execute(
+        command,
+        stdout=True,
+        stderr=True,
+        stdin=False,
+        tty=False,
+        privileged=False,
+        user=user,
+        environment={
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME": "/tmp/repofixlab-home",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        },
+        workdir=_WORKSPACE_ROOT,
+        demux=True,
+    )
+    exit_code = getattr(result, "exit_code", None)
+    output = getattr(result, "output", None)
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise RuntimeDockerError("Docker exec exit code is malformed")
+    if not isinstance(output, tuple) or len(output) != 2:
+        raise RuntimeDockerError("Docker exec output is malformed")
+    stdout = output[0] if isinstance(output[0], bytes) else b""
+    stderr = output[1] if isinstance(output[1], bytes) else b""
+    return exit_code, stdout, stderr
+
+
+def _exec_text_static(container: object, command: list[str], *, user: str) -> str:
+    exit_code, stdout, _stderr = _exec(container, command, user=user)
+    if exit_code != 0:
+        raise RuntimeDockerError("runtime container command failed")
+    try:
+        return stdout.decode("ascii")
+    except UnicodeError as error:
+        raise RuntimeDockerError("runtime container text is malformed") from error
+
+
+def _runtime_tool_result(
+    value: Mapping[str, object], expected_tool: RuntimeToolName
+) -> RuntimeToolResult:
+    expected_keys = {
+        "tool",
+        "exit_code",
+        "stdout",
+        "stderr",
+        "truncated",
+        "timed_out",
+        "duration_ms",
+    }
+    exit_code = value.get("exit_code")
+    duration_ms = value.get("duration_ms")
+    if (
+        set(value) != expected_keys
+        or value.get("tool") != expected_tool
+        or (
+            exit_code is not None
+            and (isinstance(exit_code, bool) or not isinstance(exit_code, int))
+        )
+        or not isinstance(value.get("stdout"), str)
+        or not isinstance(value.get("stderr"), str)
+        or not isinstance(value.get("truncated"), bool)
+        or not isinstance(value.get("timed_out"), bool)
+        or isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 0
+    ):
+        raise RuntimeDockerError("worker tool result drifted")
+    return RuntimeToolResult(
+        tool=expected_tool,
+        exit_code=exit_code,
+        stdout=str(value["stdout"]),
+        stderr=str(value["stderr"]),
+        truncated=bool(value["truncated"]),
+        timed_out=bool(value["timed_out"]),
+        duration_ms=duration_ms,
+    )
+
+
+def _snapshot_evidence(value: Mapping[str, object]) -> RuntimeSnapshotEvidence:
+    expected = {
+        "schema_version",
+        "response_type",
+        "patch_base64",
+        "base_commit",
+        "base_tree",
+        "candidate_tree",
+        "files",
+        "policy",
+    }
+    files_value = value.get("files")
+    policy = value.get("policy")
+    if (
+        set(value) != expected
+        or value.get("schema_version") != "v1"
+        or value.get("response_type") != "runtime_worker_snapshot"
+        or not isinstance(value.get("patch_base64"), str)
+        or not isinstance(value.get("base_commit"), str)
+        or not isinstance(value.get("base_tree"), str)
+        or not isinstance(value.get("candidate_tree"), str)
+        or not isinstance(files_value, list)
+        or not isinstance(policy, Mapping)
+        or set(policy) != {"status", "violations"}
+        or policy.get("status") not in {"pass", "fail"}
+        or not isinstance(policy.get("violations"), list)
+    ):
+        raise RuntimeDockerError("worker snapshot envelope drifted")
+    try:
+        patch = base64.b64decode(str(value["patch_base64"]), validate=True)
+    except ValueError as error:
+        raise RuntimeDockerError("worker snapshot patch encoding drifted") from error
+    files: list[RuntimeSnapshotFile] = []
+    for item in files_value:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"path", "status"}
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("status"), str)
+        ):
+            raise RuntimeDockerError("worker snapshot file evidence drifted")
+        files.append(RuntimeSnapshotFile(str(item["path"]), str(item["status"])))
+    violations = policy["violations"]
+    assert isinstance(violations, list)
+    if any(not isinstance(item, str) for item in violations):
+        raise RuntimeDockerError("worker snapshot policy evidence drifted")
+    return RuntimeSnapshotEvidence(
+        patch=patch,
+        base_commit=str(value["base_commit"]),
+        base_tree=str(value["base_tree"]),
+        candidate_tree=str(value["candidate_tree"]),
+        files=tuple(files),
+        policy_violations=tuple(violations),
+    )
+
+
+def _worker_handle(value: object) -> DockerRuntimeWorker:
+    if not isinstance(value, DockerRuntimeWorker):
+        raise RuntimeDockerError("runtime worker handle is malformed")
+    return value
+
+
+def _job_handle(value: object) -> DockerRuntimeJob:
+    if not isinstance(value, DockerRuntimeJob):
+        raise RuntimeDockerError("runtime evaluation handle is malformed")
+    return value
+
+
+def _remove_container(container: object) -> None:
+    remove = getattr(container, "remove", None)
+    if not callable(remove):
+        raise RuntimeDockerError("Docker container removal is unavailable")
+    remove(force=True)
+
+
+def _reload(container: object) -> None:
+    reload_container = getattr(container, "reload", None)
+    if not callable(reload_container):
+        raise RuntimeDockerError("Docker container reload is unavailable")
+    reload_container()
+
+
+def _container_state(container: object) -> Mapping[str, object]:
+    attrs = getattr(container, "attrs", None)
+    state = attrs.get("State") if isinstance(attrs, Mapping) else None
+    if not isinstance(state, Mapping):
+        raise RuntimeDockerError("Docker container state is unavailable")
+    return state
+
+
+def _read_container_file(
+    container: object,
+    path: str,
+    maximum_bytes: int,
+) -> bytes:
+    get_archive = getattr(container, "get_archive", None)
+    if not callable(get_archive):
+        raise RuntimeDockerError("Docker artifact retrieval is unavailable")
+    stream, _stat = get_archive(path)
+    archive_bytes = b"".join(stream)
+    if len(archive_bytes) > maximum_bytes + 1024 * 1024:
+        raise RuntimeDockerError("Docker artifact archive exceeds policy")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as archive:
+            members = archive.getmembers()
+            if len(members) != 1 or not members[0].isfile():
+                raise RuntimeDockerError("Docker artifact archive is malformed")
+            extracted = archive.extractfile(members[0])
+            if extracted is None:
+                raise RuntimeDockerError("Docker artifact archive is empty")
+            content = extracted.read(maximum_bytes + 1)
+    except tarfile.TarError as error:
+        raise RuntimeDockerError("Docker artifact archive is malformed") from error
+    if len(content) > maximum_bytes:
+        raise RuntimeDockerError("Docker artifact exceeds policy")
+    return content

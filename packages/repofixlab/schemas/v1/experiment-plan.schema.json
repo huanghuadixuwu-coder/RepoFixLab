@@ -1,0 +1,184 @@
+{
+	"$id": "urn:repofixlab:schema:v1:experiment-plan",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"budget": {
+			"additionalProperties": false,
+			"properties": {
+				"per_run_accounted_admission_cap_tokens": {
+					"anyOf": [
+						{
+							"maximum": 10000000,
+							"minimum": 1,
+							"type": "integer"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"total_accounted_admission_cap_tokens": {
+					"anyOf": [
+						{
+							"maximum": 1000000000,
+							"minimum": 1,
+							"type": "integer"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"required": [
+				"per_run_accounted_admission_cap_tokens",
+				"total_accounted_admission_cap_tokens"
+			],
+			"type": "object"
+		},
+		"experiment_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"matrix": {
+			"items": {
+				"additionalProperties": false,
+				"properties": {
+					"config_ids": {
+						"items": {
+							"anyOf": [
+								{
+									"const": "pi-general",
+									"type": "string"
+								},
+								{
+									"const": "repofix-full",
+									"type": "string"
+								},
+								{
+									"const": "repofix-no-localize",
+									"type": "string"
+								},
+								{
+									"const": "repofix-no-verify-feedback",
+									"type": "string"
+								}
+							]
+						},
+						"maxItems": 4,
+						"minItems": 1,
+						"type": "array"
+					},
+					"group_id": {
+						"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+						"type": "string"
+					},
+					"replicates": {
+						"maximum": 10,
+						"minimum": 1,
+						"type": "integer"
+					},
+					"task_count": {
+						"maximum": 300,
+						"minimum": 1,
+						"type": "integer"
+					}
+				},
+				"required": [
+					"group_id",
+					"task_count",
+					"config_ids",
+					"replicates"
+				],
+				"type": "object"
+			},
+			"maxItems": 20,
+			"minItems": 1,
+			"type": "array"
+		},
+		"plan_type": {
+			"const": "experiment_capacity",
+			"type": "string"
+		},
+		"runtime_status": {
+			"anyOf": [
+				{
+					"const": "m1_single_run_available",
+					"type": "string"
+				},
+				{
+					"const": "lifecycle_unavailable",
+					"type": "string"
+				}
+			]
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"task_selection": {
+			"anyOf": [
+				{
+					"additionalProperties": false,
+					"properties": {
+						"declared_task_count": {
+							"maximum": 300,
+							"minimum": 1,
+							"type": "integer"
+						},
+						"instance_ids": {
+							"items": {
+								"maxLength": 200,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 300,
+							"minItems": 1,
+							"type": "array"
+						},
+						"status": {
+							"const": "frozen",
+							"type": "string"
+						}
+					},
+					"required": [
+						"status",
+						"declared_task_count",
+						"instance_ids"
+					],
+					"type": "object"
+				},
+				{
+					"additionalProperties": false,
+					"properties": {
+						"declared_task_count": {
+							"maximum": 300,
+							"minimum": 1,
+							"type": "integer"
+						},
+						"status": {
+							"const": "pending_m3",
+							"type": "string"
+						}
+					},
+					"required": [
+						"status",
+						"declared_task_count"
+					],
+					"type": "object"
+				}
+			]
+		}
+	},
+	"required": [
+		"schema_version",
+		"plan_type",
+		"experiment_id",
+		"task_selection",
+		"matrix",
+		"budget",
+		"runtime_status"
+	],
+	"type": "object"
+}

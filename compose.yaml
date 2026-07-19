@@ -33,6 +33,7 @@ services:
       start_period: 5s
 
   orchestrator:
+    image: repofixlab-orchestrator
     build:
       context: .
       dockerfile: packages/repofixlab/docker/orchestrator.Dockerfile
@@ -47,6 +48,35 @@ services:
       - provider-egress
     volumes:
       - ./artifacts:/artifacts
+    read_only: true
+    user: node
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+  m1-runner:
+    profiles:
+      - m1
+    image: repofixlab-orchestrator
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      REPOFIX_ARTIFACTS_PATH: /artifacts
+      REPOFIX_CONTROLLER_URL: http://controller:8000
+      REPOFIX_DATASET_PUBLIC_PATH: /data/public
+      ZHIPU_API_KEY_FILE: /run/secrets/zhipu_api_key
+    networks:
+      - repofix-control
+      - provider-egress
+    volumes:
+      - ./artifacts:/artifacts
+      - dataset-public:/data/public:ro
+    secrets:
+      - zhipu_api_key
     read_only: true
     user: node
     cap_drop:
@@ -88,6 +118,10 @@ networks:
     internal: true
   provider-egress:
   dataset-egress:
+
+secrets:
+  zhipu_api_key:
+    file: ${REPOFIX_ZHIPU_SECRET_FILE:-.repofixlab-m1-secret-unconfigured}
 
 volumes:
   controller-work-v2:

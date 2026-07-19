@@ -5,6 +5,7 @@ import {
 	type CliRuntime,
 	FACTORY_PROBE_TIMEOUT_MS,
 	type FactoryProbeControllerResponse,
+	resolveRunConfigPath,
 	runCli,
 } from "../src/cli/main.ts";
 import {
@@ -339,7 +340,11 @@ function runtime(overrides: Partial<CliRuntime> = {}): CliRuntime {
 		requestFactoryProbe: async () => {
 			throw new Error("must not request factory probe");
 		},
+		runExperiment: async () => {
+			throw new Error("must not execute experiment");
+		},
 		resolveInputPath: async (artifactsRoot, requestedPath) => resolve(artifactsRoot, requestedPath),
+		resolveRunConfigPath: async (artifactsRoot, requestedPath) => resolve(artifactsRoot, requestedPath),
 		resolveOutputPath: async (artifactsRoot, requestedPath) => resolve(artifactsRoot, requestedPath),
 		stderr: () => {},
 		stdout: () => {},
@@ -406,6 +411,24 @@ function smokeEvidenceFiles(datasetLock = "environment/dataset-lock.json"): Read
 	return new Map([...files].map(([path, content]) => [resolve(ARTIFACTS_ROOT, path), content]));
 }
 
+const M1_EXPERIMENT_PLAN = `schema_version: v1
+plan_type: experiment_capacity
+experiment_id: m1-axios
+task_selection:
+  status: frozen
+  declared_task_count: 1
+  instance_ids: [axios__axios-5892]
+matrix:
+  - group_id: m1-smoke
+    task_count: 1
+    config_ids: [pi-general]
+    replicates: 1
+budget:
+  per_run_accounted_admission_cap_tokens: null
+  total_accounted_admission_cap_tokens: null
+runtime_status: m1_single_run_available
+`;
+
 describe("RepoFixLab CLI", () => {
 	it("reads the displayed version from package.json", async () => {
 		let stdout = "";
@@ -420,6 +443,73 @@ describe("RepoFixLab CLI", () => {
 
 		expect(exitCode).toBe(0);
 		expect(stdout).toBe("0.80.3\n");
+	});
+
+	it("resolves packaged and artifact-relative run configs without traversal", async () => {
+		const testRoot = fileURLToPath(new URL(".", import.meta.url));
+		expect(await resolveRunConfigPath(testRoot, "configs/experiments/m1-axios.yaml")).toMatch(
+			/[\\/]configs[\\/]experiments[\\/]m1-axios\.yaml$/,
+		);
+		expect(await resolveRunConfigPath(testRoot, "contracts.test.ts")).toBe(resolve(testRoot, "contracts.test.ts"));
+		await expect(resolveRunConfigPath(testRoot, "configs/experiments/../v1.yaml")).rejects.toThrow(
+			/without traversal/,
+		);
+	});
+
+	it("dry-runs an experiment plan without invoking the lifecycle", async () => {
+		let stdout = "";
+		const exitCode = await runCli(
+			["run", "--config", "configs/experiments/m1-axios.yaml", "--dry-run"],
+			runtime({
+				readInputFile: async () => M1_EXPERIMENT_PLAN,
+				stdout: (text) => {
+					stdout += text;
+				},
+			}),
+		);
+
+		expect(exitCode).toBe(0);
+		expect(JSON.parse(stdout)).toMatchObject({
+			summary_type: "experiment_dry_run",
+			experiment_id: "m1-axios",
+			logical_run_count: 1,
+			total_accounted_admission_cap_tokens: null,
+			runtime_status: "m1_single_run_available",
+			lifecycle_available: true,
+		});
+	});
+
+	it("executes a non-dry-run experiment plan through the injected Runner", async () => {
+		let stdout = "";
+		let executed = false;
+		const exitCode = await runCli(
+			["run", "--config", "plans/m1.yaml"],
+			runtime({
+				readInputFile: async () => M1_EXPERIMENT_PLAN,
+				runExperiment: async (plan) => {
+					executed = true;
+					return {
+						schema_version: "v1",
+						summary_type: "m1_run",
+						experiment_id: plan.experiment_id,
+						run_id: "run-test",
+						attempt_id: "attempt-test",
+						terminal_status: "completed",
+						termination_reason: "official_unresolved",
+						resolved: false,
+						run_directory: "C:/artifacts/run-test",
+						result_sha256: "a".repeat(64),
+					};
+				},
+				stdout: (text) => {
+					stdout += text;
+				},
+			}),
+		);
+
+		expect(exitCode).toBe(0);
+		expect(executed).toBe(true);
+		expect(JSON.parse(stdout)).toMatchObject({ summary_type: "m1_run", termination_reason: "official_unresolved" });
 	});
 
 	it("writes a schema-shaped bootstrap failure and returns exit code 1", async () => {

@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { link, lstat, mkdir, open, readFile, realpath, statfs, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+	createExperimentDryRunSummary,
+	type ExperimentPlan,
+	parseExperimentPlan,
+} from "../contracts/experiment-plan.ts";
 import { stableStringify } from "../contracts/schema-generator.ts";
 import {
 	createTaskEnvironmentCandidate,
@@ -22,6 +27,7 @@ import {
 	runBootstrapDoctor,
 	runSmokeDoctor,
 } from "../doctor/index.ts";
+import { createDefaultM1RunnerDependencies, type M1RunSummary, runM1Experiment } from "../runner/run-m1.ts";
 import { parseCliArgs } from "./args.ts";
 import {
 	smokeDoctorEvidenceInput,
@@ -78,6 +84,7 @@ Usage:
   repofixlab environment-lock-create --input <evidence-manifest.json> --output <lock.json>
   repofixlab factory-probe --candidate <candidate.json> --operation-id <id> --output <report.json>
   repofixlab provenance-lock --input <candidate.json> --output <lock.json>
+  repofixlab run --config <experiment.yaml> [--dry-run]
   repofixlab --help
   repofixlab --version
 `;
@@ -89,6 +96,15 @@ const DOCTOR_HELP = `Usage:
 
 Output paths are resolved beneath REPOFIX_ARTIFACTS_PATH.
 Unavailable profiles fail closed; they never report a pass.
+`;
+
+const RUN_HELP = `Usage:
+  repofixlab run --config <experiment.yaml> [--dry-run]
+
+The config may be beneath REPOFIX_ARTIFACTS_PATH or one of the versioned
+configs/experiments files in the RepoFixLab package. Dry-run validates the
+matrix and reports its exact run and admission-cap totals without execution.
+Non-dry-run executes the admitted M1 lifecycle and prints its terminal summary.
 `;
 
 export interface CliRuntime {
@@ -105,7 +121,13 @@ export interface CliRuntime {
 		request: FactoryProbeControllerRequest,
 		timeoutMs: number,
 	) => Promise<FactoryProbeControllerResponse>;
+	readonly runExperiment: (
+		plan: ExperimentPlan,
+		artifactsRoot: string,
+		controllerUrl: string,
+	) => Promise<M1RunSummary>;
 	readonly resolveInputPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
+	readonly resolveRunConfigPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
 	readonly resolveOutputPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
 	readonly stderr: (text: string) => void;
 	readonly stdout: (text: string) => void;
@@ -216,6 +238,36 @@ export async function resolveArtifactInputPath(artifactsRoot: string, requestedP
 	return candidate;
 }
 
+export async function resolveRunConfigPath(artifactsRoot: string, requestedPath: string): Promise<string> {
+	const normalizedPath = requestedPath.replaceAll("\\", "/");
+	const repositoryConfigMatch =
+		/^(?:packages\/repofixlab\/)?configs\/experiments\/([A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml)$/.exec(normalizedPath);
+	if (repositoryConfigMatch === null) {
+		if (
+			normalizedPath.startsWith("configs/experiments/") ||
+			normalizedPath.startsWith("packages/repofixlab/configs/experiments/")
+		) {
+			throw new Error("Repository experiment config path must name one YAML file without traversal");
+		}
+		return resolveArtifactInputPath(artifactsRoot, requestedPath);
+	}
+
+	const configRoot = fileURLToPath(new URL("../../configs/experiments/", import.meta.url));
+	const candidate = join(configRoot, repositoryConfigMatch[1]!);
+	const configRootStats = await lstat(configRoot);
+	const candidateStats = await lstat(candidate);
+	if (!configRootStats.isDirectory() || configRootStats.isSymbolicLink()) {
+		throw new Error("Repository experiment config root is not a regular directory");
+	}
+	if (!candidateStats.isFile() || candidateStats.isSymbolicLink()) {
+		throw new Error("Repository experiment config is not a regular file");
+	}
+	const realConfigRoot = await realpath(configRoot);
+	const realCandidate = await realpath(candidate);
+	assertPathWithin(realConfigRoot, realCandidate);
+	return candidate;
+}
+
 export async function writeArtifactReportAtomically(
 	path: string,
 	content: string,
@@ -269,7 +321,14 @@ function defaultRuntime(): CliRuntime {
 		},
 		readInputFile: (path) => readFile(path, "utf8"),
 		requestFactoryProbe,
+		runExperiment: (plan, runArtifactsRoot, runControllerUrl) =>
+			runM1Experiment(
+				plan,
+				{ artifactsRoot: runArtifactsRoot },
+				createDefaultM1RunnerDependencies(runControllerUrl),
+			),
 		resolveInputPath: resolveArtifactInputPath,
+		resolveRunConfigPath,
 		resolveOutputPath: resolveArtifactOutputPath,
 		stderr: (text) => process.stderr.write(text),
 		stdout: (text) => process.stdout.write(text),
@@ -284,12 +343,29 @@ export async function runCli(args: readonly string[], runtime: CliRuntime = defa
 		return 2;
 	}
 	if (parsed.command.kind === "help") {
-		runtime.stdout(parsed.command.topic === "doctor" ? DOCTOR_HELP : GENERAL_HELP);
+		runtime.stdout(
+			parsed.command.topic === "doctor" ? DOCTOR_HELP : parsed.command.topic === "run" ? RUN_HELP : GENERAL_HELP,
+		);
 		return 0;
 	}
 	if (parsed.command.kind === "version") {
 		runtime.stdout(`${PACKAGE_VERSION}\n`);
 		return 0;
+	}
+	if (parsed.command.kind === "run") {
+		const configPath = await runtime.resolveRunConfigPath(runtime.artifactsRoot, parsed.command.config);
+		const plan = parseExperimentPlan(await runtime.readInputFile(configPath));
+		if (parsed.command.dryRun) {
+			runtime.stdout(stableStringify(createExperimentDryRunSummary(plan)));
+			return 0;
+		}
+		if (plan.runtime_status !== "m1_single_run_available") {
+			runtime.stderr(`Run lifecycle is unavailable for experiment ${plan.experiment_id}; refusing execution.\n`);
+			return 3;
+		}
+		const summary = await runtime.runExperiment(plan, runtime.artifactsRoot, runtime.controllerUrl);
+		runtime.stdout(stableStringify(summary));
+		return summary.terminal_status === "completed" ? 0 : 1;
 	}
 	if (parsed.command.kind === "provenance-lock") {
 		const inputPath = await runtime.resolveInputPath(runtime.artifactsRoot, parsed.command.input);

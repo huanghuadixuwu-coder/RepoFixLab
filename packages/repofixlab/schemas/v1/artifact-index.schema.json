@@ -1,0 +1,119 @@
+{
+	"$id": "urn:repofixlab:schema:v1:artifact-index",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"artifacts": {
+			"items": {
+				"additionalProperties": false,
+				"properties": {
+					"bytes": {
+						"minimum": 0,
+						"type": "integer"
+					},
+					"generated_by": {
+						"anyOf": [
+							{
+								"const": "orchestrator",
+								"type": "string"
+							},
+							{
+								"const": "agent",
+								"type": "string"
+							},
+							{
+								"const": "controller",
+								"type": "string"
+							},
+							{
+								"const": "evaluator",
+								"type": "string"
+							}
+						]
+					},
+					"media_type": {
+						"pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$",
+						"type": "string"
+					},
+					"name": {
+						"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+						"type": "string"
+					},
+					"path": {
+						"pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+						"type": "string"
+					},
+					"sensitivity": {
+						"anyOf": [
+							{
+								"const": "public",
+								"type": "string"
+							},
+							{
+								"const": "internal",
+								"type": "string"
+							},
+							{
+								"const": "private",
+								"type": "string"
+							}
+						]
+					},
+					"sha256": {
+						"pattern": "^[a-f0-9]{64}$",
+						"type": "string"
+					}
+				},
+				"required": [
+					"name",
+					"path",
+					"media_type",
+					"bytes",
+					"sha256",
+					"sensitivity",
+					"generated_by"
+				],
+				"type": "object"
+			},
+			"maxItems": 10000,
+			"minItems": 1,
+			"type": "array"
+		},
+		"attempt_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"created_at": {
+			"maxLength": 64,
+			"minLength": 20,
+			"pattern": "^\\d{4}-\\d{2}-\\d{2}T.*Z$",
+			"type": "string"
+		},
+		"index_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"index_type": {
+			"const": "artifact_index",
+			"type": "string"
+		},
+		"run_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		}
+	},
+	"required": [
+		"schema_version",
+		"index_type",
+		"run_id",
+		"attempt_id",
+		"artifacts",
+		"created_at",
+		"index_sha256"
+	],
+	"type": "object"
+}

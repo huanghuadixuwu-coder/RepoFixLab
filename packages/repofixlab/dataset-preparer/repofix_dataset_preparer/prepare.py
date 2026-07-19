@@ -37,6 +37,8 @@ _VOLUME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _RELATIVE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _LANGUAGES = frozenset({"javascript", "typescript", "javascript/typescript", "js", "ts"})
+_PUBLISHED_FILE_MODE = 0o444
+_PUBLISHED_DIRECTORY_MODE = 0o755
 
 
 @dataclass(frozen=True)
@@ -426,12 +428,22 @@ def _validate_request(request: PreparationRequest) -> dict[str, Path]:
             options = mount_points.get(str(root))
             if options is None or "rw" not in options:
                 raise PreparationError(f"{scope} root is not a dedicated read-write mount point")
+    for root in roots.values():
+        os.chmod(root, _PUBLISHED_DIRECTORY_MODE)
     return roots
+
+def _set_published_file_mode(descriptor: int, path: Path) -> None:
+    if os.name == "nt":
+        os.chmod(path, _PUBLISHED_FILE_MODE)
+    else:
+        os.fchmod(descriptor, _PUBLISHED_FILE_MODE)
+
 
 
 def _write_atomic(root: Path, relative_path: str, content: bytes) -> None:
     destination = root / relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(destination.parent, _PUBLISHED_DIRECTORY_MODE)
     descriptor, temporary = tempfile.mkstemp(
         dir=destination.parent,
         prefix=f".{destination.name}.",
@@ -441,6 +453,7 @@ def _write_atomic(root: Path, relative_path: str, content: bytes) -> None:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
             stream.flush()
+            _set_published_file_mode(stream.fileno(), Path(temporary))
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
         directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -459,10 +472,15 @@ def _write_atomic(root: Path, relative_path: str, content: bytes) -> None:
 def _claim_writer(control_root: Path, content: bytes) -> None:
     claim = control_root / "WRITER"
     try:
-        descriptor = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(
+            claim,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            _PUBLISHED_FILE_MODE,
+        )
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
             stream.flush()
+            _set_published_file_mode(stream.fileno(), claim)
             os.fsync(stream.fileno())
         directory_fd = os.open(control_root, os.O_RDONLY | os.O_DIRECTORY)
         try:
