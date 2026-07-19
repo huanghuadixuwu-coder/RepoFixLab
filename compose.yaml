@@ -1,0 +1,102 @@
+name: repofixlab
+
+services:
+  controller:
+    build:
+      context: ./packages/repofixlab
+      dockerfile: docker/controller.Dockerfile
+    environment:
+      REPOFIXLAB_COMPOSE_PROJECT: repofixlab
+      REPOFIXLAB_FACTORY_CANDIDATE_DIR: /etc/repofixlab/candidates
+    networks:
+      - repofix-control
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - controller-work-v2:/var/lib/repofix/controller
+      - controller-candidates-v1:/etc/repofixlab/candidates:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: packages/repofixlab/docker/orchestrator.Dockerfile
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      REPOFIX_ARTIFACTS_PATH: /artifacts
+      REPOFIX_CONTROLLER_URL: http://controller:8000
+    networks:
+      - repofix-control
+      - provider-egress
+    volumes:
+      - ./artifacts:/artifacts
+    read_only: true
+    user: node
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+  dataset-preparer:
+    profiles:
+      - dataset-prepare
+    build:
+      context: ./packages/repofixlab
+      dockerfile: docker/dataset-preparer.Dockerfile
+    environment:
+      REPOFIX_PREPARER_IMAGE_ID: ${REPOFIX_PREPARER_IMAGE_ID:-}
+    networks:
+      - dataset-egress
+    volumes:
+      - dataset-source:/input:ro
+      - dataset-public:/data/public
+      - dataset-control:/data/control
+      - dataset-private:/data/private
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    pids_limit: 64
+    mem_limit: 2g
+    cpus: 1.0
+
+networks:
+  repofix-control:
+    internal: true
+  provider-egress:
+  dataset-egress:
+
+volumes:
+  controller-work-v2:
+  controller-candidates-v1:
+  dataset-source:
+    name: ${REPOFIX_DATASET_SOURCE_VOLUME:-repofixlab-dataset-source}
+  dataset-public:
+    name: ${REPOFIX_PUBLIC_VOLUME:-dataset-public-unconfigured}
+  dataset-control:
+    name: ${REPOFIX_CONTROL_VOLUME:-dataset-control-unconfigured}
+  dataset-private:
+    name: ${REPOFIX_PRIVATE_VOLUME:-dataset-private-unconfigured}

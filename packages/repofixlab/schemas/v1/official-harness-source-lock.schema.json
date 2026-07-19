@@ -1,0 +1,133 @@
+{
+	"$id": "urn:repofixlab:schema:v1:official-harness-source-lock",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"entrypoints": {
+			"additionalProperties": false,
+			"properties": {
+				"grading_module": {
+					"const": "swebench.harness.grading",
+					"type": "string"
+				},
+				"run_evaluation_module": {
+					"const": "swebench.harness.run_evaluation",
+					"type": "string"
+				},
+				"tap_parser": {
+					"const": "swebench.harness.log_parsers.javascript.parse_log_tap",
+					"type": "string"
+				}
+			},
+			"required": [
+				"run_evaluation_module",
+				"tap_parser",
+				"grading_module"
+			],
+			"type": "object"
+		},
+		"files": {
+			"items": {
+				"additionalProperties": false,
+				"properties": {
+					"path": {
+						"pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+						"type": "string"
+					},
+					"sha256": {
+						"pattern": "^[a-f0-9]{64}$",
+						"type": "string"
+					}
+				},
+				"required": [
+					"path",
+					"sha256"
+				],
+				"type": "object"
+			},
+			"minItems": 1,
+			"type": "array"
+		},
+		"lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"lock_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"lock_type": {
+			"const": "official_harness_source",
+			"type": "string"
+		},
+		"pyproject_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"source_aggregate_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"source_bytes": {
+			"const": 1953143,
+			"type": "number"
+		},
+		"source_file_count": {
+			"const": 591,
+			"type": "number"
+		},
+		"source_scope": {
+			"const": "swebench",
+			"type": "string"
+		},
+		"tap_pattern": {
+			"const": "^(ok|not ok) (\\d+) (.+)$",
+			"type": "string"
+		},
+		"test_command": {
+			"items": {
+				"minLength": 1,
+				"type": "string"
+			},
+			"maxItems": 7,
+			"minItems": 7,
+			"type": "array"
+		},
+		"upstream_revision": {
+			"const": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+			"type": "string"
+		},
+		"upstream_tree_sha1": {
+			"pattern": "^[a-f0-9]{40}$",
+			"type": "string"
+		},
+		"upstream_version": {
+			"const": "v4.1.0",
+			"type": "string"
+		}
+	},
+	"required": [
+		"schema_version",
+		"lock_type",
+		"lock_id",
+		"upstream_version",
+		"upstream_revision",
+		"upstream_tree_sha1",
+		"source_scope",
+		"source_file_count",
+		"source_bytes",
+		"source_aggregate_sha256",
+		"pyproject_sha256",
+		"files",
+		"entrypoints",
+		"test_command",
+		"tap_pattern",
+		"lock_sha256"
+	],
+	"type": "object"
+}

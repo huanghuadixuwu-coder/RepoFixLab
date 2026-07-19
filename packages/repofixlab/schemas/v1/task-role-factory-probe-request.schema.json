@@ -1,0 +1,46 @@
+{
+	"$id": "urn:repofixlab:schema:v1:task-role-factory-probe-request",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"candidate_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"candidate_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"operation_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"probe_profile": {
+			"const": "axios-worker-evaluator-smoke-v1",
+			"type": "string"
+		},
+		"request_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"request_type": {
+			"const": "task_role_factory_probe",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		}
+	},
+	"required": [
+		"schema_version",
+		"request_type",
+		"operation_id",
+		"candidate_id",
+		"candidate_sha256",
+		"probe_profile",
+		"request_sha256"
+	],
+	"type": "object"
+}

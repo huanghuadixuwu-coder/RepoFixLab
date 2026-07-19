@@ -1,0 +1,1477 @@
+{
+	"$id": "urn:repofixlab:schema:v1:task-role-factory-probe-report",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"base_commit": {
+			"const": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+			"type": "string"
+		},
+		"candidate_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"candidate_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"controller_execution": {
+			"additionalProperties": false,
+			"properties": {
+				"cap_drop": {
+					"items": {
+						"maxLength": 100,
+						"minLength": 1,
+						"type": "string"
+					},
+					"type": "array",
+					"uniqueItems": true
+				},
+				"compose_config_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"compose_project": {
+					"pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+					"type": "string"
+				},
+				"compose_service": {
+					"const": "controller",
+					"type": "string"
+				},
+				"container_hostname": {
+					"pattern": "^[a-f0-9]{12,64}$",
+					"type": "string"
+				},
+				"container_id": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"image_id": {
+					"pattern": "^sha256:[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"mounts": {
+					"items": {
+						"additionalProperties": false,
+						"properties": {
+							"destination": {
+								"pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+								"type": "string"
+							},
+							"read_write": {
+								"type": "boolean"
+							},
+							"source": {
+								"anyOf": [
+									{
+										"maxLength": 500,
+										"minLength": 1,
+										"type": "string"
+									},
+									{
+										"type": "null"
+									}
+								]
+							},
+							"type": {
+								"anyOf": [
+									{
+										"const": "bind",
+										"type": "string"
+									},
+									{
+										"const": "volume",
+										"type": "string"
+									},
+									{
+										"const": "tmpfs",
+										"type": "string"
+									}
+								]
+							}
+						},
+						"required": [
+							"type",
+							"source",
+							"destination",
+							"read_write"
+						],
+						"type": "object"
+					},
+					"maxItems": 4,
+					"minItems": 4,
+					"type": "array"
+				},
+				"networks": {
+					"items": {
+						"additionalProperties": false,
+						"properties": {
+							"compose_network": {
+								"const": "repofix-control",
+								"type": "string"
+							},
+							"compose_project": {
+								"pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+								"type": "string"
+							},
+							"internal": {
+								"type": "boolean"
+							},
+							"network_id": {
+								"pattern": "^[a-f0-9]{64}$",
+								"type": "string"
+							}
+						},
+						"required": [
+							"network_id",
+							"compose_project",
+							"compose_network",
+							"internal"
+						],
+						"type": "object"
+					},
+					"maxItems": 1,
+					"minItems": 1,
+					"type": "array"
+				},
+				"published_ports": {
+					"items": {
+						"maxLength": 500,
+						"minLength": 1,
+						"type": "string"
+					},
+					"type": "array",
+					"uniqueItems": true
+				},
+				"read_only_root_filesystem": {
+					"type": "boolean"
+				},
+				"security_opt": {
+					"items": {
+						"maxLength": 200,
+						"minLength": 1,
+						"type": "string"
+					},
+					"type": "array",
+					"uniqueItems": true
+				}
+			},
+			"required": [
+				"container_hostname",
+				"container_id",
+				"image_id",
+				"compose_project",
+				"compose_service",
+				"compose_config_sha256",
+				"read_only_root_filesystem",
+				"cap_drop",
+				"security_opt",
+				"published_ports",
+				"networks",
+				"mounts"
+			],
+			"type": "object"
+		},
+		"errors": {
+			"items": {
+				"minLength": 1,
+				"type": "string"
+			},
+			"type": "array"
+		},
+		"execution_order": {
+			"items": {
+				"anyOf": [
+					{
+						"const": "worker",
+						"type": "string"
+					},
+					{
+						"const": "evaluator",
+						"type": "string"
+					}
+				]
+			},
+			"maxItems": 2,
+			"minItems": 2,
+			"type": "array",
+			"uniqueItems": true
+		},
+		"finished_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"instance_id": {
+			"const": "axios__axios-5892",
+			"type": "string"
+		},
+		"operation_id": {
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+			"type": "string"
+		},
+		"probe_profile": {
+			"const": "axios-worker-evaluator-smoke-v1",
+			"type": "string"
+		},
+		"report_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"report_type": {
+			"const": "task_role_factory_probe",
+			"type": "string"
+		},
+		"request_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"roles": {
+			"additionalProperties": false,
+			"properties": {
+				"evaluator": {
+					"additionalProperties": false,
+					"properties": {
+						"active_probe": {
+							"anyOf": [
+								{
+									"additionalProperties": false,
+									"properties": {
+										"docker_socket_paths_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "/var/run/docker.sock",
+														"type": "string"
+													},
+													{
+														"const": "/run/docker.sock",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"duration_ms": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"errors": {
+											"items": {
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array"
+										},
+										"exit_code": {
+											"anyOf": [
+												{
+													"type": "integer"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"nonce_sha256": {
+											"pattern": "^[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"observed_base_commit": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{40}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"observed_gid": {
+											"anyOf": [
+												{
+													"minimum": 0,
+													"type": "integer"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"observed_uid": {
+											"anyOf": [
+												{
+													"minimum": 0,
+													"type": "integer"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"probe_sha256": {
+											"pattern": "^[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"sensitive_environment_names_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "ZHIPU_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "OPENAI_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "ANTHROPIC_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "DOCKER_HOST",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"status": {
+											"anyOf": [
+												{
+													"const": "pass",
+													"type": "string"
+												},
+												{
+													"const": "fail",
+													"type": "string"
+												}
+											]
+										},
+										"stderr_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"stdout_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"timed_out": {
+											"type": "boolean"
+										},
+										"writable_path_roundtrip": {
+											"type": "boolean"
+										}
+									},
+									"required": [
+										"status",
+										"probe_sha256",
+										"nonce_sha256",
+										"exit_code",
+										"timed_out",
+										"duration_ms",
+										"stdout_sha256",
+										"stderr_sha256",
+										"observed_uid",
+										"observed_gid",
+										"observed_base_commit",
+										"writable_path_roundtrip",
+										"docker_socket_paths_present",
+										"sensitive_environment_names_present",
+										"errors"
+									],
+									"type": "object"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"actual_image_id": {
+							"anyOf": [
+								{
+									"pattern": "^sha256:[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"actual_platform": {
+							"anyOf": [
+								{
+									"maxLength": 100,
+									"minLength": 1,
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"actual_provenance_sha256": {
+							"anyOf": [
+								{
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"cleanup": {
+							"additionalProperties": false,
+							"properties": {
+								"container_removal_attempted": {
+									"type": "boolean"
+								},
+								"container_removed": {
+									"type": "boolean"
+								},
+								"created_volume_names": {
+									"items": {
+										"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								},
+								"errors": {
+									"items": {
+										"minLength": 1,
+										"type": "string"
+									},
+									"type": "array"
+								},
+								"removed_volume_names": {
+									"items": {
+										"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								},
+								"residual_container_ids": {
+									"items": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								},
+								"residual_volume_names": {
+									"items": {
+										"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								}
+							},
+							"required": [
+								"container_removal_attempted",
+								"container_removed",
+								"created_volume_names",
+								"removed_volume_names",
+								"residual_container_ids",
+								"residual_volume_names",
+								"errors"
+							],
+							"type": "object"
+						},
+						"container_id": {
+							"anyOf": [
+								{
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"errors": {
+							"items": {
+								"minLength": 1,
+								"type": "string"
+							},
+							"type": "array"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"expected_image_id": {
+							"pattern": "^sha256:[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"expected_platform": {
+							"const": "linux/amd64",
+							"type": "string"
+						},
+						"expected_provenance_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"failure_phase": {
+							"anyOf": [
+								{
+									"anyOf": [
+										{
+											"const": "candidate_validation",
+											"type": "string"
+										},
+										{
+											"const": "image_inspect",
+											"type": "string"
+										},
+										{
+											"const": "create",
+											"type": "string"
+										},
+										{
+											"const": "start",
+											"type": "string"
+										},
+										{
+											"const": "active_probe",
+											"type": "string"
+										},
+										{
+											"const": "runtime_inspect",
+											"type": "string"
+										},
+										{
+											"const": "cleanup",
+											"type": "string"
+										},
+										{
+											"const": "residual_audit",
+											"type": "string"
+										}
+									]
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"inspect": {
+							"anyOf": [
+								{
+									"additionalProperties": false,
+									"properties": {
+										"auto_remove": {
+											"type": "boolean"
+										},
+										"cap_add": {
+											"items": {
+												"maxLength": 100,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"cap_drop": {
+											"items": {
+												"maxLength": 100,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"configured_user": {
+											"maxLength": 100,
+											"minLength": 1,
+											"type": "string"
+										},
+										"device_count": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"docker_socket_paths_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "/var/run/docker.sock",
+														"type": "string"
+													},
+													{
+														"const": "/run/docker.sock",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"gid": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"memory_bytes": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"memory_swap_bytes": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"mounts": {
+											"items": {
+												"additionalProperties": false,
+												"properties": {
+													"destination": {
+														"pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+														"type": "string"
+													},
+													"read_write": {
+														"type": "boolean"
+													},
+													"source": {
+														"anyOf": [
+															{
+																"maxLength": 500,
+																"minLength": 1,
+																"type": "string"
+															},
+															{
+																"type": "null"
+															}
+														]
+													},
+													"type": {
+														"anyOf": [
+															{
+																"const": "bind",
+																"type": "string"
+															},
+															{
+																"const": "volume",
+																"type": "string"
+															},
+															{
+																"const": "tmpfs",
+																"type": "string"
+															}
+														]
+													}
+												},
+												"required": [
+													"type",
+													"source",
+													"destination",
+													"read_write"
+												],
+												"type": "object"
+											},
+											"type": "array"
+										},
+										"nano_cpus": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"network_mode": {
+											"maxLength": 100,
+											"minLength": 1,
+											"type": "string"
+										},
+										"pids_limit": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"privileged": {
+											"type": "boolean"
+										},
+										"published_ports": {
+											"items": {
+												"maxLength": 500,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"read_only_root_filesystem": {
+											"type": "boolean"
+										},
+										"security_opt": {
+											"items": {
+												"maxLength": 200,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"sensitive_environment_names_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "ZHIPU_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "OPENAI_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "ANTHROPIC_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "DOCKER_HOST",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"stdin_open": {
+											"type": "boolean"
+										},
+										"tty": {
+											"type": "boolean"
+										},
+										"uid": {
+											"minimum": 0,
+											"type": "integer"
+										}
+									},
+									"required": [
+										"configured_user",
+										"uid",
+										"gid",
+										"network_mode",
+										"read_only_root_filesystem",
+										"cap_drop",
+										"cap_add",
+										"security_opt",
+										"privileged",
+										"device_count",
+										"nano_cpus",
+										"memory_bytes",
+										"memory_swap_bytes",
+										"pids_limit",
+										"tty",
+										"stdin_open",
+										"auto_remove",
+										"published_ports",
+										"mounts",
+										"docker_socket_paths_present",
+										"sensitive_environment_names_present"
+									],
+									"type": "object"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"role": {
+							"const": "evaluator",
+							"type": "string"
+						},
+						"status": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"role",
+						"status",
+						"failure_phase",
+						"container_id",
+						"expected_image_id",
+						"actual_image_id",
+						"expected_platform",
+						"actual_platform",
+						"expected_provenance_sha256",
+						"actual_provenance_sha256",
+						"inspect",
+						"active_probe",
+						"cleanup",
+						"errors",
+						"evidence_sha256"
+					],
+					"type": "object"
+				},
+				"worker": {
+					"additionalProperties": false,
+					"properties": {
+						"active_probe": {
+							"anyOf": [
+								{
+									"additionalProperties": false,
+									"properties": {
+										"docker_socket_paths_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "/var/run/docker.sock",
+														"type": "string"
+													},
+													{
+														"const": "/run/docker.sock",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"duration_ms": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"errors": {
+											"items": {
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array"
+										},
+										"exit_code": {
+											"anyOf": [
+												{
+													"type": "integer"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"nonce_sha256": {
+											"pattern": "^[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"observed_base_commit": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{40}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"observed_gid": {
+											"anyOf": [
+												{
+													"minimum": 0,
+													"type": "integer"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"observed_uid": {
+											"anyOf": [
+												{
+													"minimum": 0,
+													"type": "integer"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"probe_sha256": {
+											"pattern": "^[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"sensitive_environment_names_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "ZHIPU_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "OPENAI_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "ANTHROPIC_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "DOCKER_HOST",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"status": {
+											"anyOf": [
+												{
+													"const": "pass",
+													"type": "string"
+												},
+												{
+													"const": "fail",
+													"type": "string"
+												}
+											]
+										},
+										"stderr_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"stdout_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"timed_out": {
+											"type": "boolean"
+										},
+										"writable_path_roundtrip": {
+											"type": "boolean"
+										}
+									},
+									"required": [
+										"status",
+										"probe_sha256",
+										"nonce_sha256",
+										"exit_code",
+										"timed_out",
+										"duration_ms",
+										"stdout_sha256",
+										"stderr_sha256",
+										"observed_uid",
+										"observed_gid",
+										"observed_base_commit",
+										"writable_path_roundtrip",
+										"docker_socket_paths_present",
+										"sensitive_environment_names_present",
+										"errors"
+									],
+									"type": "object"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"actual_image_id": {
+							"anyOf": [
+								{
+									"pattern": "^sha256:[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"actual_platform": {
+							"anyOf": [
+								{
+									"maxLength": 100,
+									"minLength": 1,
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"actual_provenance_sha256": {
+							"anyOf": [
+								{
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"cleanup": {
+							"additionalProperties": false,
+							"properties": {
+								"container_removal_attempted": {
+									"type": "boolean"
+								},
+								"container_removed": {
+									"type": "boolean"
+								},
+								"created_volume_names": {
+									"items": {
+										"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								},
+								"errors": {
+									"items": {
+										"minLength": 1,
+										"type": "string"
+									},
+									"type": "array"
+								},
+								"removed_volume_names": {
+									"items": {
+										"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								},
+								"residual_container_ids": {
+									"items": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								},
+								"residual_volume_names": {
+									"items": {
+										"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+										"type": "string"
+									},
+									"type": "array",
+									"uniqueItems": true
+								}
+							},
+							"required": [
+								"container_removal_attempted",
+								"container_removed",
+								"created_volume_names",
+								"removed_volume_names",
+								"residual_container_ids",
+								"residual_volume_names",
+								"errors"
+							],
+							"type": "object"
+						},
+						"container_id": {
+							"anyOf": [
+								{
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"errors": {
+							"items": {
+								"minLength": 1,
+								"type": "string"
+							},
+							"type": "array"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"expected_image_id": {
+							"pattern": "^sha256:[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"expected_platform": {
+							"const": "linux/amd64",
+							"type": "string"
+						},
+						"expected_provenance_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"failure_phase": {
+							"anyOf": [
+								{
+									"anyOf": [
+										{
+											"const": "candidate_validation",
+											"type": "string"
+										},
+										{
+											"const": "image_inspect",
+											"type": "string"
+										},
+										{
+											"const": "create",
+											"type": "string"
+										},
+										{
+											"const": "start",
+											"type": "string"
+										},
+										{
+											"const": "active_probe",
+											"type": "string"
+										},
+										{
+											"const": "runtime_inspect",
+											"type": "string"
+										},
+										{
+											"const": "cleanup",
+											"type": "string"
+										},
+										{
+											"const": "residual_audit",
+											"type": "string"
+										}
+									]
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"inspect": {
+							"anyOf": [
+								{
+									"additionalProperties": false,
+									"properties": {
+										"auto_remove": {
+											"type": "boolean"
+										},
+										"cap_add": {
+											"items": {
+												"maxLength": 100,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"cap_drop": {
+											"items": {
+												"maxLength": 100,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"configured_user": {
+											"maxLength": 100,
+											"minLength": 1,
+											"type": "string"
+										},
+										"device_count": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"docker_socket_paths_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "/var/run/docker.sock",
+														"type": "string"
+													},
+													{
+														"const": "/run/docker.sock",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"gid": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"memory_bytes": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"memory_swap_bytes": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"mounts": {
+											"items": {
+												"additionalProperties": false,
+												"properties": {
+													"destination": {
+														"pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+														"type": "string"
+													},
+													"read_write": {
+														"type": "boolean"
+													},
+													"source": {
+														"anyOf": [
+															{
+																"maxLength": 500,
+																"minLength": 1,
+																"type": "string"
+															},
+															{
+																"type": "null"
+															}
+														]
+													},
+													"type": {
+														"anyOf": [
+															{
+																"const": "bind",
+																"type": "string"
+															},
+															{
+																"const": "volume",
+																"type": "string"
+															},
+															{
+																"const": "tmpfs",
+																"type": "string"
+															}
+														]
+													}
+												},
+												"required": [
+													"type",
+													"source",
+													"destination",
+													"read_write"
+												],
+												"type": "object"
+											},
+											"type": "array"
+										},
+										"nano_cpus": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"network_mode": {
+											"maxLength": 100,
+											"minLength": 1,
+											"type": "string"
+										},
+										"pids_limit": {
+											"minimum": 0,
+											"type": "integer"
+										},
+										"privileged": {
+											"type": "boolean"
+										},
+										"published_ports": {
+											"items": {
+												"maxLength": 500,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"read_only_root_filesystem": {
+											"type": "boolean"
+										},
+										"security_opt": {
+											"items": {
+												"maxLength": 200,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"sensitive_environment_names_present": {
+											"items": {
+												"anyOf": [
+													{
+														"const": "ZHIPU_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "OPENAI_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "ANTHROPIC_API_KEY",
+														"type": "string"
+													},
+													{
+														"const": "DOCKER_HOST",
+														"type": "string"
+													}
+												]
+											},
+											"type": "array",
+											"uniqueItems": true
+										},
+										"stdin_open": {
+											"type": "boolean"
+										},
+										"tty": {
+											"type": "boolean"
+										},
+										"uid": {
+											"minimum": 0,
+											"type": "integer"
+										}
+									},
+									"required": [
+										"configured_user",
+										"uid",
+										"gid",
+										"network_mode",
+										"read_only_root_filesystem",
+										"cap_drop",
+										"cap_add",
+										"security_opt",
+										"privileged",
+										"device_count",
+										"nano_cpus",
+										"memory_bytes",
+										"memory_swap_bytes",
+										"pids_limit",
+										"tty",
+										"stdin_open",
+										"auto_remove",
+										"published_ports",
+										"mounts",
+										"docker_socket_paths_present",
+										"sensitive_environment_names_present"
+									],
+									"type": "object"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"role": {
+							"const": "worker",
+							"type": "string"
+						},
+						"status": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"role",
+						"status",
+						"failure_phase",
+						"container_id",
+						"expected_image_id",
+						"actual_image_id",
+						"expected_platform",
+						"actual_platform",
+						"expected_provenance_sha256",
+						"actual_provenance_sha256",
+						"inspect",
+						"active_probe",
+						"cleanup",
+						"errors",
+						"evidence_sha256"
+					],
+					"type": "object"
+				}
+			},
+			"required": [
+				"worker",
+				"evaluator"
+			],
+			"type": "object"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"started_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "pass",
+					"type": "string"
+				},
+				{
+					"const": "fail",
+					"type": "string"
+				}
+			]
+		}
+	},
+	"required": [
+		"schema_version",
+		"report_type",
+		"operation_id",
+		"request_sha256",
+		"candidate_id",
+		"candidate_sha256",
+		"probe_profile",
+		"instance_id",
+		"base_commit",
+		"controller_execution",
+		"status",
+		"started_at",
+		"finished_at",
+		"execution_order",
+		"roles",
+		"errors",
+		"report_sha256"
+	],
+	"type": "object"
+}

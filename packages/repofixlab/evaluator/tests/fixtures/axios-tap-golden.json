@@ -1,0 +1,7 @@
+{
+	"status_map": {
+		"preserves compression": "passed",
+		"rejects invalid gzip": "failed"
+	},
+	"skipped_tests": []
+}

@@ -1,0 +1,240 @@
+{
+	"base_commit": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+	"candidate_id": "task-environment-candidate-v1-axios-5892-9b7cc7a32f2f05e6a7bc09def5496856781cc8316b6f3340ce037021936df206",
+	"candidate_sha256": "4d9ca4a09de47020fedebfb9c6bf97396d52437670edfd68fd49ea126c6ec105",
+	"controller_execution": {
+		"cap_drop": [
+			"ALL"
+		],
+		"compose_config_sha256": "6891887f7b381ee479d7f82f470be2099387cad2bc7b97f9e8010de5fb214fd6",
+		"compose_project": "repofixlab",
+		"compose_service": "controller",
+		"container_hostname": "3e3be0faa306",
+		"container_id": "3e3be0faa306879a07dd602288f4d6336cc4617fe9c657ff7ae37d1f2ea05876",
+		"image_id": "sha256:bcd67a22931572794b5ef2c13439ec2ded77cab94372df249f0e8ae671e492f5",
+		"mounts": [
+			{
+				"destination": "/var/run/docker.sock",
+				"read_write": true,
+				"source": "/var/run/docker.sock",
+				"type": "bind"
+			},
+			{
+				"destination": "/tmp",
+				"read_write": true,
+				"source": null,
+				"type": "tmpfs"
+			},
+			{
+				"destination": "/etc/repofixlab/candidates",
+				"read_write": false,
+				"source": "repofixlab_controller-candidates-v1",
+				"type": "volume"
+			},
+			{
+				"destination": "/var/lib/repofix/controller",
+				"read_write": true,
+				"source": "repofixlab_controller-work-v2",
+				"type": "volume"
+			}
+		],
+		"networks": [
+			{
+				"compose_network": "repofix-control",
+				"compose_project": "repofixlab",
+				"internal": true,
+				"network_id": "a140a4f160f12fc187736049a1fae6a41d092d5d732a36a633cbbb6b7b025481"
+			}
+		],
+		"published_ports": [],
+		"read_only_root_filesystem": true,
+		"security_opt": [
+			"no-new-privileges:true"
+		]
+	},
+	"errors": [],
+	"execution_order": [
+		"worker",
+		"evaluator"
+	],
+	"finished_at": "2026-07-18T19:26:15.267270Z",
+	"instance_id": "axios__axios-5892",
+	"operation_id": "factory-probe:axios-5892:20260718T192556208Z",
+	"probe_profile": "axios-worker-evaluator-smoke-v1",
+	"report_sha256": "f68e8d9ef4cb16b9a1b76c0e702fc5a7594887d8b3719a62bafb1c4d1076697b",
+	"report_type": "task_role_factory_probe",
+	"request_sha256": "ca232e98304fa6efacd28b0c50468855437acdee07fc2e06a1f574c04a1e2a46",
+	"roles": {
+		"evaluator": {
+			"active_probe": {
+				"docker_socket_paths_present": [],
+				"duration_ms": 7480,
+				"errors": [],
+				"exit_code": 0,
+				"nonce_sha256": "e357d6a38fddcf66edd5640025c32a5bbf7224db3ad3fb3dec91c46eb0a5693e",
+				"observed_base_commit": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+				"observed_gid": 0,
+				"observed_uid": 0,
+				"probe_sha256": "f66942a1754e328c22677c2096fd3fe8523dff39e2bb4c403adcfb142d91b775",
+				"sensitive_environment_names_present": [],
+				"status": "pass",
+				"stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				"stdout_sha256": "a8e0d3b59d5fe367c1396b6c959a299c48db67a263c6f65d10ac25618139dd56",
+				"timed_out": false,
+				"writable_path_roundtrip": true
+			},
+			"actual_image_id": "sha256:1ec1230faa109d7d89c819740cc8f9daa6c80dade0e30e5a91834fa20feb54f1",
+			"actual_platform": "linux/amd64",
+			"actual_provenance_sha256": "e280b68d557aab18fb8bf87a0fff417b3efbf231a0dd7cda6e583dcf5ed4d4d6",
+			"cleanup": {
+				"container_removal_attempted": true,
+				"container_removed": true,
+				"created_volume_names": [
+					"repofixlab-evaluator-ac21747bb27cb232a918cad5-testbed"
+				],
+				"errors": [],
+				"removed_volume_names": [
+					"repofixlab-evaluator-ac21747bb27cb232a918cad5-testbed"
+				],
+				"residual_container_ids": [],
+				"residual_volume_names": []
+			},
+			"container_id": "a526a6a8a18e604097b83329c109d3097b3c47e79ea090f25746a2e4cb6d4df7",
+			"errors": [],
+			"evidence_sha256": "251158b62bb2ccb675deafb3d33a54f6ee2cc542ea76a3d7a652093f93f4bc7a",
+			"expected_image_id": "sha256:1ec1230faa109d7d89c819740cc8f9daa6c80dade0e30e5a91834fa20feb54f1",
+			"expected_platform": "linux/amd64",
+			"expected_provenance_sha256": "e280b68d557aab18fb8bf87a0fff417b3efbf231a0dd7cda6e583dcf5ed4d4d6",
+			"failure_phase": null,
+			"inspect": {
+				"auto_remove": false,
+				"cap_add": [],
+				"cap_drop": [
+					"ALL"
+				],
+				"configured_user": "0:0",
+				"device_count": 0,
+				"docker_socket_paths_present": [],
+				"gid": 0,
+				"memory_bytes": 8589934592,
+				"memory_swap_bytes": 8589934592,
+				"mounts": [
+					{
+						"destination": "/tmp",
+						"read_write": true,
+						"source": null,
+						"type": "tmpfs"
+					},
+					{
+						"destination": "/testbed",
+						"read_write": true,
+						"source": "repofixlab-evaluator-ac21747bb27cb232a918cad5-testbed",
+						"type": "volume"
+					}
+				],
+				"nano_cpus": 4000000000,
+				"network_mode": "none",
+				"pids_limit": 512,
+				"privileged": false,
+				"published_ports": [],
+				"read_only_root_filesystem": true,
+				"security_opt": [
+					"no-new-privileges:true"
+				],
+				"sensitive_environment_names_present": [],
+				"stdin_open": false,
+				"tty": false,
+				"uid": 0
+			},
+			"role": "evaluator",
+			"status": "pass"
+		},
+		"worker": {
+			"active_probe": {
+				"docker_socket_paths_present": [],
+				"duration_ms": 7464,
+				"errors": [],
+				"exit_code": 0,
+				"nonce_sha256": "951d95574d0e39c03017b627ad00f363893b769a63da389a8a58fa281f3c5524",
+				"observed_base_commit": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+				"observed_gid": 65532,
+				"observed_uid": 65532,
+				"probe_sha256": "f66942a1754e328c22677c2096fd3fe8523dff39e2bb4c403adcfb142d91b775",
+				"sensitive_environment_names_present": [],
+				"status": "pass",
+				"stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				"stdout_sha256": "c1a0c22d8533beab4ab89519a9a3ceafad68147497d4789a73fecc036fe49a75",
+				"timed_out": false,
+				"writable_path_roundtrip": true
+			},
+			"actual_image_id": "sha256:2ebfd777d35cc2126d4c072b9a47cae7efc05062d2b762f6b052de9dc2aa9457",
+			"actual_platform": "linux/amd64",
+			"actual_provenance_sha256": "2753a0b780a86027745ce0f4655782b7ff91d0333c1e9836d027016a90224e2b",
+			"cleanup": {
+				"container_removal_attempted": true,
+				"container_removed": true,
+				"created_volume_names": [
+					"repofixlab-worker-97ef06ad14d3dac39f535cef-testbed"
+				],
+				"errors": [],
+				"removed_volume_names": [
+					"repofixlab-worker-97ef06ad14d3dac39f535cef-testbed"
+				],
+				"residual_container_ids": [],
+				"residual_volume_names": []
+			},
+			"container_id": "2c48edadd919620bfb9694a010d67cacae9a6944e4b0a8a134c554b42960e911",
+			"errors": [],
+			"evidence_sha256": "7a4e50091933b9b72177d5b2023330723aa1ae9eb359e3c0719171dc41d12b7c",
+			"expected_image_id": "sha256:2ebfd777d35cc2126d4c072b9a47cae7efc05062d2b762f6b052de9dc2aa9457",
+			"expected_platform": "linux/amd64",
+			"expected_provenance_sha256": "2753a0b780a86027745ce0f4655782b7ff91d0333c1e9836d027016a90224e2b",
+			"failure_phase": null,
+			"inspect": {
+				"auto_remove": false,
+				"cap_add": [],
+				"cap_drop": [
+					"ALL"
+				],
+				"configured_user": "65532:65532",
+				"device_count": 0,
+				"docker_socket_paths_present": [],
+				"gid": 65532,
+				"memory_bytes": 8589934592,
+				"memory_swap_bytes": 8589934592,
+				"mounts": [
+					{
+						"destination": "/tmp",
+						"read_write": true,
+						"source": null,
+						"type": "tmpfs"
+					},
+					{
+						"destination": "/testbed",
+						"read_write": true,
+						"source": "repofixlab-worker-97ef06ad14d3dac39f535cef-testbed",
+						"type": "volume"
+					}
+				],
+				"nano_cpus": 4000000000,
+				"network_mode": "none",
+				"pids_limit": 512,
+				"privileged": false,
+				"published_ports": [],
+				"read_only_root_filesystem": true,
+				"security_opt": [
+					"no-new-privileges:true"
+				],
+				"sensitive_environment_names_present": [],
+				"stdin_open": false,
+				"tty": false,
+				"uid": 65532
+			},
+			"role": "worker",
+			"status": "pass"
+		}
+	},
+	"schema_version": "v1",
+	"started_at": "2026-07-18T19:25:57.379475Z",
+	"status": "pass"
+}

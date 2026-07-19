@@ -1,0 +1,46 @@
+{
+	"adapter_sha256": "a8aaaffee376dbbc91e48682d49b334fa617eb1dd38156637cda5809f1d24857",
+	"base_commit": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+	"harness_revision": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+	"instance_id": "axios__axios-5892",
+	"official_source_lock_sha256": "f7e8a6e953d3351fd9c4dcea471222a277d55af7b5c25d384bda251b91c51a71",
+	"pristine_runtime_lock_sha256": "9891aba2d22413f25cdbad6addd05cb2fdd8b91d11b9d3dbacd7cd8b5f1802c8",
+	"probes": [
+		{
+			"adapted_report_sha256": "10b75f318ff8112712c623b5be5dfd232ec13107b8aa21f1d7026e3a810d1e06",
+			"equivalent": true,
+			"expected_outcome": true,
+			"mismatched_fields": [],
+			"pristine_report_sha256": "c40fc64d4d08172622a820e84206b25ef0761b82fe4d65d2e929613ee80531f3",
+			"probe_kind": "base"
+		},
+		{
+			"adapted_report_sha256": "17749a04891a6f0a3be60dd6c20dc35d0277af997667167346c240610389bf91",
+			"equivalent": true,
+			"expected_outcome": true,
+			"mismatched_fields": [],
+			"pristine_report_sha256": "3baf4a7e395c2c69f78bc94d19469cf765c0705cdb9e976c507056101880fb6e",
+			"probe_kind": "no_op"
+		},
+		{
+			"adapted_report_sha256": "d7b006d34f50f725baabcbc67466c00ca389c1f56a69032beeefed0f46805a22",
+			"equivalent": true,
+			"expected_outcome": true,
+			"mismatched_fields": [],
+			"pristine_report_sha256": "627d646b5730d2f09f2e430bc2d57c9f262bf88b589da12297909341d16d5e13",
+			"probe_kind": "malformed"
+		},
+		{
+			"adapted_report_sha256": "61c2185bcd506b88adc1f4dc5445f7426f51551985e388dcd1e1305c0ed6b275",
+			"equivalent": true,
+			"expected_outcome": true,
+			"mismatched_fields": [],
+			"pristine_report_sha256": "ab43abeb85be0a117a0f90d4910d182e243987ff163dc5906658f775bd2ad849",
+			"probe_kind": "gold"
+		}
+	],
+	"report_sha256": "453ec69ef1cc22a8f040769124265c81655dc873766fa346d4468632e622c700",
+	"report_type": "harness_equivalence",
+	"schema_version": "v1",
+	"status": "pass"
+}

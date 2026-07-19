@@ -1,0 +1,34 @@
+{
+	"adapter_id": "axios-5892-swebench-multilingual-v1",
+	"adapter_type": "swebench_multilingual_javascript",
+	"base_commit": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+	"candidate_patch": {
+		"apply_commands": [
+			"git apply --verbose",
+			"git apply --verbose --reject",
+			"patch --batch --fuzz=5 -p1 -i"
+		],
+		"max_bytes": 1048576,
+		"sha256_required": true
+	},
+	"harness_revision": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+	"instance_id": "axios__axios-5892",
+	"network_mode": "none",
+	"report_parser": "tap",
+	"schema_version": "v1",
+	"test_command": [
+		"npx",
+		"mocha",
+		"test/unit/adapters/http.js",
+		"-R",
+		"tap",
+		"-g",
+		"compression"
+	],
+	"test_patch": {
+		"apply_command": "git apply --verbose --reject -",
+		"source": "sealed_private_dataset_record"
+	},
+	"timeout_seconds": 300,
+	"working_directory": "/testbed"
+}

@@ -1,0 +1,137 @@
+{
+	"$id": "urn:repofixlab:schema:v1:public-task-manifest",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"created_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"dataset_lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"manifest_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"manifest_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"resource_profile": {
+			"additionalProperties": false,
+			"properties": {
+				"cpu_count": {
+					"exclusiveMinimum": 0,
+					"type": "number"
+				},
+				"memory_bytes": {
+					"minimum": 1,
+					"type": "integer"
+				},
+				"network_mode": {
+					"const": "none",
+					"type": "string"
+				},
+				"pids_limit": {
+					"minimum": 1,
+					"type": "integer"
+				},
+				"read_only_root_filesystem": {
+					"const": true,
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"cpu_count",
+				"memory_bytes",
+				"pids_limit",
+				"network_mode",
+				"read_only_root_filesystem"
+			],
+			"type": "object"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"split": {
+			"anyOf": [
+				{
+					"const": "dev",
+					"type": "string"
+				},
+				{
+					"const": "validation",
+					"type": "string"
+				},
+				{
+					"const": "test",
+					"type": "string"
+				}
+			]
+		},
+		"task": {
+			"additionalProperties": false,
+			"properties": {
+				"base_commit": {
+					"pattern": "^[a-f0-9]{40}$",
+					"type": "string"
+				},
+				"instance_id": {
+					"maxLength": 200,
+					"minLength": 1,
+					"type": "string"
+				},
+				"language": {
+					"maxLength": 80,
+					"minLength": 1,
+					"type": "string"
+				},
+				"problem_statement": {
+					"minLength": 1,
+					"type": "string"
+				},
+				"repo": {
+					"maxLength": 300,
+					"minLength": 1,
+					"type": "string"
+				}
+			},
+			"required": [
+				"instance_id",
+				"repo",
+				"problem_statement",
+				"base_commit",
+				"language"
+			],
+			"type": "object"
+		},
+		"task_environment_lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"worker_image_id": {
+			"pattern": "^sha256:[a-f0-9]{64}$",
+			"type": "string"
+		}
+	},
+	"required": [
+		"schema_version",
+		"manifest_id",
+		"dataset_lock_id",
+		"task_environment_lock_id",
+		"task",
+		"worker_image_id",
+		"resource_profile",
+		"split",
+		"manifest_sha256",
+		"created_at"
+	],
+	"type": "object"
+}

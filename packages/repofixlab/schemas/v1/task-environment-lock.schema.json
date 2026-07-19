@@ -1,0 +1,227 @@
+{
+	"$id": "urn:repofixlab:schema:v1:task-environment-lock",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"adapter_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"candidate_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"candidate_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"created_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"dataset_lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"evaluator_image": {
+			"additionalProperties": false,
+			"properties": {
+				"local_image_id": {
+					"pattern": "^sha256:[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"platform": {
+					"const": "linux/amd64",
+					"type": "string"
+				},
+				"provenance_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"local_image_id",
+				"platform",
+				"provenance_sha256"
+			],
+			"type": "object"
+		},
+		"filesystem_profile_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"instance_id": {
+			"maxLength": 200,
+			"minLength": 1,
+			"type": "string"
+		},
+		"lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"lock_type": {
+			"const": "task_environment",
+			"type": "string"
+		},
+		"official_image_source_lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"resource_profile": {
+			"additionalProperties": false,
+			"properties": {
+				"cpu_count": {
+					"exclusiveMinimum": 0,
+					"type": "number"
+				},
+				"memory_bytes": {
+					"minimum": 1,
+					"type": "integer"
+				},
+				"network_mode": {
+					"const": "none",
+					"type": "string"
+				},
+				"pids_limit": {
+					"minimum": 1,
+					"type": "integer"
+				},
+				"read_only_root_filesystem": {
+					"const": true,
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"cpu_count",
+				"memory_bytes",
+				"pids_limit",
+				"network_mode",
+				"read_only_root_filesystem"
+			],
+			"type": "object"
+		},
+		"sanitizer_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"seal_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"source_image": {
+			"additionalProperties": false,
+			"properties": {
+				"local_image_id": {
+					"pattern": "^sha256:[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"platform": {
+					"const": "linux/amd64",
+					"type": "string"
+				},
+				"repository_digest": {
+					"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"repository_digest",
+				"local_image_id",
+				"platform"
+			],
+			"type": "object"
+		},
+		"verification": {
+			"additionalProperties": false,
+			"properties": {
+				"completed_at": {
+					"maxLength": 64,
+					"minLength": 1,
+					"type": "string"
+				},
+				"equivalence_passed": {
+					"const": true,
+					"type": "boolean"
+				},
+				"evidence_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"factory_probe_passed": {
+					"const": true,
+					"type": "boolean"
+				},
+				"factory_probe_report_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"security_profile_passed": {
+					"const": true,
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"factory_probe_passed",
+				"factory_probe_report_sha256",
+				"equivalence_passed",
+				"security_profile_passed",
+				"evidence_sha256",
+				"completed_at"
+			],
+			"type": "object"
+		},
+		"worker_image": {
+			"additionalProperties": false,
+			"properties": {
+				"local_image_id": {
+					"pattern": "^sha256:[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"platform": {
+					"const": "linux/amd64",
+					"type": "string"
+				},
+				"provenance_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"local_image_id",
+				"platform",
+				"provenance_sha256"
+			],
+			"type": "object"
+		}
+	},
+	"required": [
+		"schema_version",
+		"lock_type",
+		"lock_id",
+		"instance_id",
+		"candidate_id",
+		"candidate_sha256",
+		"dataset_lock_id",
+		"official_image_source_lock_id",
+		"source_image",
+		"worker_image",
+		"evaluator_image",
+		"resource_profile",
+		"filesystem_profile_sha256",
+		"sanitizer_sha256",
+		"adapter_sha256",
+		"verification",
+		"seal_sha256",
+		"created_at"
+	],
+	"type": "object"
+}

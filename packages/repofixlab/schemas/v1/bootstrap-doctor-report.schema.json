@@ -1,0 +1,884 @@
+{
+	"$id": "urn:repofixlab:schema:v1:bootstrap-doctor-report",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"checks": {
+			"additionalProperties": false,
+			"properties": {
+				"base_images": {
+					"additionalProperties": false,
+					"properties": {
+						"evidence_sha256": {
+							"anyOf": [
+								{
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"lock_sha256": {
+							"anyOf": [
+								{
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"services": {
+							"additionalProperties": false,
+							"properties": {
+								"controller": {
+									"additionalProperties": false,
+									"properties": {
+										"actual_compose_config_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"actual_image_id": {
+											"anyOf": [
+												{
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"base_image_id": {
+											"anyOf": [
+												{
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"base_repository_digest": {
+											"anyOf": [
+												{
+													"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"errors": {
+											"items": {
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array"
+										},
+										"expected_compose_config_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"expected_image_id": {
+											"anyOf": [
+												{
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"state": {
+											"anyOf": [
+												{
+													"const": "pass",
+													"type": "string"
+												},
+												{
+													"const": "fail",
+													"type": "string"
+												},
+												{
+													"const": "warning",
+													"type": "string"
+												},
+												{
+													"const": "unverified",
+													"type": "string"
+												}
+											]
+										}
+									},
+									"required": [
+										"state",
+										"expected_image_id",
+										"actual_image_id",
+										"expected_compose_config_sha256",
+										"actual_compose_config_sha256",
+										"base_repository_digest",
+										"base_image_id",
+										"errors"
+									],
+									"type": "object"
+								},
+								"orchestrator": {
+									"additionalProperties": false,
+									"properties": {
+										"actual_compose_config_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"actual_image_id": {
+											"anyOf": [
+												{
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"base_image_id": {
+											"anyOf": [
+												{
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"base_repository_digest": {
+											"anyOf": [
+												{
+													"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"errors": {
+											"items": {
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array"
+										},
+										"expected_compose_config_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"expected_image_id": {
+											"anyOf": [
+												{
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"state": {
+											"anyOf": [
+												{
+													"const": "pass",
+													"type": "string"
+												},
+												{
+													"const": "fail",
+													"type": "string"
+												},
+												{
+													"const": "warning",
+													"type": "string"
+												},
+												{
+													"const": "unverified",
+													"type": "string"
+												}
+											]
+										}
+									},
+									"required": [
+										"state",
+										"expected_image_id",
+										"actual_image_id",
+										"expected_compose_config_sha256",
+										"actual_compose_config_sha256",
+										"base_repository_digest",
+										"base_image_id",
+										"errors"
+									],
+									"type": "object"
+								}
+							},
+							"required": [
+								"controller",
+								"orchestrator"
+							],
+							"type": "object"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"lock_sha256",
+						"evidence_sha256",
+						"services",
+						"message"
+					],
+					"type": "object"
+				},
+				"compute": {
+					"additionalProperties": false,
+					"properties": {
+						"cpu_count": {
+							"minimum": 0,
+							"type": "number"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"memory_bytes": {
+							"minimum": 0,
+							"type": "integer"
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"minimum_cpu_count": {
+							"exclusiveMinimum": 0,
+							"type": "number"
+						},
+						"minimum_memory_bytes": {
+							"minimum": 1,
+							"type": "integer"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"minimum_cpu_count",
+						"minimum_memory_bytes",
+						"message"
+					],
+					"type": "object"
+				},
+				"control_network": {
+					"additionalProperties": false,
+					"properties": {
+						"actual": {
+							"anyOf": [
+								{
+									"type": "boolean"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"actual",
+						"message"
+					],
+					"type": "object"
+				},
+				"controller_integrity": {
+					"additionalProperties": false,
+					"properties": {
+						"errors": {
+							"items": {
+								"minLength": 1,
+								"type": "string"
+							},
+							"type": "array"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"errors",
+						"message"
+					],
+					"type": "object"
+				},
+				"docker_daemon": {
+					"additionalProperties": false,
+					"properties": {
+						"architecture": {
+							"maxLength": 100,
+							"minLength": 1,
+							"type": "string"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"operating_system": {
+							"maxLength": 100,
+							"minLength": 1,
+							"type": "string"
+						},
+						"server_version": {
+							"maxLength": 100,
+							"minLength": 1,
+							"type": "string"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"message"
+					],
+					"type": "object"
+				},
+				"docker_managed_storage": {
+					"additionalProperties": false,
+					"properties": {
+						"available_bytes": {
+							"minimum": 0,
+							"type": "integer"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"minimum_available_bytes": {
+							"minimum": 1,
+							"type": "integer"
+						},
+						"path": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"probe_image_digest": {
+							"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						},
+						"volume_id": {
+							"maxLength": 200,
+							"minLength": 1,
+							"type": "string"
+						}
+					},
+					"required": [
+						"state",
+						"path",
+						"minimum_available_bytes",
+						"message"
+					],
+					"type": "object"
+				},
+				"docker_socket_ownership": {
+					"additionalProperties": false,
+					"properties": {
+						"actual": {
+							"additionalProperties": false,
+							"properties": {
+								"controller": {
+									"anyOf": [
+										{
+											"const": "read-write",
+											"type": "string"
+										},
+										{
+											"const": "read-only",
+											"type": "string"
+										},
+										{
+											"const": "none",
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"dataset_preparer": {
+									"anyOf": [
+										{
+											"const": "read-write",
+											"type": "string"
+										},
+										{
+											"const": "read-only",
+											"type": "string"
+										},
+										{
+											"const": "none",
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"evaluator": {
+									"anyOf": [
+										{
+											"const": "read-write",
+											"type": "string"
+										},
+										{
+											"const": "read-only",
+											"type": "string"
+										},
+										{
+											"const": "none",
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"orchestrator": {
+									"anyOf": [
+										{
+											"const": "read-write",
+											"type": "string"
+										},
+										{
+											"const": "read-only",
+											"type": "string"
+										},
+										{
+											"const": "none",
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"worker": {
+									"anyOf": [
+										{
+											"const": "read-write",
+											"type": "string"
+										},
+										{
+											"const": "read-only",
+											"type": "string"
+										},
+										{
+											"const": "none",
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								}
+							},
+							"required": [
+								"controller",
+								"orchestrator",
+								"dataset_preparer",
+								"worker",
+								"evaluator"
+							],
+							"type": "object"
+						},
+						"deferred_roles": {
+							"additionalProperties": false,
+							"properties": {
+								"dataset_preparer": {
+									"const": "dataset_prepare",
+									"type": "string"
+								},
+								"evaluator": {
+									"const": "smoke_formal",
+									"type": "string"
+								},
+								"worker": {
+									"const": "smoke_formal",
+									"type": "string"
+								}
+							},
+							"required": [
+								"dataset_preparer",
+								"worker",
+								"evaluator"
+							],
+							"type": "object"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"required_roles": {
+							"items": {
+								"anyOf": [
+									{
+										"const": "controller",
+										"type": "string"
+									},
+									{
+										"const": "orchestrator",
+										"type": "string"
+									}
+								]
+							},
+							"maxItems": 2,
+							"minItems": 2,
+							"type": "array",
+							"uniqueItems": true
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"required_roles",
+						"deferred_roles",
+						"actual",
+						"message"
+					],
+					"type": "object"
+				},
+				"host_artifacts_storage": {
+					"additionalProperties": false,
+					"properties": {
+						"available_bytes": {
+							"minimum": 0,
+							"type": "integer"
+						},
+						"evidence_sha256": {
+							"pattern": "^[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"message": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"minimum_available_bytes": {
+							"minimum": 1,
+							"type": "integer"
+						},
+						"path": {
+							"minLength": 1,
+							"type": "string"
+						},
+						"probe_image_digest": {
+							"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+							"type": "string"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						},
+						"volume_id": {
+							"maxLength": 200,
+							"minLength": 1,
+							"type": "string"
+						}
+					},
+					"required": [
+						"state",
+						"path",
+						"minimum_available_bytes",
+						"message"
+					],
+					"type": "object"
+				}
+			},
+			"required": [
+				"docker_daemon",
+				"host_artifacts_storage",
+				"docker_managed_storage",
+				"compute",
+				"control_network",
+				"docker_socket_ownership",
+				"base_images",
+				"controller_integrity"
+			],
+			"type": "object"
+		},
+		"finished_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"report_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"report_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"report_type": {
+			"const": "bootstrap_doctor",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"started_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "pass",
+					"type": "string"
+				},
+				{
+					"const": "fail",
+					"type": "string"
+				}
+			]
+		},
+		"warnings": {
+			"items": {
+				"minLength": 1,
+				"type": "string"
+			},
+			"type": "array"
+		}
+	},
+	"required": [
+		"schema_version",
+		"report_type",
+		"report_id",
+		"status",
+		"started_at",
+		"finished_at",
+		"checks",
+		"warnings",
+		"report_sha256"
+	],
+	"type": "object"
+}

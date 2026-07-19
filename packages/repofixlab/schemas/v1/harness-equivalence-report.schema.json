@@ -1,0 +1,131 @@
+{
+	"$id": "urn:repofixlab:schema:v1:harness-equivalence-report",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"adapter_sha256": {
+			"const": "a8aaaffee376dbbc91e48682d49b334fa617eb1dd38156637cda5809f1d24857",
+			"type": "string"
+		},
+		"base_commit": {
+			"const": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+			"type": "string"
+		},
+		"harness_revision": {
+			"const": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+			"type": "string"
+		},
+		"instance_id": {
+			"const": "axios__axios-5892",
+			"type": "string"
+		},
+		"official_source_lock_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"pristine_runtime_lock_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"probes": {
+			"items": {
+				"additionalProperties": false,
+				"properties": {
+					"adapted_report_sha256": {
+						"pattern": "^[a-f0-9]{64}$",
+						"type": "string"
+					},
+					"equivalent": {
+						"type": "boolean"
+					},
+					"expected_outcome": {
+						"type": "boolean"
+					},
+					"mismatched_fields": {
+						"items": {
+							"maxLength": 100,
+							"minLength": 1,
+							"type": "string"
+						},
+						"type": "array",
+						"uniqueItems": true
+					},
+					"pristine_report_sha256": {
+						"pattern": "^[a-f0-9]{64}$",
+						"type": "string"
+					},
+					"probe_kind": {
+						"anyOf": [
+							{
+								"const": "base",
+								"type": "string"
+							},
+							{
+								"const": "no_op",
+								"type": "string"
+							},
+							{
+								"const": "malformed",
+								"type": "string"
+							},
+							{
+								"const": "gold",
+								"type": "string"
+							}
+						]
+					}
+				},
+				"required": [
+					"probe_kind",
+					"pristine_report_sha256",
+					"adapted_report_sha256",
+					"equivalent",
+					"expected_outcome",
+					"mismatched_fields"
+				],
+				"type": "object"
+			},
+			"maxItems": 4,
+			"minItems": 4,
+			"type": "array"
+		},
+		"report_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"report_type": {
+			"const": "harness_equivalence",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "pass",
+					"type": "string"
+				},
+				{
+					"const": "fail",
+					"type": "string"
+				}
+			]
+		}
+	},
+	"required": [
+		"schema_version",
+		"report_type",
+		"instance_id",
+		"base_commit",
+		"harness_revision",
+		"official_source_lock_sha256",
+		"pristine_runtime_lock_sha256",
+		"adapter_sha256",
+		"status",
+		"probes",
+		"report_sha256"
+	],
+	"type": "object"
+}

@@ -1,0 +1,100 @@
+{
+	"$id": "urn:repofixlab:schema:v1:official-image-source-lock",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"created_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"dataset_revision": {
+			"maxLength": 160,
+			"minLength": 7,
+			"type": "string"
+		},
+		"harness_revision": {
+			"maxLength": 160,
+			"minLength": 7,
+			"type": "string"
+		},
+		"images": {
+			"items": {
+				"additionalProperties": false,
+				"properties": {
+					"image_key": {
+						"maxLength": 240,
+						"minLength": 1,
+						"type": "string"
+					},
+					"local_image_id": {
+						"pattern": "^sha256:[a-f0-9]{64}$",
+						"type": "string"
+					},
+					"platform": {
+						"const": "linux/amd64",
+						"type": "string"
+					},
+					"registry_response_sha256": {
+						"pattern": "^[a-f0-9]{64}$",
+						"type": "string"
+					},
+					"repository_digest": {
+						"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+						"type": "string"
+					},
+					"requested_reference": {
+						"maxLength": 500,
+						"minLength": 1,
+						"type": "string"
+					},
+					"resolved_at": {
+						"maxLength": 64,
+						"minLength": 1,
+						"type": "string"
+					}
+				},
+				"required": [
+					"image_key",
+					"requested_reference",
+					"repository_digest",
+					"local_image_id",
+					"platform",
+					"registry_response_sha256",
+					"resolved_at"
+				],
+				"type": "object"
+			},
+			"minItems": 1,
+			"type": "array"
+		},
+		"lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"lock_type": {
+			"const": "official_image_source",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"seal_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		}
+	},
+	"required": [
+		"schema_version",
+		"lock_type",
+		"lock_id",
+		"dataset_revision",
+		"harness_revision",
+		"images",
+		"seal_sha256",
+		"created_at"
+	],
+	"type": "object"
+}

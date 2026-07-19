@@ -1,0 +1,72 @@
+{
+	"created_at": "2026-07-18T17:13:45.464Z",
+	"image": {
+		"base_image": "repofixlab/pristine-harness@sha256:843e7fba4f7b754e89f195d7fa3e1e109da9f71456950efd77b1286571628177",
+		"cmd": [
+			"self-check"
+		],
+		"configured_user": "65532:65532",
+		"created_at": "2026-07-18T17:13:12.958791795Z",
+		"entrypoint": [
+			"python",
+			"-m",
+			"repofixlab_evaluator.pristine_runtime"
+		],
+		"id": "sha256:1ac3dc5ea1ddcd3c929c177a65ea0c2bad0b972603926af136714579dc34e514",
+		"labels": {
+			"io.repofixlab.harness.mode": "pristine",
+			"io.repofixlab.provenance.sha256": "369e4bb250465c6f6564eb49a1283e361d860c75c14e74ba73c3cc0fd009ee48",
+			"org.opencontainers.image.revision": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+			"org.opencontainers.image.title": "RepoFixLab pristine SWE-bench harness"
+		},
+		"oracle_runtime_user": "0:0",
+		"platform": "linux/amd64",
+		"repo_digest": "repofixlab/pristine-harness@sha256:1ac3dc5ea1ddcd3c929c177a65ea0c2bad0b972603926af136714579dc34e514",
+		"size_bytes": 178653863
+	},
+	"lock_id": "pristine-runtime-v1-ce7191d27c5ceb095a5dd248f805085773d331311fffec7ae59ceb55e19c1e2f",
+	"lock_type": "pristine_runtime",
+	"provenance": {
+		"artifact_type": "repofixlab_pristine_harness",
+		"base_image": "repofixlab/pristine-harness@sha256:843e7fba4f7b754e89f195d7fa3e1e109da9f71456950efd77b1286571628177",
+		"dependency_lock_sha256": "b836155987474285284c3b8228e8575dda5d4d3ae12e1bce049fc2894424cba9",
+		"dockerfile_sha256": "2154794533eb2c76a7bf43fd6c9fbff01ec926a1388968165b8cad2af19e0d80",
+		"evaluator_kernel_aggregate_sha256": "91187a77dd8127667caadca5cbd6ea4154bcb6b7a9ad6017c63309ec523b3e28",
+		"evaluator_kernel_bytes": 79785,
+		"evaluator_kernel_file_count": 13,
+		"platform": "linux/amd64",
+		"schema_version": "v1",
+		"sha256": "369e4bb250465c6f6564eb49a1283e361d860c75c14e74ba73c3cc0fd009ee48",
+		"source_aggregate_sha256": "b8c8574e17fd0c11159c7fa3a63e17a247ca5b2f73fa0a9899ca542cfcb093e6",
+		"source_archive_sha256": "0ef30150ddd03d353684688ca2bf63e7f8b2b4e3d82929d2da189164e92146fc",
+		"source_lock_file_sha256": "8b9ce8b01b58cbcfbef3a88e1b4cb99289553c948ccaa27afa83771ae5bb6741",
+		"source_lock_sha256": "f7e8a6e953d3351fd9c4dcea471222a277d55af7b5c25d384bda251b91c51a71",
+		"upstream_revision": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+		"upstream_tree_sha1": "f178530b37202c549b1b2b3300db2da90da648db"
+	},
+	"schema_version": "v1",
+	"semantic_sha256": "ce7191d27c5ceb095a5dd248f805085773d331311fffec7ae59ceb55e19c1e2f",
+	"verification": {
+		"build_time_self_check_passed": true,
+		"current_materials_bound": true,
+		"golden_oracle_resolved": true,
+		"golden_oracle_status_map_sha256": "00f69ade8e7237bb84f0d42c92c48fff1b4a7c4e37f3493804fbb978a0c9fbf0",
+		"restricted_runtime_self_check_passed": true,
+		"run_evaluation_import": "swebench/harness/run_evaluation.py",
+		"runtime_controls": {
+			"cap_drop": [
+				"ALL"
+			],
+			"cpus": 1,
+			"docker_socket": false,
+			"memory_bytes": 1073741824,
+			"network": "none",
+			"no_new_privileges": true,
+			"pids_limit": 128,
+			"published_ports": false,
+			"read_only_root": true,
+			"sensitive_environment": false,
+			"tmpfs": "/tmp:rw,noexec,nosuid,size=16m"
+		}
+	}
+}

@@ -1,0 +1,55 @@
+{
+	"schema_version": "v1",
+	"lock_type": "official_harness_source",
+	"lock_id": "official-harness-source-swebench-v4.1.0-726c5461",
+	"upstream_version": "v4.1.0",
+	"upstream_revision": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+	"upstream_tree_sha1": "f178530b37202c549b1b2b3300db2da90da648db",
+	"source_scope": "swebench",
+	"source_file_count": 591,
+	"source_bytes": 1953143,
+	"source_aggregate_sha256": "b8c8574e17fd0c11159c7fa3a63e17a247ca5b2f73fa0a9899ca542cfcb093e6",
+	"pyproject_sha256": "d22ab0d742c5bf1f09df4d1ad317d21fb81145be1fba449233ac3e8d71eb3339",
+	"files": [
+		{
+			"path": "swebench/harness/constants/javascript.py",
+			"sha256": "b77645cce121b3a6f9092964931071f1a4e254aa76750895b0dfd96667c309a7"
+		},
+		{
+			"path": "swebench/harness/grading.py",
+			"sha256": "0a8721547bf045335dbd8994c7806d375b02d3562f643e7db723035df0e2bf79"
+		},
+		{
+			"path": "swebench/harness/log_parsers/__init__.py",
+			"sha256": "13c819765d8b208fa3d146e05e537e6d1b749e83ef2a02093ff021596d6b818f"
+		},
+		{
+			"path": "swebench/harness/log_parsers/javascript.py",
+			"sha256": "8e1cf7ae547535de79a28c37364d6a9293462f5e8a7391a927de55657139ff32"
+		},
+		{
+			"path": "swebench/harness/run_evaluation.py",
+			"sha256": "dd7e8bc9f0392610ba34b0534af47ab1206d94bd2eac76ca29a72cbdc6d6d21c"
+		},
+		{
+			"path": "swebench/harness/test_spec/javascript.py",
+			"sha256": "e0d11dece37d9653719dc73887a29acb370d5884618939ae78dea04a232616fc"
+		}
+	],
+	"entrypoints": {
+		"run_evaluation_module": "swebench.harness.run_evaluation",
+		"tap_parser": "swebench.harness.log_parsers.javascript.parse_log_tap",
+		"grading_module": "swebench.harness.grading"
+	},
+	"test_command": [
+		"npx",
+		"mocha",
+		"test/unit/adapters/http.js",
+		"-R",
+		"tap",
+		"-g",
+		"compression"
+	],
+	"tap_pattern": "^(ok|not ok) (\\d+) (.+)$",
+	"lock_sha256": "f7e8a6e953d3351fd9c4dcea471222a277d55af7b5c25d384bda251b91c51a71"
+}

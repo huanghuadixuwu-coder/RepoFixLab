@@ -1,0 +1,44 @@
+{
+  "composeProject": "repofixlab",
+  "createdAt": "2026-07-18T19:23:01.7252845Z",
+  "lockId": "bootstrap-images-20260718T192206219Z-bce7454b0ecc",
+  "lockType": "bootstrap_image_provenance",
+  "schemaVersion": "repofixlab.bootstrap-image-provenance-lock.v1",
+  "services": {
+    "controller": {
+      "baseRepositoryDigest": "python@sha256:65a93d69fa75478d554f4ad27c85c1e69fa184956261b4301ebaf6dbb0a3543d",
+      "buildInputsSha256": "1d364d99c20cc575e5da7159a58424b37b47eab61bec6898c800398e3bd97be8",
+      "composeConfigSha256": "6891887f7b381ee479d7f82f470be2099387cad2bc7b97f9e8010de5fb214fd6",
+      "dockerfileSha256": "8fe38c62c6d029420b2d214355eae409752e29ae5a14d692ec712abbc2cb0ca4",
+      "expectedBaseImageId": "sha256:65a93d69fa75478d554f4ad27c85c1e69fa184956261b4301ebaf6dbb0a3543d",
+      "expectedImageId": "sha256:bcd67a22931572794b5ef2c13439ec2ded77cab94372df249f0e8ae671e492f5",
+      "expectedNetworks": [
+        {
+          "internal": true,
+          "logicalName": "repofix-control"
+        }
+      ],
+      "platform": "linux/amd64"
+    },
+    "orchestrator": {
+      "baseRepositoryDigest": "mirror.gcr.io/library/node@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
+      "buildInputsSha256": "27451c6646c3c7922a3202670418990a1cbd4ce877f8443eb2a562be3d48c41c",
+      "composeConfigSha256": "7f555b81739eec563aae911d61c699a7f00136d1ce4f99ae4c5554d76670dade",
+      "dockerfileSha256": "e5397117e0ceff5e3c712b50dc41eacad385c39517b53d6936e565e3389071fe",
+      "expectedBaseImageId": "sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
+      "expectedImageId": "sha256:411fc3d66fd3f0e154a3c162b97352cedfb1af9fe8055f1e0ee4cdeaba2de641",
+      "expectedNetworks": [
+        {
+          "internal": true,
+          "logicalName": "repofix-control"
+        },
+        {
+          "internal": false,
+          "logicalName": "provider-egress"
+        }
+      ],
+      "platform": "linux/amd64"
+    }
+  },
+  "lockSha256": "56388f0a4c1ffebb5b0e8771da8451615b39b4e17a8623887a2060e77dff849a"
+}

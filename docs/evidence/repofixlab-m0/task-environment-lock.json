@@ -1,0 +1,45 @@
+{
+	"adapter_sha256": "a8aaaffee376dbbc91e48682d49b334fa617eb1dd38156637cda5809f1d24857",
+	"candidate_id": "task-environment-candidate-v1-axios-5892-9b7cc7a32f2f05e6a7bc09def5496856781cc8316b6f3340ce037021936df206",
+	"candidate_sha256": "4d9ca4a09de47020fedebfb9c6bf97396d52437670edfd68fd49ea126c6ec105",
+	"created_at": "2026-07-18T19:28:57.449Z",
+	"dataset_lock_id": "dataset-v1-g-20260718-135934-066a8f5b6f6b-e451237925674fc6",
+	"evaluator_image": {
+		"local_image_id": "sha256:1ec1230faa109d7d89c819740cc8f9daa6c80dade0e30e5a91834fa20feb54f1",
+		"platform": "linux/amd64",
+		"provenance_sha256": "e280b68d557aab18fb8bf87a0fff417b3efbf231a0dd7cda6e583dcf5ed4d4d6"
+	},
+	"filesystem_profile_sha256": "a7c0b41bed7dabfd4e9938b194752b01483d4d4040e014a46e05030b6472b5fe",
+	"instance_id": "axios__axios-5892",
+	"lock_id": "task-environment-v1-axios-5892-e412c03204cb3ae4",
+	"lock_type": "task_environment",
+	"official_image_source_lock_id": "official-images-v1-axios-5892-485f410992a1bf9a",
+	"resource_profile": {
+		"cpu_count": 4,
+		"memory_bytes": 8589934592,
+		"network_mode": "none",
+		"pids_limit": 512,
+		"read_only_root_filesystem": true
+	},
+	"sanitizer_sha256": "68ef77f59b38239a3863f9cb1669ecf2f3270d3148191a2bc7010f66e20712f6",
+	"schema_version": "v1",
+	"seal_sha256": "e412c03204cb3ae4dfed277216bde5ebe182f5c0179e02e549835c1b6639bc1f",
+	"source_image": {
+		"local_image_id": "sha256:c03e6388d3615d639ce642b94fe1b9b5d86246fcb4fce2f97fbb1840848c51c8",
+		"platform": "linux/amd64",
+		"repository_digest": "swebench/sweb.eval.x86_64.axios_1776_axios-5892@sha256:c03e6388d3615d639ce642b94fe1b9b5d86246fcb4fce2f97fbb1840848c51c8"
+	},
+	"verification": {
+		"completed_at": "2026-07-18T19:28:57.449Z",
+		"equivalence_passed": true,
+		"evidence_sha256": "2d74ec218784b65f240139b4d8ef785f05ef8e39751e2a5b0567a2bedad35c6c",
+		"factory_probe_passed": true,
+		"factory_probe_report_sha256": "f68e8d9ef4cb16b9a1b76c0e702fc5a7594887d8b3719a62bafb1c4d1076697b",
+		"security_profile_passed": true
+	},
+	"worker_image": {
+		"local_image_id": "sha256:2ebfd777d35cc2126d4c072b9a47cae7efc05062d2b762f6b052de9dc2aa9457",
+		"platform": "linux/amd64",
+		"provenance_sha256": "2753a0b780a86027745ce0f4655782b7ff91d0333c1e9836d027016a90224e2b"
+	}
+}

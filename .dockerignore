@@ -1,0 +1,12 @@
+.git
+.codex
+.env
+.env.*
+!.env.example
+artifacts
+docs
+**/node_modules
+**/dist
+packages/repofixlab/controller-work
+packages/repofixlab/data/private
+packages/repofixlab/**/*.private.jsonl

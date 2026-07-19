@@ -1,6 +1,9 @@
 # Default to LF for text files across the repo
 * text=auto eol=lf
 
+# Preserve hash-sealed M0 evidence bytes exactly
+docs/evidence/repofixlab-m0/*.json -text whitespace=cr-at-eol
+
 # Windows scripts should keep CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf

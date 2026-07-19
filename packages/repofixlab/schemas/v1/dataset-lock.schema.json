@@ -1,0 +1,183 @@
+{
+	"$id": "urn:repofixlab:schema:v1:dataset-lock",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"aggregate_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"created_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"created_by_image_id": {
+			"pattern": "^sha256:[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"dataset": {
+			"additionalProperties": false,
+			"properties": {
+				"name": {
+					"maxLength": 200,
+					"minLength": 1,
+					"type": "string"
+				},
+				"revision": {
+					"maxLength": 160,
+					"minLength": 7,
+					"type": "string"
+				}
+			},
+			"required": [
+				"name",
+				"revision"
+			],
+			"type": "object"
+		},
+		"files": {
+			"items": {
+				"additionalProperties": false,
+				"properties": {
+					"bytes": {
+						"minimum": 0,
+						"type": "integer"
+					},
+					"path": {
+						"pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+						"type": "string"
+					},
+					"scope": {
+						"anyOf": [
+							{
+								"const": "public",
+								"type": "string"
+							},
+							{
+								"const": "control",
+								"type": "string"
+							},
+							{
+								"const": "private",
+								"type": "string"
+							}
+						]
+					},
+					"sha256": {
+						"pattern": "^[a-f0-9]{64}$",
+						"type": "string"
+					}
+				},
+				"required": [
+					"scope",
+					"path",
+					"bytes",
+					"sha256"
+				],
+				"type": "object"
+			},
+			"minItems": 1,
+			"type": "array"
+		},
+		"generation_id": {
+			"maxLength": 128,
+			"minLength": 1,
+			"type": "string"
+		},
+		"lock_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"lock_type": {
+			"const": "dataset",
+			"type": "string"
+		},
+		"ready": {
+			"additionalProperties": false,
+			"properties": {
+				"sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"written_at": {
+					"maxLength": 64,
+					"minLength": 1,
+					"type": "string"
+				}
+			},
+			"required": [
+				"sha256",
+				"written_at"
+			],
+			"type": "object"
+		},
+		"record_count": {
+			"minimum": 1,
+			"type": "integer"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"seal": {
+			"additionalProperties": false,
+			"properties": {
+				"sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				},
+				"written_at": {
+					"maxLength": 64,
+					"minLength": 1,
+					"type": "string"
+				}
+			},
+			"required": [
+				"sha256",
+				"written_at"
+			],
+			"type": "object"
+		},
+		"volumes": {
+			"additionalProperties": false,
+			"properties": {
+				"control": {
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+					"type": "string"
+				},
+				"private": {
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+					"type": "string"
+				},
+				"public": {
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"public",
+				"control",
+				"private"
+			],
+			"type": "object"
+		}
+	},
+	"required": [
+		"schema_version",
+		"lock_type",
+		"lock_id",
+		"dataset",
+		"generation_id",
+		"volumes",
+		"record_count",
+		"files",
+		"aggregate_sha256",
+		"ready",
+		"seal",
+		"created_by_image_id",
+		"created_at"
+	],
+	"type": "object"
+}

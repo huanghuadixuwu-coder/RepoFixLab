@@ -1,0 +1,631 @@
+{
+	"$id": "urn:repofixlab:schema:v1:task-environment-candidate",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"adapter_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"base_commit": {
+			"const": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+			"type": "string"
+		},
+		"candidate_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"candidate_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"candidate_type": {
+			"const": "task_environment_candidate",
+			"type": "string"
+		},
+		"created_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"dataset_lock": {
+			"additionalProperties": false,
+			"properties": {
+				"lock_id": {
+					"maxLength": 160,
+					"minLength": 1,
+					"type": "string"
+				},
+				"lock_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"lock_id",
+				"lock_sha256"
+			],
+			"type": "object"
+		},
+		"instance_id": {
+			"const": "axios__axios-5892",
+			"type": "string"
+		},
+		"official_image_source_lock": {
+			"additionalProperties": false,
+			"properties": {
+				"lock_id": {
+					"maxLength": 160,
+					"minLength": 1,
+					"type": "string"
+				},
+				"lock_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"lock_id",
+				"lock_sha256"
+			],
+			"type": "object"
+		},
+		"probe_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"roles": {
+			"additionalProperties": false,
+			"properties": {
+				"evaluator": {
+					"additionalProperties": false,
+					"properties": {
+						"filesystem_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"profile_id": {
+									"maxLength": 160,
+									"minLength": 1,
+									"type": "string"
+								},
+								"profile_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"writable_mounts": {
+									"items": {
+										"additionalProperties": false,
+										"properties": {
+											"destination": {
+												"pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+												"type": "string"
+											},
+											"read_write": {
+												"const": true,
+												"type": "boolean"
+											},
+											"type": {
+												"anyOf": [
+													{
+														"const": "volume",
+														"type": "string"
+													},
+													{
+														"const": "tmpfs",
+														"type": "string"
+													}
+												]
+											}
+										},
+										"required": [
+											"type",
+											"destination",
+											"read_write"
+										],
+										"type": "object"
+									},
+									"minItems": 1,
+									"type": "array"
+								}
+							},
+							"required": [
+								"profile_id",
+								"profile_sha256",
+								"writable_mounts"
+							],
+							"type": "object"
+						},
+						"image": {
+							"additionalProperties": false,
+							"properties": {
+								"local_image_id": {
+									"pattern": "^sha256:[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"platform": {
+									"const": "linux/amd64",
+									"type": "string"
+								},
+								"provenance_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								}
+							},
+							"required": [
+								"local_image_id",
+								"platform",
+								"provenance_sha256"
+							],
+							"type": "object"
+						},
+						"resource_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"memory_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"memory_swap_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"nano_cpus": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"pids_limit": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"profile_id": {
+									"maxLength": 160,
+									"minLength": 1,
+									"type": "string"
+								},
+								"profile_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"timeout_seconds": {
+									"minimum": 1,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"profile_id",
+								"profile_sha256",
+								"nano_cpus",
+								"memory_bytes",
+								"memory_swap_bytes",
+								"pids_limit",
+								"timeout_seconds"
+							],
+							"type": "object"
+						},
+						"role": {
+							"const": "evaluator",
+							"type": "string"
+						},
+						"runtime_user": {
+							"additionalProperties": false,
+							"properties": {
+								"gid": {
+									"minimum": 0,
+									"type": "integer"
+								},
+								"uid": {
+									"minimum": 0,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"uid",
+								"gid"
+							],
+							"type": "object"
+						},
+						"security_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"auto_remove": {
+									"const": false,
+									"type": "boolean"
+								},
+								"cap_add": {
+									"items": {
+										"type": "string"
+									},
+									"maxItems": 0,
+									"type": "array"
+								},
+								"cap_drop": {
+									"items": {
+										"const": "ALL",
+										"type": "string"
+									},
+									"maxItems": 1,
+									"minItems": 1,
+									"type": "array",
+									"uniqueItems": true
+								},
+								"devices": {
+									"items": {
+										"type": "string"
+									},
+									"maxItems": 0,
+									"type": "array"
+								},
+								"docker_socket_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"host_bind_mounts_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"network_mode": {
+									"const": "none",
+									"type": "string"
+								},
+								"no_new_privileges": {
+									"const": true,
+									"type": "boolean"
+								},
+								"privileged": {
+									"const": false,
+									"type": "boolean"
+								},
+								"profile_id": {
+									"maxLength": 160,
+									"minLength": 1,
+									"type": "string"
+								},
+								"profile_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"published_ports_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"read_only_root_filesystem": {
+									"const": true,
+									"type": "boolean"
+								},
+								"sensitive_environment_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"stdin_open": {
+									"const": false,
+									"type": "boolean"
+								},
+								"tty": {
+									"const": false,
+									"type": "boolean"
+								}
+							},
+							"required": [
+								"profile_id",
+								"profile_sha256",
+								"network_mode",
+								"read_only_root_filesystem",
+								"cap_drop",
+								"cap_add",
+								"no_new_privileges",
+								"privileged",
+								"devices",
+								"host_bind_mounts_allowed",
+								"docker_socket_allowed",
+								"published_ports_allowed",
+								"sensitive_environment_allowed",
+								"tty",
+								"stdin_open",
+								"auto_remove"
+							],
+							"type": "object"
+						}
+					},
+					"required": [
+						"role",
+						"image",
+						"runtime_user",
+						"security_profile",
+						"resource_profile",
+						"filesystem_profile"
+					],
+					"type": "object"
+				},
+				"worker": {
+					"additionalProperties": false,
+					"properties": {
+						"filesystem_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"profile_id": {
+									"maxLength": 160,
+									"minLength": 1,
+									"type": "string"
+								},
+								"profile_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"writable_mounts": {
+									"items": {
+										"additionalProperties": false,
+										"properties": {
+											"destination": {
+												"pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+												"type": "string"
+											},
+											"read_write": {
+												"const": true,
+												"type": "boolean"
+											},
+											"type": {
+												"anyOf": [
+													{
+														"const": "volume",
+														"type": "string"
+													},
+													{
+														"const": "tmpfs",
+														"type": "string"
+													}
+												]
+											}
+										},
+										"required": [
+											"type",
+											"destination",
+											"read_write"
+										],
+										"type": "object"
+									},
+									"minItems": 1,
+									"type": "array"
+								}
+							},
+							"required": [
+								"profile_id",
+								"profile_sha256",
+								"writable_mounts"
+							],
+							"type": "object"
+						},
+						"image": {
+							"additionalProperties": false,
+							"properties": {
+								"local_image_id": {
+									"pattern": "^sha256:[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"platform": {
+									"const": "linux/amd64",
+									"type": "string"
+								},
+								"provenance_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								}
+							},
+							"required": [
+								"local_image_id",
+								"platform",
+								"provenance_sha256"
+							],
+							"type": "object"
+						},
+						"resource_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"memory_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"memory_swap_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"nano_cpus": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"pids_limit": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"profile_id": {
+									"maxLength": 160,
+									"minLength": 1,
+									"type": "string"
+								},
+								"profile_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"timeout_seconds": {
+									"minimum": 1,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"profile_id",
+								"profile_sha256",
+								"nano_cpus",
+								"memory_bytes",
+								"memory_swap_bytes",
+								"pids_limit",
+								"timeout_seconds"
+							],
+							"type": "object"
+						},
+						"role": {
+							"const": "worker",
+							"type": "string"
+						},
+						"runtime_user": {
+							"additionalProperties": false,
+							"properties": {
+								"gid": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"uid": {
+									"minimum": 1,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"uid",
+								"gid"
+							],
+							"type": "object"
+						},
+						"security_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"auto_remove": {
+									"const": false,
+									"type": "boolean"
+								},
+								"cap_add": {
+									"items": {
+										"type": "string"
+									},
+									"maxItems": 0,
+									"type": "array"
+								},
+								"cap_drop": {
+									"items": {
+										"const": "ALL",
+										"type": "string"
+									},
+									"maxItems": 1,
+									"minItems": 1,
+									"type": "array",
+									"uniqueItems": true
+								},
+								"devices": {
+									"items": {
+										"type": "string"
+									},
+									"maxItems": 0,
+									"type": "array"
+								},
+								"docker_socket_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"host_bind_mounts_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"network_mode": {
+									"const": "none",
+									"type": "string"
+								},
+								"no_new_privileges": {
+									"const": true,
+									"type": "boolean"
+								},
+								"privileged": {
+									"const": false,
+									"type": "boolean"
+								},
+								"profile_id": {
+									"maxLength": 160,
+									"minLength": 1,
+									"type": "string"
+								},
+								"profile_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"published_ports_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"read_only_root_filesystem": {
+									"const": true,
+									"type": "boolean"
+								},
+								"sensitive_environment_allowed": {
+									"const": false,
+									"type": "boolean"
+								},
+								"stdin_open": {
+									"const": false,
+									"type": "boolean"
+								},
+								"tty": {
+									"const": false,
+									"type": "boolean"
+								}
+							},
+							"required": [
+								"profile_id",
+								"profile_sha256",
+								"network_mode",
+								"read_only_root_filesystem",
+								"cap_drop",
+								"cap_add",
+								"no_new_privileges",
+								"privileged",
+								"devices",
+								"host_bind_mounts_allowed",
+								"docker_socket_allowed",
+								"published_ports_allowed",
+								"sensitive_environment_allowed",
+								"tty",
+								"stdin_open",
+								"auto_remove"
+							],
+							"type": "object"
+						}
+					},
+					"required": [
+						"role",
+						"image",
+						"runtime_user",
+						"security_profile",
+						"resource_profile",
+						"filesystem_profile"
+					],
+					"type": "object"
+				}
+			},
+			"required": [
+				"worker",
+				"evaluator"
+			],
+			"type": "object"
+		},
+		"sanitizer_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		}
+	},
+	"required": [
+		"schema_version",
+		"candidate_type",
+		"candidate_id",
+		"instance_id",
+		"base_commit",
+		"dataset_lock",
+		"official_image_source_lock",
+		"roles",
+		"probe_sha256",
+		"sanitizer_sha256",
+		"adapter_sha256",
+		"created_at",
+		"candidate_sha256"
+	],
+	"type": "object"
+}

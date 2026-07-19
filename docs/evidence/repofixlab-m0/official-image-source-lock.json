@@ -1,0 +1,20 @@
+{
+    "schema_version":  "v1",
+    "lock_type":  "official_image_source",
+    "lock_id":  "official-images-v1-axios-5892-485f410992a1bf9a",
+    "dataset_revision":  "2b7aced941b4873e9cad3e76abbae93f481d1beb",
+    "harness_revision":  "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+    "images":  [
+                   {
+                       "image_key":  "axios__axios-5892",
+                       "requested_reference":  "swebench/sweb.eval.x86_64.axios_1776_axios-5892:latest",
+                       "repository_digest":  "swebench/sweb.eval.x86_64.axios_1776_axios-5892@sha256:c03e6388d3615d639ce642b94fe1b9b5d86246fcb4fce2f97fbb1840848c51c8",
+                       "local_image_id":  "sha256:c03e6388d3615d639ce642b94fe1b9b5d86246fcb4fce2f97fbb1840848c51c8",
+                       "platform":  "linux/amd64",
+                       "registry_response_sha256":  "139496f0efaa6c2328f65f099b775014e28190fccf6e3d6294212b38b410f3f3",
+                       "resolved_at":  "2026-07-18T15:01:32.9894184Z"
+                   }
+               ],
+    "seal_sha256":  "485f410992a1bf9a0af200fd17dad1adc78f97caa4e0cc78fb2f4484474172a0",
+    "created_at":  "2026-07-18T15:01:32.9894184Z"
+}

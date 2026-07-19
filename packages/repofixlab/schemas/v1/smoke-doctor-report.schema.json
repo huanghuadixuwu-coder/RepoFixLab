@@ -1,0 +1,1182 @@
+{
+	"$id": "urn:repofixlab:schema:v1:smoke-doctor-report",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"checks": {
+			"additionalProperties": false,
+			"properties": {
+				"bootstrap_control_plane": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"cross_bindings": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"dataset_lock": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"factory_controller_identity": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"factory_probe": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"harness_equivalence": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"harness_probe_matrix": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"official_image_source_lock": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"pristine_runtime_lock": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				},
+				"task_environment_lock": {
+					"additionalProperties": false,
+					"properties": {
+						"artifacts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									},
+									"sha256": {
+										"pattern": "^[a-f0-9]{64}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"sha256"
+								],
+								"type": "object"
+							},
+							"maxItems": 32,
+							"type": "array"
+						},
+						"errors": {
+							"items": {
+								"maxLength": 2000,
+								"minLength": 1,
+								"type": "string"
+							},
+							"maxItems": 64,
+							"type": "array"
+						},
+						"facts": {
+							"items": {
+								"additionalProperties": false,
+								"properties": {
+									"actual": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"expected": {
+										"anyOf": [
+											{
+												"maxLength": 1000,
+												"type": "string"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"matched": {
+										"type": "boolean"
+									},
+									"name": {
+										"pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+										"type": "string"
+									}
+								},
+								"required": [
+									"name",
+									"expected",
+									"actual",
+									"matched"
+								],
+								"type": "object"
+							},
+							"maxItems": 64,
+							"minItems": 1,
+							"type": "array"
+						},
+						"state": {
+							"anyOf": [
+								{
+									"const": "pass",
+									"type": "string"
+								},
+								{
+									"const": "fail",
+									"type": "string"
+								},
+								{
+									"const": "warning",
+									"type": "string"
+								},
+								{
+									"const": "unverified",
+									"type": "string"
+								}
+							]
+						}
+					},
+					"required": [
+						"state",
+						"artifacts",
+						"facts",
+						"errors"
+					],
+					"type": "object"
+				}
+			},
+			"required": [
+				"bootstrap_control_plane",
+				"dataset_lock",
+				"official_image_source_lock",
+				"task_environment_lock",
+				"factory_probe",
+				"factory_controller_identity",
+				"pristine_runtime_lock",
+				"harness_probe_matrix",
+				"harness_equivalence",
+				"cross_bindings"
+			],
+			"type": "object"
+		},
+		"finished_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"instance_id": {
+			"const": "axios__axios-5892",
+			"type": "string"
+		},
+		"operation_id": {
+			"anyOf": [
+				{
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"report_id": {
+			"maxLength": 160,
+			"minLength": 1,
+			"type": "string"
+		},
+		"report_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"report_type": {
+			"const": "smoke_doctor",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"started_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "pass",
+					"type": "string"
+				},
+				{
+					"const": "fail",
+					"type": "string"
+				}
+			]
+		}
+	},
+	"required": [
+		"schema_version",
+		"report_type",
+		"report_id",
+		"status",
+		"started_at",
+		"finished_at",
+		"instance_id",
+		"operation_id",
+		"checks",
+		"report_sha256"
+	],
+	"type": "object"
+}

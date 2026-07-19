@@ -1,0 +1,240 @@
+{
+	"$id": "urn:repofixlab:schema:v1:dataset-preparer-self-check-report",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"checks": {
+			"additionalProperties": false,
+			"properties": {
+				"data_directories_exist": {
+					"additionalProperties": false,
+					"properties": {
+						"control": {
+							"type": "boolean"
+						},
+						"private": {
+							"type": "boolean"
+						},
+						"public": {
+							"type": "boolean"
+						}
+					},
+					"required": [
+						"public",
+						"control",
+						"private"
+					],
+					"type": "object"
+				},
+				"docker_socket_absent": {
+					"type": "boolean"
+				},
+				"image_id_bound": {
+					"type": "boolean"
+				},
+				"pyarrow_version": {
+					"type": "boolean"
+				},
+				"runtime_user": {
+					"type": "boolean"
+				},
+				"sensitive_environment_absent": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"image_id_bound",
+				"runtime_user",
+				"pyarrow_version",
+				"data_directories_exist",
+				"docker_socket_absent",
+				"sensitive_environment_absent"
+			],
+			"type": "object"
+		},
+		"dataset": {
+			"additionalProperties": false,
+			"properties": {
+				"expected_record_count": {
+					"const": 43,
+					"type": "number"
+				},
+				"expected_source_record_count": {
+					"const": 300,
+					"type": "number"
+				},
+				"name": {
+					"const": "SWE-bench/SWE-bench_Multilingual",
+					"type": "string"
+				},
+				"required_instance_id": {
+					"const": "axios__axios-5892",
+					"type": "string"
+				},
+				"revision": {
+					"const": "2b7aced941b4873e9cad3e76abbae93f481d1beb",
+					"type": "string"
+				},
+				"source_bytes": {
+					"const": 1165968,
+					"type": "number"
+				},
+				"source_sha256": {
+					"const": "28b7f874e48496399077d276f9f2b163a077ddf0a70dc507c148d58da826baa9",
+					"type": "string"
+				}
+			},
+			"required": [
+				"name",
+				"revision",
+				"source_sha256",
+				"source_bytes",
+				"expected_source_record_count",
+				"expected_record_count",
+				"required_instance_id"
+			],
+			"type": "object"
+		},
+		"errors": {
+			"items": {
+				"minLength": 1,
+				"type": "string"
+			},
+			"type": "array"
+		},
+		"image_id": {
+			"anyOf": [
+				{
+					"maxLength": 200,
+					"minLength": 1,
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"observations": {
+			"additionalProperties": false,
+			"properties": {
+				"docker_socket_paths_present": {
+					"items": {
+						"anyOf": [
+							{
+								"const": "/var/run/docker.sock",
+								"type": "string"
+							},
+							{
+								"const": "/run/docker.sock",
+								"type": "string"
+							}
+						]
+					},
+					"type": "array",
+					"uniqueItems": true
+				},
+				"sensitive_environment_names_present": {
+					"items": {
+						"anyOf": [
+							{
+								"const": "ZHIPU_API_KEY",
+								"type": "string"
+							},
+							{
+								"const": "OPENAI_API_KEY",
+								"type": "string"
+							},
+							{
+								"const": "ANTHROPIC_API_KEY",
+								"type": "string"
+							},
+							{
+								"const": "DOCKER_HOST",
+								"type": "string"
+							}
+						]
+					},
+					"type": "array",
+					"uniqueItems": true
+				}
+			},
+			"required": [
+				"docker_socket_paths_present",
+				"sensitive_environment_names_present"
+			],
+			"type": "object"
+		},
+		"report_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"report_type": {
+			"const": "dataset_preparer_self_check",
+			"type": "string"
+		},
+		"runtime": {
+			"additionalProperties": false,
+			"properties": {
+				"gid": {
+					"type": "integer"
+				},
+				"pyarrow_version": {
+					"anyOf": [
+						{
+							"maxLength": 64,
+							"minLength": 1,
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"python_version": {
+					"maxLength": 64,
+					"minLength": 1,
+					"type": "string"
+				},
+				"uid": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"python_version",
+				"pyarrow_version",
+				"uid",
+				"gid"
+			],
+			"type": "object"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"status": {
+			"anyOf": [
+				{
+					"const": "pass",
+					"type": "string"
+				},
+				{
+					"const": "fail",
+					"type": "string"
+				}
+			]
+		}
+	},
+	"required": [
+		"schema_version",
+		"report_type",
+		"status",
+		"image_id",
+		"dataset",
+		"runtime",
+		"checks",
+		"observations",
+		"errors",
+		"report_sha256"
+	],
+	"type": "object"
+}

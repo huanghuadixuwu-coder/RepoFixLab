@@ -11,6 +11,8 @@ packages/*/dist-firefox/
 
 # Environment
 .env
+.env.*
+!.env.example
 
 # Editor files
 .vscode/
@@ -39,3 +41,10 @@ plans/
 .pi/hf-sessions/
 .pi/hf-sessions-backup/
 collect.sh
+
+# RepoFixLab runtime data
+artifacts/
+.repofixlab-cache/
+packages/repofixlab/controller-work/
+packages/repofixlab/data/private/
+packages/repofixlab/**/*.private.jsonl

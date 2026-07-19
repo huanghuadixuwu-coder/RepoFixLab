@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+artifacts
+.repofixlab-cache
+controller-work
+data/private
+**/*.private.jsonl
+**/node_modules
+**/dist

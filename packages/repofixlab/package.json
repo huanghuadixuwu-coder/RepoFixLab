@@ -1,0 +1,47 @@
+{
+	"name": "@earendil-works/pi-repofixlab",
+	"version": "0.80.3",
+	"description": "Containerized code-repair agent evaluation contracts and orchestration",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"bin": {
+		"repofixlab": "./dist/cli/main.js"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"schemas",
+		"README.md",
+		"CHANGELOG.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"generate-schemas": "node src/contracts/generate-schemas.ts",
+		"check:schemas": "node src/contracts/generate-schemas.ts --check",
+		"build": "npm run generate-schemas && tsgo -p tsconfig.build.json",
+		"test": "vitest --run",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"dependencies": {
+		"@earendil-works/pi-coding-agent": "^0.80.3",
+		"typebox": "1.1.38",
+		"yaml": "2.9.0"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"shx": "0.4.0",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

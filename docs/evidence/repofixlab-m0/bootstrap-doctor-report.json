@@ -1,0 +1,107 @@
+{
+  "schema_version": "v1",
+  "report_type": "bootstrap_doctor",
+  "report_id": "bootstrap-adaa7721-65cf-4386-ad34-bf114083b146",
+  "status": "pass",
+  "started_at": "2026-07-18T19:24:55.347Z",
+  "finished_at": "2026-07-18T19:24:56.220Z",
+  "checks": {
+    "docker_daemon": {
+      "state": "pass",
+      "evidence_sha256": "66fc749eb7a9c872c91d4449ab5fafe299bac37ff0c3253ac31fb0f7ec9f5149",
+      "server_version": "29.3.1",
+      "operating_system": "linux",
+      "architecture": "amd64",
+      "message": "All required facts were explicitly verified."
+    },
+    "host_artifacts_storage": {
+      "state": "pass",
+      "path": "/artifacts",
+      "minimum_available_bytes": 120000000000,
+      "available_bytes": 191454003200,
+      "message": "The /artifacts bind mount must meet the host-space minimum."
+    },
+    "docker_managed_storage": {
+      "state": "pass",
+      "evidence_sha256": "66fc749eb7a9c872c91d4449ab5fafe299bac37ff0c3253ac31fb0f7ec9f5149",
+      "path": "/probe",
+      "minimum_available_bytes": 120000000000,
+      "available_bytes": 940937166848,
+      "volume_id": "repofixlab-bootstrap-doctor-volume-390730de587d",
+      "probe_image_digest": "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+      "message": "A Docker managed volume must meet the internal-space minimum."
+    },
+    "compute": {
+      "state": "pass",
+      "evidence_sha256": "66fc749eb7a9c872c91d4449ab5fafe299bac37ff0c3253ac31fb0f7ec9f5149",
+      "minimum_cpu_count": 8,
+      "minimum_memory_bytes": 17179869184,
+      "cpu_count": 12,
+      "memory_bytes": 20972773376,
+      "message": "All required facts were explicitly verified."
+    },
+    "control_network": {
+      "state": "pass",
+      "evidence_sha256": "66fc749eb7a9c872c91d4449ab5fafe299bac37ff0c3253ac31fb0f7ec9f5149",
+      "actual": true,
+      "message": "The Controller control network must be explicitly internal."
+    },
+    "docker_socket_ownership": {
+      "state": "pass",
+      "evidence_sha256": "66fc749eb7a9c872c91d4449ab5fafe299bac37ff0c3253ac31fb0f7ec9f5149",
+      "required_roles": [
+        "controller",
+        "orchestrator"
+      ],
+      "deferred_roles": {
+        "dataset_preparer": "dataset_prepare",
+        "worker": "smoke_formal",
+        "evaluator": "smoke_formal"
+      },
+      "actual": {
+        "controller": "read-write",
+        "orchestrator": "none",
+        "dataset_preparer": null,
+        "worker": null,
+        "evaluator": null
+      },
+      "message": "Bootstrap verifies current control-plane roles; Dataset Preparer, Worker, and Evaluator must be absent and deferred to their lifecycle gates."
+    },
+    "base_images": {
+      "state": "pass",
+      "lock_sha256": "56388f0a4c1ffebb5b0e8771da8451615b39b4e17a8623887a2060e77dff849a",
+      "evidence_sha256": "a5cacdd335b6d99069ef3153d264fe7f8c008e8c0c5cca32e732e36e1392e835",
+      "services": {
+        "controller": {
+          "state": "pass",
+          "expected_image_id": "sha256:bcd67a22931572794b5ef2c13439ec2ded77cab94372df249f0e8ae671e492f5",
+          "actual_image_id": "sha256:bcd67a22931572794b5ef2c13439ec2ded77cab94372df249f0e8ae671e492f5",
+          "expected_compose_config_sha256": "6891887f7b381ee479d7f82f470be2099387cad2bc7b97f9e8010de5fb214fd6",
+          "actual_compose_config_sha256": "6891887f7b381ee479d7f82f470be2099387cad2bc7b97f9e8010de5fb214fd6",
+          "base_repository_digest": "python@sha256:65a93d69fa75478d554f4ad27c85c1e69fa184956261b4301ebaf6dbb0a3543d",
+          "base_image_id": "sha256:65a93d69fa75478d554f4ad27c85c1e69fa184956261b4301ebaf6dbb0a3543d",
+          "errors": []
+        },
+        "orchestrator": {
+          "state": "pass",
+          "expected_image_id": "sha256:411fc3d66fd3f0e154a3c162b97352cedfb1af9fe8055f1e0ee4cdeaba2de641",
+          "actual_image_id": "sha256:411fc3d66fd3f0e154a3c162b97352cedfb1af9fe8055f1e0ee4cdeaba2de641",
+          "expected_compose_config_sha256": "7f555b81739eec563aae911d61c699a7f00136d1ce4f99ae4c5554d76670dade",
+          "actual_compose_config_sha256": "7f555b81739eec563aae911d61c699a7f00136d1ce4f99ae4c5554d76670dade",
+          "base_repository_digest": "mirror.gcr.io/library/node@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
+          "base_image_id": "sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd",
+          "errors": []
+        }
+      },
+      "message": "Bootstrap images, image-bound Compose service config, fixed bases, and runtime topology must match the external lock."
+    },
+    "controller_integrity": {
+      "state": "pass",
+      "evidence_sha256": "66fc749eb7a9c872c91d4449ab5fafe299bac37ff0c3253ac31fb0f7ec9f5149",
+      "errors": [],
+      "message": "Any Controller collection or cleanup error is a hard bootstrap failure."
+    }
+  },
+  "warnings": [],
+  "report_sha256": "c4dc166165567ea90c296322194c63e54783f492b593ae8307eb2da614b184cb"
+}

@@ -1,0 +1,11 @@
+schema_version: v1
+dataset_name: SWE-bench/SWE-bench_Multilingual
+dataset_revision: 2b7aced941b4873e9cad3e76abbae93f481d1beb
+source_url: https://huggingface.co/datasets/SWE-bench/SWE-bench_Multilingual/resolve/2b7aced941b4873e9cad3e76abbae93f481d1beb/data/test-00000-of-00001.parquet
+source_sha256: 28b7f874e48496399077d276f9f2b163a077ddf0a70dc507c148d58da826baa9
+source_bytes: 1165968
+expected_record_count: 43
+required_instance_id: axios__axios-5892
+volume_prefix: dataset
+compose_project: repofixlab
+preparer_service: dataset-preparer

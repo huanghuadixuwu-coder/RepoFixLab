@@ -1,0 +1,332 @@
+{
+	"$id": "urn:repofixlab:schema:v1:task-environment-candidate-build-input",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"adapter_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"created_at": {
+			"maxLength": 64,
+			"minLength": 1,
+			"type": "string"
+		},
+		"dataset_lock": {
+			"additionalProperties": false,
+			"properties": {
+				"lock_id": {
+					"maxLength": 160,
+					"minLength": 1,
+					"type": "string"
+				},
+				"lock_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"lock_id",
+				"lock_sha256"
+			],
+			"type": "object"
+		},
+		"official_image_source_lock": {
+			"additionalProperties": false,
+			"properties": {
+				"lock_id": {
+					"maxLength": 160,
+					"minLength": 1,
+					"type": "string"
+				},
+				"lock_sha256": {
+					"pattern": "^[a-f0-9]{64}$",
+					"type": "string"
+				}
+			},
+			"required": [
+				"lock_id",
+				"lock_sha256"
+			],
+			"type": "object"
+		},
+		"probe_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"roles": {
+			"additionalProperties": false,
+			"properties": {
+				"evaluator": {
+					"additionalProperties": false,
+					"properties": {
+						"filesystem_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"writable_mounts": {
+									"items": {
+										"additionalProperties": false,
+										"properties": {
+											"destination": {
+												"pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+												"type": "string"
+											},
+											"read_write": {
+												"const": true,
+												"type": "boolean"
+											},
+											"type": {
+												"anyOf": [
+													{
+														"const": "volume",
+														"type": "string"
+													},
+													{
+														"const": "tmpfs",
+														"type": "string"
+													}
+												]
+											}
+										},
+										"required": [
+											"type",
+											"destination",
+											"read_write"
+										],
+										"type": "object"
+									},
+									"minItems": 1,
+									"type": "array"
+								}
+							},
+							"required": [
+								"writable_mounts"
+							],
+							"type": "object"
+						},
+						"image": {
+							"additionalProperties": false,
+							"properties": {
+								"local_image_id": {
+									"pattern": "^sha256:[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"provenance_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								}
+							},
+							"required": [
+								"local_image_id",
+								"provenance_sha256"
+							],
+							"type": "object"
+						},
+						"resource_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"memory_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"memory_swap_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"nano_cpus": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"pids_limit": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"timeout_seconds": {
+									"minimum": 1,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"nano_cpus",
+								"memory_bytes",
+								"memory_swap_bytes",
+								"pids_limit",
+								"timeout_seconds"
+							],
+							"type": "object"
+						},
+						"runtime_user": {
+							"additionalProperties": false,
+							"properties": {
+								"gid": {
+									"minimum": 0,
+									"type": "integer"
+								},
+								"uid": {
+									"minimum": 0,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"uid",
+								"gid"
+							],
+							"type": "object"
+						}
+					},
+					"required": [
+						"image",
+						"runtime_user",
+						"resource_profile",
+						"filesystem_profile"
+					],
+					"type": "object"
+				},
+				"worker": {
+					"additionalProperties": false,
+					"properties": {
+						"filesystem_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"writable_mounts": {
+									"items": {
+										"additionalProperties": false,
+										"properties": {
+											"destination": {
+												"pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+												"type": "string"
+											},
+											"read_write": {
+												"const": true,
+												"type": "boolean"
+											},
+											"type": {
+												"anyOf": [
+													{
+														"const": "volume",
+														"type": "string"
+													},
+													{
+														"const": "tmpfs",
+														"type": "string"
+													}
+												]
+											}
+										},
+										"required": [
+											"type",
+											"destination",
+											"read_write"
+										],
+										"type": "object"
+									},
+									"minItems": 1,
+									"type": "array"
+								}
+							},
+							"required": [
+								"writable_mounts"
+							],
+							"type": "object"
+						},
+						"image": {
+							"additionalProperties": false,
+							"properties": {
+								"local_image_id": {
+									"pattern": "^sha256:[a-f0-9]{64}$",
+									"type": "string"
+								},
+								"provenance_sha256": {
+									"pattern": "^[a-f0-9]{64}$",
+									"type": "string"
+								}
+							},
+							"required": [
+								"local_image_id",
+								"provenance_sha256"
+							],
+							"type": "object"
+						},
+						"resource_profile": {
+							"additionalProperties": false,
+							"properties": {
+								"memory_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"memory_swap_bytes": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"nano_cpus": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"pids_limit": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"timeout_seconds": {
+									"minimum": 1,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"nano_cpus",
+								"memory_bytes",
+								"memory_swap_bytes",
+								"pids_limit",
+								"timeout_seconds"
+							],
+							"type": "object"
+						},
+						"runtime_user": {
+							"additionalProperties": false,
+							"properties": {
+								"gid": {
+									"minimum": 1,
+									"type": "integer"
+								},
+								"uid": {
+									"minimum": 1,
+									"type": "integer"
+								}
+							},
+							"required": [
+								"uid",
+								"gid"
+							],
+							"type": "object"
+						}
+					},
+					"required": [
+						"image",
+						"runtime_user",
+						"resource_profile",
+						"filesystem_profile"
+					],
+					"type": "object"
+				}
+			},
+			"required": [
+				"worker",
+				"evaluator"
+			],
+			"type": "object"
+		},
+		"sanitizer_sha256": {
+			"pattern": "^[a-f0-9]{64}$",
+			"type": "string"
+		}
+	},
+	"required": [
+		"dataset_lock",
+		"official_image_source_lock",
+		"roles",
+		"probe_sha256",
+		"sanitizer_sha256",
+		"adapter_sha256",
+		"created_at"
+	],
+	"type": "object"
+}

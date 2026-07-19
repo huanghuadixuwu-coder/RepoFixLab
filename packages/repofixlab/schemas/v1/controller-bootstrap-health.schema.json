@@ -1,0 +1,605 @@
+{
+	"$id": "urn:repofixlab:schema:v1:controller-bootstrap-health",
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"additionalProperties": false,
+	"properties": {
+		"architecture": {
+			"anyOf": [
+				{
+					"minLength": 1,
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"control_network_internal": {
+			"anyOf": [
+				{
+					"type": "boolean"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"cpu_count": {
+			"anyOf": [
+				{
+					"minimum": 0,
+					"type": "integer"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"daemon_reachable": {
+			"type": "boolean"
+		},
+		"docker_root_dir": {
+			"anyOf": [
+				{
+					"minLength": 1,
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"docker_volume_available_bytes": {
+			"anyOf": [
+				{
+					"pattern": "^(0|[1-9][0-9]*)$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"docker_volume_id": {
+			"anyOf": [
+				{
+					"minLength": 1,
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"errors": {
+			"items": {
+				"minLength": 1,
+				"type": "string"
+			},
+			"type": "array"
+		},
+		"image_provenance": {
+			"additionalProperties": false,
+			"properties": {
+				"services": {
+					"additionalProperties": false,
+					"properties": {
+						"controller": {
+							"anyOf": [
+								{
+									"additionalProperties": false,
+									"properties": {
+										"base_image": {
+											"additionalProperties": false,
+											"properties": {
+												"image_id": {
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												"platform": {
+													"const": "linux/amd64",
+													"type": "string"
+												},
+												"repository_digests": {
+													"items": {
+														"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+														"type": "string"
+													},
+													"minItems": 1,
+													"type": "array"
+												},
+												"rootfs_layers": {
+													"items": {
+														"pattern": "^sha256:[a-f0-9]{64}$",
+														"type": "string"
+													},
+													"minItems": 1,
+													"type": "array"
+												}
+											},
+											"required": [
+												"image_id",
+												"platform",
+												"repository_digests",
+												"rootfs_layers"
+											],
+											"type": "object"
+										},
+										"compose_config_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"compose_project": {
+											"anyOf": [
+												{
+													"minLength": 1,
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"compose_service": {
+											"anyOf": [
+												{
+													"minLength": 1,
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"container_id": {
+											"pattern": "^[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"image_id": {
+											"pattern": "^sha256:[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"image_rootfs_layers": {
+											"items": {
+												"pattern": "^sha256:[a-f0-9]{64}$",
+												"type": "string"
+											},
+											"minItems": 1,
+											"type": "array"
+										},
+										"networks": {
+											"items": {
+												"additionalProperties": false,
+												"properties": {
+													"compose_network": {
+														"anyOf": [
+															{
+																"minLength": 1,
+																"type": "string"
+															},
+															{
+																"type": "null"
+															}
+														]
+													},
+													"compose_project": {
+														"anyOf": [
+															{
+																"minLength": 1,
+																"type": "string"
+															},
+															{
+																"type": "null"
+															}
+														]
+													},
+													"internal": {
+														"type": "boolean"
+													},
+													"network_id": {
+														"pattern": "^[a-f0-9]{64}$",
+														"type": "string"
+													}
+												},
+												"required": [
+													"network_id",
+													"compose_project",
+													"compose_network",
+													"internal"
+												],
+												"type": "object"
+											},
+											"type": "array"
+										},
+										"platform": {
+											"const": "linux/amd64",
+											"type": "string"
+										},
+										"published_ports": {
+											"items": {
+												"maxLength": 500,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array"
+										}
+									},
+									"required": [
+										"container_id",
+										"image_id",
+										"platform",
+										"compose_project",
+										"compose_service",
+										"compose_config_sha256",
+										"published_ports",
+										"networks",
+										"image_rootfs_layers",
+										"base_image"
+									],
+									"type": "object"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"orchestrator": {
+							"anyOf": [
+								{
+									"additionalProperties": false,
+									"properties": {
+										"base_image": {
+											"additionalProperties": false,
+											"properties": {
+												"image_id": {
+													"pattern": "^sha256:[a-f0-9]{64}$",
+													"type": "string"
+												},
+												"platform": {
+													"const": "linux/amd64",
+													"type": "string"
+												},
+												"repository_digests": {
+													"items": {
+														"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+														"type": "string"
+													},
+													"minItems": 1,
+													"type": "array"
+												},
+												"rootfs_layers": {
+													"items": {
+														"pattern": "^sha256:[a-f0-9]{64}$",
+														"type": "string"
+													},
+													"minItems": 1,
+													"type": "array"
+												}
+											},
+											"required": [
+												"image_id",
+												"platform",
+												"repository_digests",
+												"rootfs_layers"
+											],
+											"type": "object"
+										},
+										"compose_config_sha256": {
+											"anyOf": [
+												{
+													"pattern": "^[a-f0-9]{64}$",
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"compose_project": {
+											"anyOf": [
+												{
+													"minLength": 1,
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"compose_service": {
+											"anyOf": [
+												{
+													"minLength": 1,
+													"type": "string"
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"container_id": {
+											"pattern": "^[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"image_id": {
+											"pattern": "^sha256:[a-f0-9]{64}$",
+											"type": "string"
+										},
+										"image_rootfs_layers": {
+											"items": {
+												"pattern": "^sha256:[a-f0-9]{64}$",
+												"type": "string"
+											},
+											"minItems": 1,
+											"type": "array"
+										},
+										"networks": {
+											"items": {
+												"additionalProperties": false,
+												"properties": {
+													"compose_network": {
+														"anyOf": [
+															{
+																"minLength": 1,
+																"type": "string"
+															},
+															{
+																"type": "null"
+															}
+														]
+													},
+													"compose_project": {
+														"anyOf": [
+															{
+																"minLength": 1,
+																"type": "string"
+															},
+															{
+																"type": "null"
+															}
+														]
+													},
+													"internal": {
+														"type": "boolean"
+													},
+													"network_id": {
+														"pattern": "^[a-f0-9]{64}$",
+														"type": "string"
+													}
+												},
+												"required": [
+													"network_id",
+													"compose_project",
+													"compose_network",
+													"internal"
+												],
+												"type": "object"
+											},
+											"type": "array"
+										},
+										"platform": {
+											"const": "linux/amd64",
+											"type": "string"
+										},
+										"published_ports": {
+											"items": {
+												"maxLength": 500,
+												"minLength": 1,
+												"type": "string"
+											},
+											"type": "array"
+										}
+									},
+									"required": [
+										"container_id",
+										"image_id",
+										"platform",
+										"compose_project",
+										"compose_service",
+										"compose_config_sha256",
+										"published_ports",
+										"networks",
+										"image_rootfs_layers",
+										"base_image"
+									],
+									"type": "object"
+								},
+								{
+									"type": "null"
+								}
+							]
+						}
+					},
+					"required": [
+						"controller",
+						"orchestrator"
+					],
+					"type": "object"
+				}
+			},
+			"required": [
+				"services"
+			],
+			"type": "object"
+		},
+		"memory_bytes": {
+			"anyOf": [
+				{
+					"pattern": "^(0|[1-9][0-9]*)$",
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"os_type": {
+			"anyOf": [
+				{
+					"minLength": 1,
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"probe_image_digest": {
+			"pattern": "^[^\\s@]+@sha256:[a-f0-9]{64}$",
+			"type": "string"
+		},
+		"response_type": {
+			"const": "controller_bootstrap_health",
+			"type": "string"
+		},
+		"schema_version": {
+			"const": "v1",
+			"type": "string"
+		},
+		"server_version": {
+			"anyOf": [
+				{
+					"minLength": 1,
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
+		},
+		"socket_topology": {
+			"additionalProperties": false,
+			"properties": {
+				"controller": {
+					"anyOf": [
+						{
+							"const": "read-write",
+							"type": "string"
+						},
+						{
+							"const": "read-only",
+							"type": "string"
+						},
+						{
+							"const": "none",
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"dataset_preparer": {
+					"anyOf": [
+						{
+							"const": "read-write",
+							"type": "string"
+						},
+						{
+							"const": "read-only",
+							"type": "string"
+						},
+						{
+							"const": "none",
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"evaluator": {
+					"anyOf": [
+						{
+							"const": "read-write",
+							"type": "string"
+						},
+						{
+							"const": "read-only",
+							"type": "string"
+						},
+						{
+							"const": "none",
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"orchestrator": {
+					"anyOf": [
+						{
+							"const": "read-write",
+							"type": "string"
+						},
+						{
+							"const": "read-only",
+							"type": "string"
+						},
+						{
+							"const": "none",
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"worker": {
+					"anyOf": [
+						{
+							"const": "read-write",
+							"type": "string"
+						},
+						{
+							"const": "read-only",
+							"type": "string"
+						},
+						{
+							"const": "none",
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"required": [
+				"controller",
+				"orchestrator",
+				"dataset_preparer",
+				"worker",
+				"evaluator"
+			],
+			"type": "object"
+		}
+	},
+	"required": [
+		"schema_version",
+		"response_type",
+		"daemon_reachable",
+		"server_version",
+		"os_type",
+		"architecture",
+		"cpu_count",
+		"memory_bytes",
+		"docker_root_dir",
+		"docker_volume_available_bytes",
+		"docker_volume_id",
+		"probe_image_digest",
+		"control_network_internal",
+		"image_provenance",
+		"socket_topology",
+		"errors"
+	],
+	"type": "object"
+}
