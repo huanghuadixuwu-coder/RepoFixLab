@@ -24,6 +24,8 @@ const PROBE_DIGEST = `alpine@sha256:${"a".repeat(64)}`;
 
 function candidateBuildInput(): object {
 	return {
+		instance_id: "axios__axios-5892",
+		base_commit: "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
 		dataset_lock: { lock_id: "dataset-lock-v1", lock_sha256: "1".repeat(64) },
 		official_image_source_lock: {
 			lock_id: "official-images-v1",
@@ -310,6 +312,7 @@ function runtime(overrides: Partial<CliRuntime> = {}): CliRuntime {
 		controllerUrl: "http://controller:8000",
 		now: () => new Date("2026-07-18T00:00:00.000Z"),
 		randomId: () => "00000000-0000-4000-8000-000000000000",
+		sleep: async () => {},
 		readArtifactsStatFs: async () => ({
 			availableBlocks: MIN_AVAILABLE_BYTES,
 			blockSize: 1n,
@@ -337,8 +340,12 @@ function runtime(overrides: Partial<CliRuntime> = {}): CliRuntime {
 		}),
 		readImageProvenanceLock: async () => null,
 		readInputFile: async () => "",
+		readM3SamplingMetadata: async () => "",
 		requestFactoryProbe: async () => {
 			throw new Error("must not request factory probe");
+		},
+		requestM3ImageResolution: async () => {
+			throw new Error("must not request M3 image resolution");
 		},
 		runExperiment: async () => {
 			throw new Error("must not execute experiment");

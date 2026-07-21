@@ -188,12 +188,16 @@ function verifyOfficialImageLock(value: unknown): OfficialImageSourceLock {
 	return verifyOfficialImageSourceLock(value, {
 		datasetRevision: DATASET_PREPARER_SELF_CHECK_CONSTANTS.datasetRevision,
 		harnessRevision: SWE_BENCH_HARNESS_REVISION,
-		imageKey: AXIOS_SMOKE_INSTANCE_ID,
-		requestedReference: image.requested_reference,
-		repositoryDigest: image.repository_digest,
-		localImageId: image.local_image_id,
-		platform: image.platform,
-		registryResponseSha256: image.registry_response_sha256,
+		images: [
+			{
+				imageKey: AXIOS_SMOKE_INSTANCE_ID,
+				requestedReference: image.requested_reference,
+				repositoryDigest: image.repository_digest,
+				localImageId: image.local_image_id,
+				platform: image.platform,
+				registryResponseSha256: image.registry_response_sha256,
+			},
+		],
 	});
 }
 

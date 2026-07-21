@@ -4,7 +4,7 @@
 	"additionalProperties": false,
 	"properties": {
 		"base_commit": {
-			"const": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+			"pattern": "^[a-f0-9]{40}$",
 			"type": "string"
 		},
 		"candidate_id": {
@@ -205,7 +205,8 @@
 			"type": "string"
 		},
 		"instance_id": {
-			"const": "axios__axios-5892",
+			"maxLength": 200,
+			"minLength": 1,
 			"type": "string"
 		},
 		"operation_id": {

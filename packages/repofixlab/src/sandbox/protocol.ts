@@ -38,12 +38,21 @@ export const RepoListInputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-export const RepoReadInputSchema = Type.Object({ path: FilePathSchema }, { additionalProperties: false });
+export const RepoReadInputSchema = Type.Object(
+	{
+		path: FilePathSchema,
+		start_line: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
+		line_count: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000 })),
+	},
+	{ additionalProperties: false },
+);
 
 export const RepoSearchInputSchema = Type.Object(
 	{
 		query: Type.String({ minLength: 1, maxLength: 1_024 }),
 		path: Type.Optional(RelativePathSchema),
+		cursor: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),
+		max_results: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
 	},
 	{ additionalProperties: false },
 );
@@ -76,6 +85,37 @@ export const RepoEditInputSchema = Type.Union([
 	),
 ]);
 
+/**
+ * Provider-facing form of repo_edit. Some OpenAI-compatible providers reject a
+ * top-level union in a function schema, so this remains an object while the
+ * stricter RepoEditInputSchema is enforced before a Controller request.
+ */
+export const RepoEditToolWireSchema = Type.Object(
+	{
+		path: FilePathSchema,
+		content: Type.Optional(
+			Type.String({
+				maxLength: 262_144,
+				description: "Complete content for a new file only; existing files must use old_text and new_text.",
+			}),
+		),
+		old_text: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: 262_144,
+				description: "Exact text that occurs once in the existing file.",
+			}),
+		),
+		new_text: Type.Optional(
+			Type.String({
+				maxLength: 262_144,
+				description: "Replacement text for old_text; it may be empty.",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
+
 export const RepoExecInputSchema = Type.Object(
 	{
 		argv: Type.Array(Type.String({ minLength: 1, maxLength: 1_024 }), {
@@ -106,6 +146,7 @@ export type RepoListInput = Static<typeof RepoListInputSchema>;
 export type RepoReadInput = Static<typeof RepoReadInputSchema>;
 export type RepoSearchInput = Static<typeof RepoSearchInputSchema>;
 export type RepoEditInput = Static<typeof RepoEditInputSchema>;
+export type RepoEditToolWireInput = Static<typeof RepoEditToolWireSchema>;
 export type RepoExecInput = Static<typeof RepoExecInputSchema>;
 export type RepoDiffInput = Static<typeof RepoDiffInputSchema>;
 export type RepoToolResult = Static<typeof RepoToolResultSchema>;

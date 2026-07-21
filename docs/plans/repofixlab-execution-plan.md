@@ -3,8 +3,8 @@
 | 属性 | 值 |
 | --- | --- |
 | 状态 | 已确认，可进入实施 |
-| 计划版本 | 1.1 |
-| 日期 | 2026-07-18 |
+| 计划版本 | 1.3 |
+| 日期 | 2026-07-20 |
 | 对应设计 | docs/designs/repofixlab.md |
 | 当前 Pi 基线 | 244f1deaf1ae0fc1a242d9df5cddf457cf3d36a7 |
 | 首期周期 | 单人约 8—10 周，另含正式实验计算时间 |
@@ -13,10 +13,21 @@
 
 RepoFixLab 首期交付“代码修复智能体 + 可信评测基础设施”，不是 Pi 展示页，也不是只跑通一个成功样例的 Demo。
 
+## 0. 协议修订 1.3：M3 官方预检后的评测池与 Dev 校准
+
+本修订覆盖下文所有“43 个正式任务”“8/5/30”“130 个 run_id”“26M formal cap”“15 个消融任务”和“10 个稳定性任务”的旧表述。它们保留为修订前的计划历史，不得作为后续实现或结果报告的依据。
+
+- 候选来源仍是已封存的 43 个 SWE-bench Multilingual JS/TS 任务，DatasetLock、43-image source lock、所有预检记录和 17 项拒绝记录均保留。
+- M3 官方预检以 pristine/adapted 两种模式分别验证 base 未解决、gold resolved。预检实际通过 26/43；其余 17 项不进入评测池，原因和证据由预检摘要绑定，绝不静默删除。
+- 正式评测池为这 26 项的资格清单，并以仓库分层的确定性 5 Dev / 4 Validation / 17 Test 划分冻结；Agent 与公开清单不读取 private spec、gold patch 或 control metadata 原值。
+- 对应的正式矩阵更新为 34 次主对照、16 次两组消融、24 次稳定性追加，共 74 个预注册逻辑 run_id；正式 accounted admission cap 为 14.8M，项目计划准入池为 28.8M，provider actual hard line 仍为 50M。
+- 预冻结校准保持 16 个逻辑 run：5 个 Dev 任务分别以两主配置各运行一次（10 个 run），再按公开固定 seed 在 Dev 的三个仓库中各选一个任务、以两主配置各追加一次（6 个 run）。这 3 个追加项是同一 Dev 任务的第二次独立校准运行，不是补样，不读取 Validation/Test，也不改变正式 74-run 矩阵。
+- M6/M7 的所有 Go/No-Go、dry-run、ExperimentLock、报告固定分母与验收项均必须按本修订重算；冻结后不得补样、替换或恢复被拒绝任务。
+
 首期采用双门交付：
 
 1. **门 A：单任务纵向切片。** 一个 Dev 任务从冻结 manifest 进入通用代码智能体，产出候选补丁，在全新 Evaluator 中执行运行时隐藏测试，最终生成 result.json 和最小 report.html。
-2. **门 B：完整实验交付。** 43 个 JavaScript/TypeScript 任务完成数据冻结；主对照、两组消融和稳定性实验共 130 个预注册逻辑运行；全部成功与失败进入可重建报告。
+2. **门 B：完整实验交付。** 43 个 JavaScript/TypeScript 候选任务完成数据冻结，M3 官方预检合格的 26 个任务进入评测池；主对照、两组消融和稳定性实验共 74 个预注册逻辑运行；全部成功与失败进入可重建报告。
 
 门 A 的真实模型可以修复失败。只要平台正确判定、记录并展示失败，纵向切片就成立。门 B 完成后才允许在简历中把项目描述为完整落地项目。
 
@@ -46,10 +57,10 @@ RepoFixLab 首期交付“代码修复智能体 + 可信评测基础设施”，
 | 主对照 | pi-general 对 repofix-full，同模型、同预算、同任务环境 |
 | 消融 | repofix-no-localize、repofix-no-verify-feedback，各 15 个相同 Test 任务 |
 | 稳定性 | 预冻结 10 个 Test 任务；两主配置各运行 3 次，主实验第一次可复用 |
-| 正式规模 | 60 次主对照 + 30 次消融 + 40 次稳定性追加 = 130 个逻辑 run_id |
+| 正式规模 | 34 次主对照 + 16 次消融 + 24 次稳定性追加 = 74 个逻辑 run_id |
 | 模型 | 智谱标准 API 的 GLM-4.5-Air，不使用 Coding Plan endpoint |
 | 预算 | Token 请求受硬准入；费用以人民币观测和报告，不设美元硬上限 |
-| 总 Token | 计划准入池 40M，项目 actual 硬保护线 50M；正式 accounted admission cap 26M |
+| 总 Token | 计划准入池 28.8M，项目 actual 硬保护线 50M；正式 accounted admission cap 14.8M |
 | 采用判定 | 正确性主轴 + Token/耗时工程约束 + 安全/可复现硬门禁；不计算综合总分 |
 | 公开范围 | 公开源码、冻结清单、配置/schema、聚合报告和去敏样例；完整原始轨迹默认本地保存 |
 | 并发 | 默认全局并发 1；通过双任务 soak 后只能以新配置版本升至 2 |
@@ -311,18 +322,18 @@ Pi 的静态美元 cost 字段不能表达智谱的人民币阶梯计价，因�
 
 | 池 | 上限 | 用途 |
 | --- | ---: | --- |
-| 正式 Test | 26M | 130 个 run_id，每个 run 的 accounted admission cap 为 200k |
+| 正式 Test | 14.8M | 74 个 run_id，每个 run 的 accounted admission cap 为 200k |
 | Dev | 6M | 2.8M 迭代池 + 3.2M 预冻结校准批次 |
 | Validation | 3M | 最多 3 个预登记候选，5 个任务只做一次最终选择 |
 | 事故诊断储备 | 5M | 仅用于 Dev clone、无模型复现或经批准的故障诊断；不得替换正式结果 |
-| 计划准入总池 | 40M | 常规请求的 accounted_tokens 不得超过 |
+| 计划准入总池 | 28.8M | 常规请求的 accounted_tokens 不得超过 |
 | 项目硬保护线 | 50M | 实验控制流量的 provider actual 上限；10M 只作结算安全缓冲，不转为常规额度 |
 
-同一 run 的基础设施重试共享 200k accounted admission cap，未用 Token 不得转给其他正式任务。每个 run 同时受 50 模型轮次、100 工具调用和 30 分钟限制。200k/26M/40M 是可审计的准入上限，不宣称在没有供应商 tokenizer/framing 契约时是数学意义上的 actual hard cap。
+同一 run 的基础设施重试共享 200k accounted admission cap，未用 Token 不得转给其他正式任务。每个 run 同时受 50 模型轮次、100 工具调用和 30 分钟限制。200k/14.8M/28.8M 是可审计的准入上限，不宣称在没有供应商 tokenizer/framing 契约时是数学意义上的 actual hard cap。
 
-所有 pool 跨 experiment_id 共用容器路径 `/artifacts/_control/global-budget.jsonl`，其 host bind 为 `E:/pi/artifacts/_control/global-budget.jsonl`。GlobalBudgetLedger 使用 budget_namespace=repofixlab-v1、带 fencing token 的单 writer 独占 lease、追加式 reservation/settlement 和可重放汇总；任何 experiment 启动前都同时检查 pool、40M 计划池和 50M 项目硬保护线，新 experiment_id 不能重置总账。
+所有 pool 跨 experiment_id 共用容器路径 `/artifacts/_control/global-budget.jsonl`，其 host bind 为 `E:/pi/artifacts/_control/global-budget.jsonl`。GlobalBudgetLedger 使用 budget_namespace=repofixlab-v1、带 fencing token 的单 writer 独占 lease、追加式 reservation/settlement 和可重放汇总；任何 experiment 启动前都同时检查 pool、28.8M 计划池和 50M 项目硬保护线，新 experiment_id 不能重置总账。
 
-正式实验恰好保留预注册的 130 个逻辑结果；基础设施失败仍留在固定分母，除同一 run 的既定 attempt 策略外，不使用事故诊断储备替换、补样或选择性重跑。该储备只生成明确标为 diagnostic、与正式结论隔离的制品；配置级不公平、泄露或批次失效必须停止并建立新协议，完整 26M 正式批次重跑不在当前授权内。50M 保护线假设该 API key/资源包在实验期由 RepoFixLab 独占；若存在其他消费者，M6/M7 必须先导入 provider 账单差额再准入。
+正式实验恰好保留预注册的 74 个逻辑结果；基础设施失败仍留在固定分母，除同一 run 的既定 attempt 策略外，不使用事故诊断储备替换、补样或选择性重跑。该储备只生成明确标为 diagnostic、与正式结论隔离的制品；配置级不公平、泄露或批次失效必须停止并建立新协议，完整 14.8M 正式批次重跑不在当前授权内。50M 保护线假设该 API key/资源包在实验期由 RepoFixLab 独占；若存在其他消费者，M6/M7 必须先导入 provider 账单差额再准入。
 
 准入与硬保护通过 RepoFix 适配层实现：
 
@@ -336,7 +347,7 @@ Pi 的静态美元 cost 字段不能表达智谱的人民币阶梯计价，因�
 8. Pi 普通 provider/session retry 关闭；budget_exhausted 只能由 Orchestrator 归类，不能被当作传输错误或 overflow 重试；
 9. 冻结的单请求契约必须证明 context 131072 与 max output 16384 共同给出 `max_single_request_actual_tokens <= 147456`；若 provider smoke 无法验证该请求上界，M6 No-Go。在全局 provider 并发 1、独占 key、40M 停止准入、unknown usage 立即暂停的前提下，10M 缓冲远大于一个最大在途请求，使 50M 成为项目控制流量的硬保护线。
 
-预冻结 Dev 校准批次固定为 8 个 Dev 任务 × pi-general/repofix-full = 16 个新 run_id，预留 3.2M。全部 GLM smoke、Dev 和 Validation 请求都必须满足 estimator 不变量；任一次低估即冻结失败。若校准批次至少 2 个以 budget_exhausted 结束，M6 同样失败；基础设施重试不增加分母，任何无法进入 Agent 终态的 run 也使整批失败，不能从 16 中剔除。此时只能调整估算器、总资源或正式预算并重新做校准与 Validation，不能减少任务、删失败或临时给个别 Test 任务加额度。
+预冻结 Dev 校准批次固定为 5 个 Dev 任务 × pi-general/repofix-full = 10 个新 run，加上 3 个按固定 seed 从 Dev 三个仓库各选一个任务的第二次 pi-general/repofix-full 运行 = 6 个新 run，共 16 个逻辑 run，预留 3.2M。全部 GLM smoke、Dev 和 Validation 请求都必须满足 estimator 不变量；任一次低估即冻结失败。若校准批次至少 2 个以 budget_exhausted 结束，M6 同样失败；基础设施重试不增加分母，任何无法进入 Agent 终态的 run 也使整批失败，不能从 16 中剔除。此时只能调整估算器、总资源或正式预算并重新做校准与 Validation，不能减少任务、删失败或临时给个别 Test 任务加额度。
 
 ### 3.8 Worker 净化与 Evaluator 防假阳性
 
@@ -588,7 +599,7 @@ SamplingMetadata 保存原始整数而不是预先分桶：`issue_bytes` 是 pro
 - completed 结果不可被 resume 覆盖；
 - 所有旧 attempt 的 Token、耗时、费用和日志保留；
 - 报告可在无网络、无模型调用条件下两次重建且 hash 一致；
-- 8 个 Dev 任务可一键批量运行。
+- 5 个 Dev 任务和 3 个预注册重复 Dev 项可一键完成 16-run 校准批次。
 
 首期使用 JSON/JSONL + 原子文件，不引入数据库。并发 1 下这比 SQLite/服务数据库更容易审计；若以后扩展多机，再迁移存储层。
 
@@ -599,7 +610,7 @@ SamplingMetadata 保存原始整数而不是预先分桶：`issue_bytes` 是 pro
 - 只用 Dev 调整提示、工具说明、阶段和上下文策略；
 - Validation 前最多登记 3 个候选及唯一选择规则；
 - Validation 只执行一次；
-- 固定 Test、15 个消融任务、10 个稳定性任务和交错顺序；
+- 固定 17 个 Test 主对照、两组各 8 个消融任务、6 个稳定性任务及其交错顺序；
 - 固定模型请求参数、provider 重试、预算、资源、统计和采用判定；
 - 运行全部 deterministic、security、recovery 和 report gates；
 - 生成 experiment.lock 和总 SHA-256。
@@ -609,30 +620,30 @@ SamplingMetadata 保存原始整数而不是预先分桶：`issue_bytes` 是 pro
 - 零个开放 P0/P1 平台缺陷；
 - GLM 标准 API smoke 全通过；
 - formal doctor、43 任务预检和全部安全门禁通过；
-- DatasetLock/OfficialImageSourceLock/TaskEnvironmentLock 全部 sealed 且 hash/platform/local image ID 对账，运行期无 sealed volume RW mount；
+- DatasetLock/OfficialImageSourceLock 与 26 个 TaskEnvironmentLock 全部 sealed 且 hash/platform/local image ID 对账，运行期无 sealed volume RW mount；
 - TokenAdmissionEstimator 的 multiplier/margin/version 已冻结，全部校准请求满足 actual≤reservation，单请求 actual 上界 147456 可验证；
 - context-overflow provider probe 已冻结 request-level `verified_not_billed` 判据并通过；若供应商不能提供该证据，实验锁必须冻结 `overflow_auto_recovery=false` 与非 overflow 映射测试；
 - Controller capacity=1 的并发竞争、重启 reconciliation 和 experiment owner lease 测试通过；
-- experiment.lock 完整列出 130 个 run_id；
-- dry-run 精确输出 130、26M formal accounted cap、GlobalBudgetLedger actual/accounted/预留/剩余、40M/50M 门限、预计容器小时和 CNY 估算；
+- experiment.lock 完整列出 74 个 run_id；
+- dry-run 精确输出 74、14.8M formal accounted cap、GlobalBudgetLedger actual/accounted/预留/剩余、28.8M/50M 门限、预计容器小时和 CNY 估算；
 - 配置或代码 hash 不一致时 Test 命令拒绝启动；
-- 16-run 预冻结 Dev 校准批次完整，budget_exhausted 不超过 1 个，且 GlobalBudgetLedger 能证明累计量未越过任何 pool/总门限。
+- 16-run 预冻结 Dev 校准批次完整：5 个 Dev 任务两主配置各一次，加上 3 个按固定 seed 选出的 Dev 任务两主配置各追加一次；budget_exhausted 不超过 1 个，且 GlobalBudgetLedger 能证明累计量未越过任何 pool/总门限。
 
 统计协议同时冻结为：Wilson 95% 单组区间、10,000 次 repo-cluster paired bootstrap、双侧 exact McNemar、逐仓库结果和 leave-one-repository-out；Test 后不得调整 seed、重采样单位或展示规则。
 
 查看 Validation 后若继续改行为，必须提升协议版本并重新 Validation。
 
-### 4.9 M7：130 个预注册逻辑运行
+### 4.9 M7：74 个预注册逻辑运行
 
 运行矩阵：
 
 | 配置 | 主实验 | 稳定性新增 | 合计 |
 | --- | ---: | ---: | ---: |
-| pi-general | 30 | 20 | 50 |
-| repofix-full | 30 | 20 | 50 |
-| repofix-no-localize | 15 | 0 | 15 |
-| repofix-no-verify-feedback | 15 | 0 | 15 |
-| 总计 | 90 | 40 | 130 |
+| pi-general | 17 | 12 | 29 |
+| repofix-full | 17 | 12 | 29 |
+| repofix-no-localize | 8 | 0 | 8 |
+| repofix-no-verify-feedback | 8 | 0 | 8 |
+| 总计 | 50 | 24 | 74 |
 
 执行规则：
 

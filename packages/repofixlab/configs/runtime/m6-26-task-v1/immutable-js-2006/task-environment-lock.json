@@ -1,0 +1,45 @@
+{
+	"adapter_sha256": "fd09946d8995076ba05945492d6118d68a895927d7c68f1b60c4dcb58c227263",
+	"candidate_id": "task-environment-candidate-v1-immutable-js-2006-7c78b4e2e301a5c9d390ad93688e8eb1afe0c2916f960ed506798b0debb8262a",
+	"candidate_sha256": "a3eeac5da37b7d3feebf630cf6ee1e55b529aedb3dacfedbd4cc11ded295de0d",
+	"created_at": "2026-07-20T00:52:26.581Z",
+	"dataset_lock_id": "dataset-v1-g-20260718-135934-066a8f5b6f6b-e451237925674fc6",
+	"evaluator_image": {
+		"local_image_id": "sha256:9a27973ce72b86d66b6a99b5798665eb5d8240bb44ec77c2550662e015e882dd",
+		"platform": "linux/amd64",
+		"provenance_sha256": "54680ec500b3878188955d77b8525aeedbf9f00f9cec42daede8c236b8e419de"
+	},
+	"filesystem_profile_sha256": "664b7d4e6907ea91232811a9349f290164b81e286add1e0d63f587cd7803c160",
+	"instance_id": "immutable-js__immutable-js-2006",
+	"lock_id": "task-environment-v1-immutable-js-2006-323026c2bf61cf51",
+	"lock_type": "task_environment",
+	"official_image_source_lock_id": "official-images-v1-set-26-140ebe01ca57c662",
+	"resource_profile": {
+		"cpu_count": 4,
+		"memory_bytes": 8589934592,
+		"network_mode": "none",
+		"pids_limit": 512,
+		"read_only_root_filesystem": true
+	},
+	"sanitizer_sha256": "3d1cbbea005c97f65b0abdedfc5d1fbb1fcd5386eff8270c5036626f56466695",
+	"schema_version": "v1",
+	"seal_sha256": "323026c2bf61cf51a2d955837e0aa30d4c1dfec9225dce3238353a0dc50fd540",
+	"source_image": {
+		"local_image_id": "sha256:c5f3939dc5906d8ae81645097ab99401933d1beed87b4bc0af4dce3c3f7e29a0",
+		"platform": "linux/amd64",
+		"repository_digest": "swebench/sweb.eval.x86_64.immutable-js_1776_immutable-js-2006@sha256:c5f3939dc5906d8ae81645097ab99401933d1beed87b4bc0af4dce3c3f7e29a0"
+	},
+	"verification": {
+		"completed_at": "2026-07-20T00:52:26.581Z",
+		"equivalence_passed": true,
+		"evidence_sha256": "853ccd85c58c3c23a709e0064de4a0e27fdc83031ae77265ecd06fdef39cb059",
+		"factory_probe_passed": true,
+		"factory_probe_report_sha256": "4815abaac05e6d570c5ed98177aaa098d5750fead5dd42e31c6e2549e6b82c4e",
+		"security_profile_passed": true
+	},
+	"worker_image": {
+		"local_image_id": "sha256:c6b5f9184d6ae61dfe4183a3dba5e2e898beba9ccf11abc75523b7bc9a703e3f",
+		"platform": "linux/amd64",
+		"provenance_sha256": "984bae66095cb82974a70afcb13b90ab8c8ae7d411727e2142dc3a2257872948"
+	}
+}

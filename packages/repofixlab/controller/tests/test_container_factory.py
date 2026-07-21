@@ -1017,6 +1017,36 @@ class ContainerFactoryTest(unittest.TestCase):
         self.assertEqual(request.worker.nano_cpus, 4_000_000_000)
         self.assertEqual(request.evaluator.nano_cpus, 4_000_000_000)
 
+    def test_resolver_binds_a_repository_qualified_non_axios_task(self) -> None:
+        instance_id = "immutable-js__immutable-js-2005"
+        base_commit = "1" * 40
+        resolver = TrustedCandidateResolver(
+            {
+                "candidate-immutable": CandidateLaunchDefinition(
+                    candidate_sha256=CANDIDATE_SHA256,
+                    instance_id=instance_id,
+                    base_commit=base_commit,
+                    probe_sha256=PROBE_SHA256,
+                    worker=_policy("worker"),
+                    evaluator=_policy("evaluator"),
+                )
+            }
+        )
+        request_sha256 = task_role_factory_probe_request_sha256(
+            operation_id="operation-immutable",
+            candidate_id="candidate-immutable",
+            candidate_sha256=CANDIDATE_SHA256,
+        )
+        request = resolver.resolve_request(
+            operation_id="operation-immutable",
+            candidate_id="candidate-immutable",
+            candidate_sha256=CANDIDATE_SHA256,
+            request_sha256=request_sha256,
+        )
+
+        self.assertEqual(request.instance_id, instance_id)
+        self.assertEqual(request.base_commit, base_commit)
+
     def test_labels_are_correlation_only_not_pass_evidence(self) -> None:
         client = FakeDockerClient("label_drift")
         factory, request = _factory(client)

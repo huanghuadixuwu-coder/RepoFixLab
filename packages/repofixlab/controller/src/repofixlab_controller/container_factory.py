@@ -40,6 +40,7 @@ _CONTAINER_ID = re.compile(r"^[a-f0-9]{64}$")
 _CONTAINER_HOSTNAME = re.compile(r"^[a-f0-9]{12,64}$")
 _COMPOSE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _HEAD_SHA = re.compile(r"^[a-f0-9]{40}$")
+_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
 _OPERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _MOUNT_KEY = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _USER = re.compile(r"^([0-9]+):([0-9]+)$")
@@ -341,6 +342,7 @@ def _validate_role_policy(role: Role, policy: RoleLaunchPolicy) -> None:
         if mount.options not in {
             "rw,noexec,nosuid,nodev,size=16m",
             "rw,noexec,nosuid,nodev,size=64m",
+            "rw,noexec,nosuid,nodev,size=512m",
         }:
             raise ContainerFactoryError(f"{role} tmpfs options are not allowlisted")
         targets.add(mount.target)
@@ -364,10 +366,10 @@ class TrustedCandidateResolver:
                 raise ContainerFactoryError("candidate ID is malformed")
             if _SHA256.fullmatch(definition.candidate_sha256) is None:
                 raise ContainerFactoryError("candidate SHA-256 is malformed")
-            if definition.instance_id != AXIOS_SMOKE_INSTANCE_ID:
-                raise ContainerFactoryError("candidate instance is not the Axios smoke task")
-            if definition.base_commit != AXIOS_SMOKE_BASE_COMMIT:
-                raise ContainerFactoryError("candidate base commit is not locked")
+            if _INSTANCE_ID.fullmatch(definition.instance_id) is None:
+                raise ContainerFactoryError("candidate instance ID is malformed")
+            if _HEAD_SHA.fullmatch(definition.base_commit) is None:
+                raise ContainerFactoryError("candidate base commit is malformed")
             if _SHA256.fullmatch(definition.probe_sha256) is None:
                 raise ContainerFactoryError("candidate probe SHA-256 is malformed")
             _validate_role_policy("worker", definition.worker)

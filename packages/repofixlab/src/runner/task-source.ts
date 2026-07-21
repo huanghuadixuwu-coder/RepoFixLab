@@ -7,11 +7,12 @@ import { Compile } from "typebox/compile";
 import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
 import {
 	taskEnvironmentLockId,
+	taskEnvironmentLockInstancePrefix,
 	taskEnvironmentLockSealHash,
 	verifyDatasetLockForTaskEnvironment,
 } from "../contracts/task-environment-lock.ts";
 import {
-	DATASET_PREPARER_SELF_CHECK_CONSTANTS,
+	type DatasetLock,
 	type PublicTaskManifest,
 	PublicTaskManifestSchema,
 	TaskEnvironmentLockSchema,
@@ -65,6 +66,13 @@ export interface TaskEnvironmentLockSource {
 	load(instanceId: string): Promise<TaskEnvironmentBinding>;
 }
 
+export interface SharedDatasetLockLocation {
+	readonly root_path: string;
+	readonly relative_path: string;
+}
+
+export type PublicTaskSplit = PublicTaskManifest["split"];
+
 const publicTaskValidator = Compile(PublicDatasetTaskSchema);
 const publicTaskManifestValidator = Compile(PublicTaskManifestSchema);
 const environmentLockValidator = Compile(TaskEnvironmentLockSchema);
@@ -107,41 +115,106 @@ function parseJson(content: Uint8Array, label: string): unknown {
 	}
 }
 
+function datasetFile(
+	datasetLock: DatasetLock,
+	scope: "public" | "control" | "private",
+	path: string,
+): DatasetLock["files"][number] {
+	const descriptor = datasetLock.files.find((file) => file.scope === scope && file.path === path);
+	if (descriptor === undefined) throw new Error(`DatasetLock is missing ${scope} file binding: ${path}`);
+	return descriptor;
+}
+
+function taskRecordDescriptor(datasetLock: DatasetLock, instanceId: string): DatasetLock["files"][number] {
+	return datasetFile(datasetLock, "public", `tasks/${instanceId}.json`);
+}
+
+function assertTaskRecordMatchesDatasetLock(
+	content: Uint8Array,
+	instanceId: string,
+	environment: TaskEnvironmentBinding,
+): DatasetLock {
+	const datasetLock = verifyDatasetLockForTaskEnvironment(
+		parseJson(environment.datasetLockBytes, "Packaged DatasetLock"),
+	);
+	if (datasetLock.lock_id !== environment.lock.dataset_lock_id) {
+		throw new Error("Packaged DatasetLock does not match the TaskEnvironmentLock binding");
+	}
+	const descriptor = taskRecordDescriptor(datasetLock, instanceId);
+	if (content.byteLength !== descriptor.bytes || exactSha256(content) !== descriptor.sha256) {
+		throw new Error("Public task record does not match the sealed DatasetLock byte binding");
+	}
+	return datasetLock;
+}
+
+async function loadTaskEnvironmentBindingFromBytes(
+	instanceId: string,
+	lockBytes: Uint8Array,
+	datasetLockBytes: Uint8Array,
+): Promise<TaskEnvironmentBinding> {
+	const value = parseJson(lockBytes, "Task environment lock");
+	if (!environmentLockValidator.Check(value) || value.instance_id !== instanceId) {
+		throw new Error("Task environment lock does not satisfy the strict v1 schema");
+	}
+	const expectedSeal = taskEnvironmentLockSealHash(value);
+	if (
+		value.seal_sha256 !== expectedSeal ||
+		value.lock_id !== taskEnvironmentLockId(value.instance_id, expectedSeal) ||
+		!new RegExp(SHA256_PATTERN).test(value.candidate_sha256)
+	) {
+		throw new Error("Task environment lock semantic seal is invalid");
+	}
+	const datasetLock = verifyDatasetLockForTaskEnvironment(parseJson(datasetLockBytes, "Packaged DatasetLock"));
+	if (datasetLock.lock_id !== value.dataset_lock_id) {
+		throw new Error("Packaged DatasetLock does not match the TaskEnvironmentLock binding");
+	}
+	return {
+		lock: value,
+		lockId: value.lock_id,
+		lockSha256: value.seal_sha256,
+		candidateId: value.candidate_id,
+		candidateSha256: value.candidate_sha256,
+		lockBytes,
+		lockFileSha256: exactSha256(lockBytes),
+		datasetLockBytes,
+		datasetLockFileSha256: exactSha256(datasetLockBytes),
+	};
+}
+
 export class FilePublicTaskSource implements PublicTaskSource {
 	private readonly rootPath: string;
+	private readonly split: PublicTaskSplit;
 
-	constructor(rootPath = process.env.REPOFIX_DATASET_PUBLIC_PATH ?? "/data/public") {
+	constructor(
+		rootPath = process.env.REPOFIX_DATASET_PUBLIC_PATH ?? "/data/public",
+		split: PublicTaskSplit = "dev",
+	) {
 		this.rootPath = rootPath;
+		this.split = split;
 	}
 
 	async load(instanceId: string, environment: TaskEnvironmentBinding): Promise<PublicTaskBinding> {
 		assertInstanceId(instanceId);
 		const content = await readRegularFileBeneath(this.rootPath, join("tasks", `${instanceId}.json`));
-		if (
-			content.byteLength !== 1_187 ||
-			exactSha256(content) !== "196c36cba569347c9db72de3f46541d8f9bc6e9f08e7e6d70ddcba0ce4c4a3b0"
-		) {
-			throw new Error("Public task record does not match the frozen M1 byte binding");
-		}
+		const datasetLock = assertTaskRecordMatchesDatasetLock(content, instanceId, environment);
 		const value = parseJson(content, "Public task manifest");
 		if (!publicTaskValidator.Check(value) || value.instance_id !== instanceId) {
-			throw new Error("Public task manifest does not satisfy the frozen task schema");
+			throw new Error("Public task manifest does not satisfy the task schema");
 		}
 		if (
-			value.dataset_revision !== DATASET_PREPARER_SELF_CHECK_CONSTANTS.datasetRevision ||
-			value.base_commit !== "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b" ||
-			environment.lock.dataset_lock_id !== "dataset-v1-g-20260718-135934-066a8f5b6f6b-e451237925674fc6"
+			value.dataset_revision !== datasetLock.dataset.revision ||
+			environment.lock.dataset_lock_id !== datasetLock.lock_id
 		) {
-			throw new Error("Public task record does not match the frozen dataset/environment binding");
+			throw new Error("Public task record does not match the sealed dataset/environment binding");
 		}
 		const identitySha256 = canonicalContractSha256({
 			dataset_record_sha256: exactSha256(content),
 			task_environment_lock_id: environment.lockId,
-			split: "dev",
+			split: this.split,
 		});
 		const unsigned = {
 			schema_version: "v1" as const,
-			manifest_id: `public-task-v1-axios-5892-${identitySha256.slice(0, 16)}`,
+			manifest_id: `public-task-v1-${taskEnvironmentLockInstancePrefix(instanceId)}-${identitySha256.slice(0, 16)}`,
 			dataset_lock_id: environment.lock.dataset_lock_id,
 			task_environment_lock_id: environment.lockId,
 			task: {
@@ -153,7 +226,7 @@ export class FilePublicTaskSource implements PublicTaskSource {
 			},
 			worker_image_id: environment.lock.worker_image.local_image_id,
 			resource_profile: { ...environment.lock.resource_profile },
-			split: "dev" as const,
+			split: this.split,
 			created_at: environment.lock.created_at,
 		};
 		const manifest: PublicTaskManifest = { ...unsigned, manifest_sha256: canonicalContractSha256(unsigned) };
@@ -180,39 +253,40 @@ export class FileTaskEnvironmentLockSource implements TaskEnvironmentLockSource 
 		const stats = await lstat(this.lockPath);
 		if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Task environment lock is not a regular file");
 		const lockBytes = await readFile(await realpath(this.lockPath));
-		const value = parseJson(lockBytes, "Task environment lock");
-		if (!environmentLockValidator.Check(value) || value.instance_id !== instanceId) {
-			throw new Error("Task environment lock does not satisfy the strict v1 schema");
-		}
-		const expectedSeal = taskEnvironmentLockSealHash(value);
-		if (
-			value.seal_sha256 !== expectedSeal ||
-			value.lock_id !== taskEnvironmentLockId(expectedSeal) ||
-			!new RegExp(SHA256_PATTERN).test(value.candidate_sha256)
-		) {
-			throw new Error("Task environment lock semantic seal is invalid");
-		}
 		const datasetStats = await lstat(this.datasetLockPath);
 		if (!datasetStats.isFile() || datasetStats.isSymbolicLink())
 			throw new Error("Packaged DatasetLock is not a regular file");
 		const datasetLockBytes = await readFile(await realpath(this.datasetLockPath));
-		if (exactSha256(datasetLockBytes) !== "003c0a34cd85c9254e651ab639a29171677f98e1bb06a8393b14d5893fdef95f") {
-			throw new Error("Packaged DatasetLock does not match the frozen candidate byte binding");
-		}
-		const datasetLock = verifyDatasetLockForTaskEnvironment(parseJson(datasetLockBytes, "Packaged DatasetLock"));
-		if (datasetLock.lock_id !== value.dataset_lock_id) {
-			throw new Error("Packaged DatasetLock does not match the TaskEnvironmentLock binding");
-		}
-		return {
-			lock: value,
-			lockId: value.lock_id,
-			lockSha256: value.seal_sha256,
-			candidateId: value.candidate_id,
-			candidateSha256: value.candidate_sha256,
-			lockBytes,
-			lockFileSha256: exactSha256(lockBytes),
-			datasetLockBytes,
-			datasetLockFileSha256: exactSha256(datasetLockBytes),
-		};
+		return loadTaskEnvironmentBindingFromBytes(instanceId, lockBytes, datasetLockBytes);
+	}
+}
+
+/**
+ * Loads per-task sealed runtime inputs from a single immutable directory.
+ * Each task owns its task lock path; the DatasetLock may be duplicated so no
+ * running task needs a mutable shared configuration file.
+ */
+export class DirectoryTaskEnvironmentLockSource implements TaskEnvironmentLockSource {
+	private readonly rootPath: string;
+	private readonly sharedDatasetLockLocation: SharedDatasetLockLocation | null;
+
+	constructor(
+		rootPath = process.env.REPOFIX_TASK_ENVIRONMENT_LOCK_ROOT ?? fileURLToPath(new URL("../../configs/runtime", import.meta.url)),
+		sharedDatasetLockLocation: SharedDatasetLockLocation | null = null,
+	) {
+		this.rootPath = rootPath;
+		this.sharedDatasetLockLocation = sharedDatasetLockLocation;
+	}
+
+	async load(instanceId: string): Promise<TaskEnvironmentBinding> {
+		assertInstanceId(instanceId);
+		const taskDirectory = taskEnvironmentLockInstancePrefix(instanceId);
+		const datasetLockRoot = this.sharedDatasetLockLocation?.root_path ?? this.rootPath;
+		const datasetLockPath = this.sharedDatasetLockLocation?.relative_path ?? join(taskDirectory, "dataset-lock.json");
+		const [lockBytes, datasetLockBytes] = await Promise.all([
+			readRegularFileBeneath(this.rootPath, join(taskDirectory, "task-environment-lock.json")),
+			readRegularFileBeneath(datasetLockRoot, datasetLockPath),
+		]);
+		return loadTaskEnvironmentBindingFromBytes(instanceId, lockBytes, datasetLockBytes);
 	}
 }

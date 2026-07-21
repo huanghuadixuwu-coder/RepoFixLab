@@ -15,7 +15,6 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field
 
 from .collector import collect_bootstrap_health, unreachable_bootstrap_health
-from .container_factory import AXIOS_SMOKE_INSTANCE_ID
 from .factory_service import (
     FactoryCapacityBusy,
     FactoryHttpRequest,
@@ -24,6 +23,19 @@ from .factory_service import (
     FactoryOperationService,
     FactoryServiceUnavailable,
     load_factory_operation_service,
+)
+from .m3_image_resolver import (
+    M3ImageResolutionConflict,
+    M3ImageResolutionError,
+    M3ImageResolutionRequest,
+    M3ImageResolutionService,
+)
+from .m3_preflight import (
+    M3PreflightConflict,
+    M3PreflightError,
+    M3PreflightRequest,
+    M3PreflightService,
+    M3PreflightTask,
 )
 from .runtime_http import install_runtime_routes
 from .runtime_docker import (
@@ -59,7 +71,48 @@ class TaskRoleFactoryOperationRequest(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
     )
     candidate_id: str = Field(min_length=1, max_length=160)
-    instance_id: Literal[AXIOS_SMOKE_INSTANCE_ID]
+    instance_id: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$",
+    )
+
+
+class M3OfficialImageResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["v1"]
+    request_type: Literal["m3_official_image_resolution"]
+    operation_id: str = Field(
+        min_length=1,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
+    )
+    dataset_revision: str = Field(min_length=7, max_length=160)
+    instance_ids: list[str] = Field(min_length=26, max_length=43)
+
+
+class M3PreflightTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    instance_id: str = Field(min_length=3, max_length=401)
+    base_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    repo: str = Field(min_length=3, max_length=200)
+    private_task_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_image_id: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    adapted_image_reference: str | None = Field(default=None, min_length=1, max_length=300)
+    adapted_image_id: str | None = Field(default=None, pattern=r"^sha256:[a-f0-9]{64}$")
+
+
+class M3OfficialPreflightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["v1"]
+    request_type: Literal["m3_official_image_preflight"]
+    operation_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
+    dataset_revision: str = Field(min_length=7, max_length=160)
+    private_volume: str = Field(min_length=1, max_length=100)
+    tasks: list[M3PreflightTaskRequest] = Field(min_length=26, max_length=43)
 
 
 def _load_factory_from_environment() -> tuple[FactoryOperationService | None, object | None]:
@@ -99,23 +152,24 @@ def _load_runtime_from_environment(
     task_lock_value = os.environ.get(
         "REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH"
     )
-    if not task_lock_value:
+    task_lock_root_value = os.environ.get("REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_ROOT")
+    if not task_lock_value and not task_lock_root_value:
         return None
     dataset_lock_value = os.environ.get("REPOFIXLAB_RUNTIME_DATASET_LOCK_PATH")
     kernel_sha256 = os.environ.get(
         "REPOFIXLAB_RUNTIME_EVALUATOR_KERNEL_SHA256"
     )
-    if not dataset_lock_value or not kernel_sha256:
+    if not kernel_sha256 or (not dataset_lock_value and not task_lock_root_value):
         raise RuntimeError("production runtime configuration is incomplete")
     schema_directory = Path(
         os.environ.get("REPOFIXLAB_SCHEMA_DIR", "/opt/repofixlab/schemas")
     )
     configuration = RuntimeDockerConfiguration(
-        task_environment_lock_path=Path(task_lock_value),
+        task_environment_lock_path=Path(task_lock_value or "/runtime-lock-required"),
         task_environment_lock_schema_path=(
             schema_directory / "task-environment-lock.schema.json"
         ),
-        dataset_lock_path=Path(dataset_lock_value),
+        dataset_lock_path=Path(dataset_lock_value or "/dataset-lock-required"),
         dataset_lock_schema_path=schema_directory / "dataset-lock.schema.json",
         evaluator_kernel_root=Path(
             os.environ.get(
@@ -124,6 +178,7 @@ def _load_runtime_from_environment(
             )
         ),
         evaluator_kernel_sha256=kernel_sha256,
+        runtime_lock_root=Path(task_lock_root_value) if task_lock_root_value else None,
     )
     backend = DockerRuntimeBackend(client, factory.catalog, configuration)
     operation_root = Path(
@@ -138,22 +193,34 @@ def _load_runtime_from_environment(
     )
 
 
+def _runtime_enabled_from_environment() -> bool:
+    value = os.environ.get("REPOFIXLAB_RUNTIME_ENABLED", "true")
+    if value not in {"true", "false"}:
+        raise RuntimeError("REPOFIXLAB_RUNTIME_ENABLED must be exactly true or false")
+    return value == "true"
+
+
 def create_app(
     *,
     factory_service: FactoryOperationService | None = None,
     runtime_service: RuntimeOperationService | None = None,
+    m3_image_resolution_service: M3ImageResolutionService | None = None,
+    m3_preflight_service: M3PreflightService | None = None,
     load_factory_from_environment: bool = True,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         service = factory_service
         active_runtime_service = runtime_service
+        active_m3_image_resolution_service = m3_image_resolution_service
+        active_m3_preflight_service = m3_preflight_service
         owned_client: object | None = None
         try:
             if service is None and load_factory_from_environment:
                 service, owned_client = _load_factory_from_environment()
-            runtime_requested = bool(
+            runtime_requested = _runtime_enabled_from_environment() and bool(
                 os.environ.get("REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH")
+                or os.environ.get("REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_ROOT")
             )
             if (
                 active_runtime_service is None
@@ -170,6 +237,26 @@ def create_app(
                     owned_client,
                     service,
                 )
+            if (
+                active_m3_image_resolution_service is None
+                and load_factory_from_environment
+                and owned_client is not None
+            ):
+                active_m3_image_resolution_service = M3ImageResolutionService(
+                    owned_client,
+                    Path(
+                        os.environ.get(
+                            "REPOFIXLAB_M3_IMAGE_RESOLUTION_ROOT",
+                            "/var/lib/repofix/controller/m3-image-resolutions",
+                        )
+                    ),
+                )
+            if active_m3_preflight_service is None and load_factory_from_environment and owned_client is not None:
+                active_m3_preflight_service = M3PreflightService(
+                    owned_client,
+                    Path(os.environ.get("REPOFIXLAB_M3_PREFLIGHT_ROOT", "/var/lib/repofix/controller/m3-preflights")),
+                    os.environ.get("REPOFIXLAB_M3_PRIVATE_VOLUME", "dataset-private-unconfigured"),
+                )
         except Exception:
             if factory_service is None and service is not None:
                 service.close()
@@ -179,6 +266,8 @@ def create_app(
             raise
         application.state.factory_service = service
         application.state.runtime_service = active_runtime_service
+        application.state.m3_image_resolution_service = active_m3_image_resolution_service
+        application.state.m3_preflight_service = active_m3_preflight_service
         try:
             yield
         finally:
@@ -242,6 +331,70 @@ def create_app(
                     "true" if result.replayed else "false"
                 )
             },
+        )
+
+    @application.post("/v1/m3/official-images")
+    def resolve_m3_official_images(
+        request: M3OfficialImageResolutionRequest,
+    ) -> JSONResponse:
+        service = getattr(application.state, "m3_image_resolution_service", None)
+        if not isinstance(service, M3ImageResolutionService):
+            raise HTTPException(status_code=503, detail="M3 image resolution service is unavailable")
+        try:
+            record, replayed = service.start(
+                M3ImageResolutionRequest(
+                    operation_id=request.operation_id,
+                    dataset_revision=request.dataset_revision,
+                    instance_ids=tuple(request.instance_ids),
+                )
+            )
+        except M3ImageResolutionConflict:
+            raise HTTPException(status_code=409, detail="M3 image resolution operation conflicts with state") from None
+        except M3ImageResolutionError:
+            raise HTTPException(status_code=422, detail="M3 image resolution was rejected") from None
+        except Exception:
+            raise HTTPException(status_code=500, detail="M3 image resolution failed") from None
+        return JSONResponse(
+            status_code=202 if record.get("status") == "running" else 200,
+            content=record,
+            headers={"X-RepoFixLab-Idempotent-Replay": "true" if replayed else "false"},
+        )
+
+    @application.post("/v1/m3/official-preflight")
+    def preflight_m3_official_images(request: M3OfficialPreflightRequest) -> JSONResponse:
+        service = getattr(application.state, "m3_preflight_service", None)
+        if not isinstance(service, M3PreflightService):
+            raise HTTPException(status_code=503, detail="M3 preflight service is unavailable")
+        try:
+            record, replayed = service.start(
+                M3PreflightRequest(
+                    operation_id=request.operation_id,
+                    dataset_revision=request.dataset_revision,
+                    private_volume=request.private_volume,
+                    tasks=tuple(
+                        M3PreflightTask(
+                            instance_id=task.instance_id,
+                            base_commit=task.base_commit,
+                            repo=task.repo,
+                            private_task_sha256=task.private_task_sha256,
+                            source_image_id=task.source_image_id,
+                            adapted_image_reference=task.adapted_image_reference,
+                            adapted_image_id=task.adapted_image_id,
+                        )
+                        for task in request.tasks
+                    ),
+                )
+            )
+        except M3PreflightConflict:
+            raise HTTPException(status_code=409, detail="M3 preflight operation conflicts with state") from None
+        except M3PreflightError:
+            raise HTTPException(status_code=422, detail="M3 preflight was rejected") from None
+        except Exception:
+            raise HTTPException(status_code=500, detail="M3 preflight failed") from None
+        return JSONResponse(
+            status_code=202 if record.get("status") == "running" else 200,
+            content=record,
+            headers={"X-RepoFixLab-Idempotent-Replay": "true" if replayed else "false"},
         )
 
     install_runtime_routes(application)

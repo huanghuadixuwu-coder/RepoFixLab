@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { estimateGlm45AirCost, FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256 } from "../src/runner/pricing.ts";
+import {
+	estimateDeepSeekV4FlashCost,
+	estimateGlm45AirCost,
+	FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256,
+	FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256,
+} from "../src/runner/pricing.ts";
 
 function usage(input: number, output: number, cacheRead = 0, cacheWrite = 0) {
 	return {
@@ -47,6 +52,16 @@ describe("frozen GLM-4.5-Air CNY pricing", () => {
 		expect(estimateGlm45AirCost(usage(131_073, 1))).toEqual({
 			complete: false,
 			estimatedCostCnyNano: null,
+		});
+	});
+});
+
+describe("frozen DeepSeek V4 Flash CNY pricing", () => {
+	it("uses the official standard cache-miss, output, and cache-hit rates", () => {
+		expect(FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256).toMatch(/^[a-f0-9]{64}$/);
+		expect(estimateDeepSeekV4FlashCost(usage(1_000_000, 1_000_000, 1_000_000))).toEqual({
+			complete: true,
+			estimatedCostCnyNano: 3_020_000_000,
 		});
 	});
 });

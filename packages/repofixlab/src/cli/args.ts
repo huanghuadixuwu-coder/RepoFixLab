@@ -9,6 +9,11 @@ export type CliCommand =
 	| { kind: "doctor"; profile: Exclude<DoctorProfile, "smoke">; output?: string }
 	| { kind: "candidate-create"; input: string; output: string }
 	| { kind: "environment-lock-create"; input: string; output: string }
+	| { kind: "m3-split-create"; input: string; eligibility: string; output: string }
+	| { kind: "m3-image-resolve"; input: string; eligibility: string; operationId: string; output: string }
+	| { kind: "m6-batch-create"; input: string; output: string }
+	| { kind: "m6-run"; input: string; resume?: string }
+	| { kind: "m6-continue"; sourceReport: string; resume?: string }
 	| {
 			kind: "factory-probe";
 			candidate: string;
@@ -27,10 +32,13 @@ export type CliParseErrorCode =
 	| "unknown_command"
 	| "invalid_profile"
 	| "invalid_input"
+	| "invalid_eligibility"
 	| "invalid_candidate"
 	| "invalid_operation_id"
 	| "invalid_config"
 	| "invalid_output"
+	| "invalid_resume"
+	| "invalid_source_report"
 	| "unexpected_argument"
 	| "conflicting_action";
 
@@ -75,10 +83,13 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 				version: { type: "boolean", short: "v" },
 				profile: { type: "string" },
 				input: { type: "string" },
+				eligibility: { type: "string" },
 				candidate: { type: "string" },
 				"operation-id": { type: "string" },
 				output: { type: "string" },
 				config: { type: "string" },
+				resume: { type: "string" },
+				"source-report": { type: "string" },
 				"dry-run": { type: "boolean" },
 			},
 		});
@@ -92,10 +103,13 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 	const hasActionOptions =
 		values.profile !== undefined ||
 		values.input !== undefined ||
+		values.eligibility !== undefined ||
 		values.candidate !== undefined ||
 		values["operation-id"] !== undefined ||
 		values.output !== undefined ||
 		values.config !== undefined ||
+		values.resume !== undefined ||
+		values["source-report"] !== undefined ||
 		values["dry-run"] !== undefined;
 
 	if (values.help === true || command === "help") {
@@ -123,6 +137,12 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 	if (command === undefined) {
 		return failure("missing_command", "A command is required");
 	}
+	if (command !== "m6-run" && command !== "m6-continue" && values.resume !== undefined) {
+		return failure("conflicting_action", `${command} cannot be combined with --resume`);
+	}
+	if (command !== "m6-continue" && values["source-report"] !== undefined) {
+		return failure("conflicting_action", `${command} cannot be combined with --source-report`);
+	}
 	if (command !== "run" && (values.config !== undefined || values["dry-run"] !== undefined)) {
 		return failure("conflicting_action", `${command} cannot be combined with run options`);
 	}
@@ -133,6 +153,7 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 		if (
 			values.profile !== undefined ||
 			values.input !== undefined ||
+			values.eligibility !== undefined ||
 			values.candidate !== undefined ||
 			values["operation-id"] !== undefined ||
 			values.output !== undefined
@@ -145,11 +166,117 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 		}
 		return { ok: true, command: { kind: "run", config, dryRun: values["dry-run"] === true } };
 	}
-	if (command === "candidate-create" || command === "environment-lock-create" || command === "provenance-lock") {
+	if (command === "m3-image-resolve") {
+		if (extraPositionals.length > 0) {
+			return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		}
+		if (values.profile !== undefined || values.candidate !== undefined) {
+			return failure("conflicting_action", `${command} cannot be combined with doctor or candidate options`);
+		}
+		const input = values.input;
+		if (typeof input !== "string" || input.trim().length === 0) {
+			return failure("invalid_input", `${command} requires a non-empty --input path`);
+		}
+		const eligibility = values.eligibility;
+		if (typeof eligibility !== "string" || eligibility.trim().length === 0) {
+			return failure("invalid_eligibility", `${command} requires a non-empty --eligibility path`);
+		}
+		const operationId = values["operation-id"];
+		if (typeof operationId !== "string" || operationId.trim().length === 0) {
+			return failure("invalid_operation_id", `${command} requires a non-empty --operation-id`);
+		}
+		const output = values.output;
+		if (typeof output !== "string" || output.trim().length === 0) {
+			return failure("invalid_output", `${command} requires a non-empty --output path`);
+		}
+		return { ok: true, command: { kind: "m3-image-resolve", input, eligibility, operationId, output } };
+	}
+	if (command === "m6-batch-create") {
+		if (extraPositionals.length > 0) return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		if (values.profile !== undefined || values.candidate !== undefined || values.eligibility !== undefined || values["operation-id"] !== undefined || values.resume !== undefined) {
+			return failure("conflicting_action", `${command} only accepts --input and --output`);
+		}
+		const input = values.input;
+		const output = values.output;
+		if (typeof input !== "string" || input.trim().length === 0) return failure("invalid_input", `${command} requires a non-empty --input path`);
+		if (typeof output !== "string" || output.trim().length === 0) return failure("invalid_output", `${command} requires a non-empty --output path`);
+		return { ok: true, command: { kind: "m6-batch-create", input, output } };
+	}
+	if (command === "m6-run") {
+		if (extraPositionals.length > 0) return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		if (values.profile !== undefined || values.candidate !== undefined || values.eligibility !== undefined || values["operation-id"] !== undefined || values.output !== undefined || values.config !== undefined || values["dry-run"] !== undefined) {
+			return failure("conflicting_action", `${command} only accepts --input and optional --resume`);
+		}
+		const input = values.input;
+		if (typeof input !== "string" || input.trim().length === 0) return failure("invalid_input", `${command} requires a non-empty --input path`);
+		if (values.resume !== undefined && (typeof values.resume !== "string" || values.resume.trim().length === 0)) return failure("invalid_resume", `${command} --resume must be a non-empty path`);
+		return { ok: true, command: { kind: "m6-run", input, ...(typeof values.resume === "string" ? { resume: values.resume } : {}) } };
+	}
+	if (command === "m6-continue") {
+		if (extraPositionals.length > 0) return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		if (
+			values.profile !== undefined ||
+			values.input !== undefined ||
+			values.eligibility !== undefined ||
+			values.candidate !== undefined ||
+			values["operation-id"] !== undefined ||
+			values.output !== undefined ||
+			values.config !== undefined ||
+			values["dry-run"] !== undefined
+		) {
+			return failure("conflicting_action", `${command} only accepts --source-report and optional --resume`);
+		}
+		const sourceReport = values["source-report"];
+		if (typeof sourceReport !== "string" || sourceReport.trim().length === 0) {
+			return failure("invalid_source_report", `${command} requires a non-empty --source-report path`);
+		}
+		if (values.resume !== undefined && (typeof values.resume !== "string" || values.resume.trim().length === 0)) {
+			return failure("invalid_resume", `${command} --resume must be a non-empty path`);
+		}
+		return {
+			ok: true,
+			command: {
+				kind: "m6-continue",
+				sourceReport,
+				...(typeof values.resume === "string" ? { resume: values.resume } : {}),
+			},
+		};
+	}
+	if (command === "m3-split-create") {
 		if (extraPositionals.length > 0) {
 			return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
 		}
 		if (values.profile !== undefined || values.candidate !== undefined || values["operation-id"] !== undefined) {
+			return failure("conflicting_action", `${command} cannot be combined with doctor or candidate options`);
+		}
+		const input = values.input;
+		if (typeof input !== "string" || input.trim().length === 0) {
+			return failure("invalid_input", `${command} requires a non-empty --input path`);
+		}
+		const eligibility = values.eligibility;
+		if (typeof eligibility !== "string" || eligibility.trim().length === 0) {
+			return failure("invalid_eligibility", `${command} requires a non-empty --eligibility path`);
+		}
+		const output = values.output;
+		if (typeof output !== "string" || output.trim().length === 0) {
+			return failure("invalid_output", `${command} requires a non-empty --output path`);
+		}
+		return { ok: true, command: { kind: "m3-split-create", input, eligibility, output } };
+	}
+	if (
+		command === "candidate-create" ||
+		command === "environment-lock-create" ||
+		command === "provenance-lock"
+	) {
+		if (extraPositionals.length > 0) {
+			return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		}
+		if (
+			values.profile !== undefined ||
+			values.candidate !== undefined ||
+			values["operation-id"] !== undefined ||
+			values.eligibility !== undefined
+		) {
 			return failure("conflicting_action", `${command} cannot be combined with doctor options`);
 		}
 		const input = values.input;
@@ -166,7 +293,7 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 		if (extraPositionals.length > 0) {
 			return failure("unexpected_argument", `Unexpected factory-probe argument: ${extraPositionals.join(" ")}`);
 		}
-		if (values.profile !== undefined || values.input !== undefined) {
+		if (values.profile !== undefined || values.input !== undefined || values.eligibility !== undefined) {
 			return failure("conflicting_action", "factory-probe cannot be combined with doctor or file-transform options");
 		}
 		const candidate = values.candidate;
@@ -189,7 +316,7 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 	if (command !== "doctor") {
 		return failure("unknown_command", `Unknown command: ${command}`);
 	}
-	if (values.candidate !== undefined || values["operation-id"] !== undefined) {
+	if (values.candidate !== undefined || values.eligibility !== undefined || values["operation-id"] !== undefined) {
 		return failure("conflicting_action", "doctor cannot be combined with non-doctor options");
 	}
 	if (extraPositionals.length > 0) {

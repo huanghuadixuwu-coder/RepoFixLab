@@ -8,6 +8,10 @@ services:
     environment:
       REPOFIXLAB_COMPOSE_PROJECT: repofixlab
       REPOFIXLAB_FACTORY_CANDIDATE_DIR: /etc/repofixlab/candidates
+      REPOFIXLAB_M3_PRIVATE_VOLUME: ${REPOFIX_PRIVATE_VOLUME:-dataset-private-g-20260718-135934-066a8f5b6f6b}
+      REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH: ${REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH-/opt/repofixlab/runtime-locks/m6-26-task-v1/axios-4731/task-environment-lock.json}
+      REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_ROOT: ${REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_ROOT-/opt/repofixlab/runtime-locks/m6-26-task-v1}
+      REPOFIXLAB_RUNTIME_ENABLED: ${REPOFIXLAB_RUNTIME_ENABLED:-true}
     networks:
       - repofix-control
     volumes:
@@ -43,6 +47,7 @@ services:
     environment:
       REPOFIX_ARTIFACTS_PATH: /artifacts
       REPOFIX_CONTROLLER_URL: http://controller:8000
+      REPOFIX_IMAGE_PROVENANCE_LOCK_PATH: locks/bootstrap-image-provenance-lock.v1-m3f.json
     networks:
       - repofix-control
       - provider-egress
@@ -77,6 +82,35 @@ services:
       - dataset-public:/data/public:ro
     secrets:
       - zhipu_api_key
+    read_only: true
+    user: node
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+  m6-runner:
+    profiles:
+      - m6
+    image: repofixlab-orchestrator
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      REPOFIX_ARTIFACTS_PATH: /artifacts
+      REPOFIX_CONTROLLER_URL: http://controller:8000
+      REPOFIX_DATASET_PUBLIC_PATH: /data/public
+      DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+    networks:
+      - repofix-control
+      - provider-egress
+    volumes:
+      - ./artifacts:/artifacts
+      - dataset-public:/data/public:ro
+    secrets:
+      - deepseek_api_key
     read_only: true
     user: node
     cap_drop:
@@ -122,6 +156,8 @@ networks:
 secrets:
   zhipu_api_key:
     file: ${REPOFIX_ZHIPU_SECRET_FILE:-.repofixlab-m1-secret-unconfigured}
+  deepseek_api_key:
+    file: ${REPOFIX_DEEPSEEK_SECRET_FILE:-.repofixlab-m6-deepseek-secret-unconfigured}
 
 volumes:
   controller-work-v2:

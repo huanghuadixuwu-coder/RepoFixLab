@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from repofixlab_evaluator.errors import PrivateSpecError
-from repofixlab_evaluator.private_spec import BASE_COMMIT, INSTANCE_ID, load_private_spec
+from repofixlab_evaluator.private_spec import BASE_COMMIT, INSTANCE_ID, TaskIdentity, load_private_spec
 
 from tests.test_patches import patch_for
 
@@ -46,6 +46,23 @@ class PrivateSpecTests(unittest.TestCase):
             link.symlink_to(target)
             with self.assertRaises(PrivateSpecError):
                 load_private_spec(link, root)
+
+    def test_binds_a_generic_private_spec_to_the_controller_sealed_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity = TaskIdentity(
+                "preactjs__preact-4436",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            value = private_value()
+            value["instance_id"] = identity.instance_id
+            value["base_commit"] = identity.base_commit
+            path = root / "task.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            spec = load_private_spec(path, root, identity)
+            self.assertEqual(spec.instance_id, identity.instance_id)
+            with self.assertRaises(PrivateSpecError):
+                load_private_spec(path, root)
 
 
 if __name__ == "__main__":

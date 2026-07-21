@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 import { Compile } from "typebox/compile";
 import { stableStringify } from "./schema-generator.ts";
 import {
-	AXIOS_SMOKE_BASE_COMMIT,
-	AXIOS_SMOKE_INSTANCE_ID,
 	TASK_ROLE_FACTORY_PROBE_PROFILE,
 	type TaskEnvironmentCandidate,
 	type TaskEnvironmentCandidateBuildInput,
@@ -83,8 +81,18 @@ function canonicalWritableMounts(
 		.sort(compareWritableMounts);
 }
 
-function profileId(role: CandidateRoleName, kind: CandidateProfileKind, body: unknown): string {
-	return `task-environment-profile-v1-axios-5892-${role}-${kind}-${canonicalHash(body)}`;
+function environmentInstancePrefix(instanceId: string): string {
+	const separator = instanceId.indexOf("__");
+	if (separator < 1 || separator === instanceId.length - 2) {
+		throw new Error("Task environment candidate instance ID is not repository-qualified");
+	}
+	const repository = instanceId.slice(0, separator);
+	const task = instanceId.slice(separator + 2);
+	return task.startsWith(`${repository}-`) ? task : `${repository}-${task}`;
+}
+
+function profileId(instanceId: string, role: CandidateRoleName, kind: CandidateProfileKind, body: unknown): string {
+	return `task-environment-profile-v1-${environmentInstancePrefix(instanceId)}-${role}-${kind}-${canonicalHash(body)}`;
 }
 
 function securityProfileBody(): CandidateSecurityProfileBody {
@@ -106,17 +114,21 @@ function securityProfileBody(): CandidateSecurityProfileBody {
 	};
 }
 
-function buildSecurityProfile(role: CandidateRoleName): CandidateSecurityProfile {
+function buildSecurityProfile(instanceId: string, role: CandidateRoleName): CandidateSecurityProfile {
 	const body = securityProfileBody();
-	const unsigned = { profile_id: profileId(role, "security", body), ...body };
+	const unsigned = { profile_id: profileId(instanceId, role, "security", body), ...body };
 	return {
 		...unsigned,
 		profile_sha256: taskEnvironmentSecurityProfileHash(unsigned),
 	};
 }
 
-function buildResourceProfile(role: CandidateRoleName, body: CandidateResourceProfileBody): CandidateResourceProfile {
-	const unsigned = { profile_id: profileId(role, "resource", body), ...body };
+function buildResourceProfile(
+	instanceId: string,
+	role: CandidateRoleName,
+	body: CandidateResourceProfileBody,
+): CandidateResourceProfile {
+	const unsigned = { profile_id: profileId(instanceId, role, "resource", body), ...body };
 	return {
 		...unsigned,
 		profile_sha256: taskEnvironmentResourceProfileHash(unsigned),
@@ -124,6 +136,7 @@ function buildResourceProfile(role: CandidateRoleName, body: CandidateResourcePr
 }
 
 function buildFilesystemProfile(
+	instanceId: string,
 	role: CandidateRoleName,
 	body: CandidateFilesystemProfileBody,
 ): CandidateFilesystemProfile {
@@ -131,7 +144,7 @@ function buildFilesystemProfile(
 		writable_mounts: canonicalWritableMounts(body.writable_mounts),
 	};
 	const unsigned = {
-		profile_id: profileId(role, "filesystem", canonicalBody),
+		profile_id: profileId(instanceId, role, "filesystem", canonicalBody),
 		...canonicalBody,
 	};
 	return {
@@ -163,10 +176,10 @@ function assertDistinctExternalBindings(
 	}
 }
 
-function verifyRoleProfiles(roleName: CandidateRoleName, role: CandidateRole): void {
+function verifyRoleProfiles(instanceId: string, roleName: CandidateRoleName, role: CandidateRole): void {
 	const { profile_sha256: securityHash, ...unsignedSecurity } = role.security_profile;
 	const { profile_id: securityId, ...securityBody } = unsignedSecurity;
-	if (securityId !== profileId(roleName, "security", securityBody)) {
+	if (securityId !== profileId(instanceId, roleName, "security", securityBody)) {
 		throw new Error(`${roleName} security profile ID does not match its canonical content`);
 	}
 	if (securityHash !== taskEnvironmentSecurityProfileHash(unsignedSecurity)) {
@@ -175,7 +188,7 @@ function verifyRoleProfiles(roleName: CandidateRoleName, role: CandidateRole): v
 
 	const { profile_sha256: resourceHash, ...unsignedResource } = role.resource_profile;
 	const { profile_id: resourceId, ...resourceBody } = unsignedResource;
-	if (resourceId !== profileId(roleName, "resource", resourceBody)) {
+	if (resourceId !== profileId(instanceId, roleName, "resource", resourceBody)) {
 		throw new Error(`${roleName} resource profile ID does not match its canonical content`);
 	}
 	if (resourceHash !== taskEnvironmentResourceProfileHash(unsignedResource)) {
@@ -184,7 +197,7 @@ function verifyRoleProfiles(roleName: CandidateRoleName, role: CandidateRole): v
 
 	const { profile_sha256: filesystemHash, ...unsignedFilesystem } = role.filesystem_profile;
 	const { profile_id: filesystemId, ...filesystemBody } = unsignedFilesystem;
-	if (filesystemId !== profileId(roleName, "filesystem", filesystemBody)) {
+	if (filesystemId !== profileId(instanceId, roleName, "filesystem", filesystemBody)) {
 		throw new Error(`${roleName} filesystem profile ID does not match its canonical content`);
 	}
 	if (filesystemHash !== taskEnvironmentFilesystemProfileHash(unsignedFilesystem)) {
@@ -352,20 +365,20 @@ export function taskEnvironmentFilesystemProfileHash(
 }
 
 export function taskEnvironmentCandidateId(value: CandidateIdentityMaterial): string {
-	return `task-environment-candidate-v1-axios-5892-${canonicalHash(value)}`;
+	return `task-environment-candidate-v1-${environmentInstancePrefix(value.instance_id)}-${canonicalHash(value)}`;
 }
 
 export function createTaskEnvironmentCandidate(input: unknown): TaskEnvironmentCandidate {
 	if (!candidateBuildInputValidator.Check(input)) {
 		throw new Error("Task environment candidate build input does not satisfy the strict v1 contract");
 	}
-	const workerFilesystem = buildFilesystemProfile("worker", input.roles.worker.filesystem_profile);
-	const evaluatorFilesystem = buildFilesystemProfile("evaluator", input.roles.evaluator.filesystem_profile);
+	const workerFilesystem = buildFilesystemProfile(input.instance_id, "worker", input.roles.worker.filesystem_profile);
+	const evaluatorFilesystem = buildFilesystemProfile(input.instance_id, "evaluator", input.roles.evaluator.filesystem_profile);
 	const identity: CandidateIdentityMaterial = {
 		schema_version: "v1",
 		candidate_type: "task_environment_candidate",
-		instance_id: AXIOS_SMOKE_INSTANCE_ID,
-		base_commit: AXIOS_SMOKE_BASE_COMMIT,
+		instance_id: input.instance_id,
+		base_commit: input.base_commit,
 		dataset_lock: { ...input.dataset_lock },
 		official_image_source_lock: { ...input.official_image_source_lock },
 		roles: {
@@ -373,16 +386,16 @@ export function createTaskEnvironmentCandidate(input: unknown): TaskEnvironmentC
 				role: "worker",
 				image: { ...input.roles.worker.image, platform: "linux/amd64" },
 				runtime_user: { ...input.roles.worker.runtime_user },
-				security_profile: buildSecurityProfile("worker"),
-				resource_profile: buildResourceProfile("worker", input.roles.worker.resource_profile),
+				security_profile: buildSecurityProfile(input.instance_id, "worker"),
+				resource_profile: buildResourceProfile(input.instance_id, "worker", input.roles.worker.resource_profile),
 				filesystem_profile: workerFilesystem,
 			},
 			evaluator: {
 				role: "evaluator",
 				image: { ...input.roles.evaluator.image, platform: "linux/amd64" },
 				runtime_user: { ...input.roles.evaluator.runtime_user },
-				security_profile: buildSecurityProfile("evaluator"),
-				resource_profile: buildResourceProfile("evaluator", input.roles.evaluator.resource_profile),
+				security_profile: buildSecurityProfile(input.instance_id, "evaluator"),
+				resource_profile: buildResourceProfile(input.instance_id, "evaluator", input.roles.evaluator.resource_profile),
 				filesystem_profile: evaluatorFilesystem,
 			},
 		},
@@ -478,7 +491,7 @@ export function verifyTaskEnvironmentCandidate(value: unknown): TaskEnvironmentC
 		) {
 			throw new Error(`${role.role} filesystem profile mounts are not in canonical order`);
 		}
-		verifyRoleProfiles(role.role, role);
+		verifyRoleProfiles(value.instance_id, role.role, role);
 	}
 	const { candidate_id: actualId, candidate_sha256: _candidateHash, created_at: _createdAt, ...identity } = value;
 	if (taskEnvironmentCandidateId(identity) !== actualId) {

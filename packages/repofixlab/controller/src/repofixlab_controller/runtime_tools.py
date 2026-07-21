@@ -204,19 +204,34 @@ class RepositoryToolExecutor:
         return ("\n".join(rows) + ("\n" if rows else "")).encode("utf-8")
 
     def _repo_read(self, arguments: Mapping[str, object]) -> bytes:
-        _require_exact_keys(arguments, frozenset({"path"}))
+        _require_allowed_keys(
+            arguments,
+            frozenset({"path", "start_line", "line_count"}),
+            frozenset({"path"}),
+        )
         target = self._resolve_path(_required_string(arguments, "path"))
         if not target.is_file():
             raise RuntimeToolError("repo_read path is not a regular file")
         try:
-            content = target.read_bytes()
-            content.decode("utf-8", errors="strict")
+            content = target.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             raise RuntimeToolError("repo_read requires a readable UTF-8 file") from error
-        return content
+        start_line = _optional_integer(arguments, "start_line", 1, minimum=1, maximum=1_000_000)
+        line_count = _optional_integer(arguments, "line_count", 500, minimum=1, maximum=2_000)
+        lines = content.splitlines(keepends=True)
+        selected = lines[start_line - 1 : start_line - 1 + line_count]
+        next_start_line = start_line + len(selected)
+        header = f"start_line: {start_line}\nline_count: {len(selected)}\n"
+        if next_start_line <= len(lines):
+            header += f"next_start_line: {next_start_line}\n"
+        return (header + "".join(selected)).encode("utf-8")
 
     def _repo_search(self, arguments: Mapping[str, object]) -> bytes:
-        _require_allowed_keys(arguments, frozenset({"query", "path"}), frozenset({"query"}))
+        _require_allowed_keys(
+            arguments,
+            frozenset({"query", "path", "cursor", "max_results"}),
+            frozenset({"query"}),
+        )
         query = _required_string(arguments, "query")
         if len(query.encode("utf-8")) > 1024:
             raise RuntimeToolError("repo_search query exceeds the fixed limit")
@@ -224,6 +239,8 @@ class RepositoryToolExecutor:
         target = self._resolve_path(relative, allow_root=True)
         if not target.is_dir():
             raise RuntimeToolError("repo_search path is not a directory")
+        cursor = _optional_integer(arguments, "cursor", 0, minimum=0, maximum=1_000_000)
+        maximum_results = _optional_integer(arguments, "max_results", 100, minimum=1, maximum=500)
         rows: list[str] = []
         for root, directory_names, file_names in os.walk(target, followlinks=False):
             root_path = Path(root)
@@ -246,7 +263,11 @@ class RepositoryToolExecutor:
                 for line_number, line in enumerate(text.splitlines(), start=1):
                     if query in line:
                         rows.append(f"{relative_path}:{line_number}:{line}")
-        return ("\n".join(rows) + ("\n" if rows else "")).encode("utf-8")
+        page = rows[cursor : cursor + maximum_results]
+        header = f"cursor: {cursor}\nresult_count: {len(page)}\n"
+        if cursor + len(page) < len(rows):
+            header += f"next_cursor: {cursor + len(page)}\n"
+        return (header + "\n".join(page) + ("\n" if page else "")).encode("utf-8")
 
     def _repo_edit(self, arguments: Mapping[str, object]) -> bytes:
         if "content" in arguments:
@@ -369,6 +390,14 @@ class RepositoryToolExecutor:
             raise RuntimeToolError("repo_exec timeout is outside the fixed policy")
         try:
             environment = self._git_environment()
+            # Commands used for controlled verification may create browser, font, or
+            # language-tool caches. They must live on the worker tmpfs rather than in
+            # the candidate worktree, otherwise a later P1 snapshot can mistake them
+            # for a model-authored patch.
+            environment["HOME"] = "/tmp"
+            environment["XDG_CACHE_HOME"] = "/tmp/repofixlab-xdg-cache"
+            environment["XDG_CONFIG_HOME"] = "/tmp/repofixlab-xdg-config"
+            environment["XDG_DATA_HOME"] = "/tmp/repofixlab-xdg-data"
             environment["NPM_CONFIG_CACHE"] = "/tmp/repofixlab-npm-cache"
             environment["npm_config_update_notifier"] = "false"
             result = subprocess.run(
@@ -591,5 +620,14 @@ def _required_string(
 def _optional_string(value: Mapping[str, object], name: str, default: str) -> str:
     item = value.get(name, default)
     if not isinstance(item, str) or not item:
+        raise RuntimeToolError(f"runtime tool argument {name} is malformed")
+    return item
+
+
+def _optional_integer(
+    value: Mapping[str, object], name: str, default: int, *, minimum: int, maximum: int
+) -> int:
+    item = value.get(name, default)
+    if isinstance(item, bool) or not isinstance(item, int) or item < minimum or item > maximum:
         raise RuntimeToolError(f"runtime tool argument {name} is malformed")
     return item

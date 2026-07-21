@@ -105,7 +105,7 @@ The resulting immutable evidence directory is `artifacts/m2-security-probes/<ope
 canary, FactoryProbeReport, rejection response, command transcript, and hash-sealed security report.
 
 This is M2 lifecycle evidence, not a passing `doctor --profile formal` result. The formal doctor remains fail-closed
-until M6, when it consumes the frozen M2 security evidence together with the M3 43-task environment locks.
+until M6, when it consumes the frozen M2 security evidence together with the M3 candidate-image and 26-task eligible-environment locks.
 
 ## M1 vertical slice
 
@@ -142,7 +142,7 @@ Immutable run evidence is written beneath `artifacts/m1-axios/runs/<run-id>/`; o
 M1 validates the vertical integration on one real Axios issue, `axios__axios-5892`, with one `pi-general`
 replicate. It does not establish comparative agent quality or statistical generalization. The complete RepoFix
 state machine, Pi baseline comparison and ablations, repeated trials, and formal evaluation over the frozen
-43-task corpus remain later milestones.
+26-task preflight-eligible corpus remain later milestones. The original 43-task candidate pool and all rejected-task evidence remain sealed for audit.
 
 ## Contract workflow
 

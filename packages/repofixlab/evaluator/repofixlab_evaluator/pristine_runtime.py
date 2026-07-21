@@ -17,7 +17,13 @@ from .official_oracle import (
     normalize_pristine_report,
     run_official_oracle,
 )
-from .private_spec import BASE_COMMIT, INSTANCE_ID, PrivateEvaluationSpec, load_private_spec
+from .private_spec import (
+    BASE_COMMIT,
+    INSTANCE_ID,
+    PrivateEvaluationSpec,
+    TaskIdentity,
+    load_private_spec,
+)
 
 SOURCE_ROOT = Path("/opt/upstream")
 SOURCE_LOCK_PATH = Path("/opt/locks/official-source-lock.json")
@@ -198,14 +204,34 @@ def _read_confined(path: Path, root: Path, maximum_bytes: int) -> bytes:
     return resolved.read_bytes()
 
 
-def prepare_private_task(*, dataset_task: Path, dataset_root: Path, output_root: Path) -> dict[str, object]:
+def _task_version_from_instance_id(instance_id: str) -> str:
+    suffix = instance_id.rsplit("__", maxsplit=1)[1]
+    _repository, separator, version = suffix.rpartition("-")
+    if not separator or not version.isdecimal():
+        raise EvaluationError("task instance ID does not contain a decimal SWE-bench version")
+    return version
+
+
+def prepare_private_task(
+    *,
+    dataset_task: Path,
+    dataset_root: Path,
+    output_root: Path,
+    expected_task_sha256: str,
+    expected_identity: TaskIdentity,
+    expected_repo: str,
+) -> dict[str, object]:
+    if len(expected_task_sha256) != 64 or any(character not in "0123456789abcdef" for character in expected_task_sha256):
+        raise EvaluationError("sealed private task SHA-256 is invalid")
+    if not expected_repo or expected_repo.strip() != expected_repo or any(character.isspace() for character in expected_repo):
+        raise EvaluationError("sealed public repository identity is invalid")
     raw = _read_confined(dataset_task, dataset_root, 64 * 1024)
-    if sha256_bytes(raw) != PRIVATE_DATASET_TASK_SHA256:
-        raise EvaluationError("private Axios task does not match the sealed dataset record")
+    if sha256_bytes(raw) != expected_task_sha256:
+        raise EvaluationError("private task does not match the sealed dataset record")
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise EvaluationError("private Axios task is not strict UTF-8 JSON") from error
+        raise EvaluationError("private task is not strict UTF-8 JSON") from error
     required = {
         "schema_version",
         "record_type",
@@ -218,13 +244,14 @@ def prepare_private_task(*, dataset_task: Path, dataset_root: Path, output_root:
         "harness_parameters",
     }
     if not isinstance(value, dict) or set(value) != required:
-        raise EvaluationError("private Axios task fields do not match the sealed contract")
+        raise EvaluationError("private task fields do not match the sealed contract")
     harness = value["harness_parameters"]
+    expected_version = _task_version_from_instance_id(expected_identity.instance_id)
     if (
         value["schema_version"] != "v1"
         or value["record_type"] != "private_evaluation_spec"
         or value["dataset_revision"] != DATASET_REVISION
-        or value["instance_id"] != INSTANCE_ID
+        or value["instance_id"] != expected_identity.instance_id
         or not isinstance(harness, dict)
         or set(harness)
         != {
@@ -236,15 +263,23 @@ def prepare_private_task(*, dataset_task: Path, dataset_root: Path, output_root:
             "environment_setup_commit",
         }
         or harness["dataset_revision"] != DATASET_REVISION
-        or harness["repo"] != "axios/axios"
-        or harness["base_commit"] != BASE_COMMIT
-        or harness["version"] != "5892"
+        or harness["repo"] != expected_repo
+        or harness["base_commit"] != expected_identity.base_commit
+        or harness["version"] != expected_version
+        or not isinstance(harness["dataset_name"], str)
+        or not isinstance(harness["repo"], str)
+        or not isinstance(harness["version"], str)
+        or harness["environment_setup_commit"] is not None
+        and (
+            not isinstance(harness["environment_setup_commit"], str)
+            or len(harness["environment_setup_commit"]) != 40
+        )
     ):
-        raise EvaluationError("private Axios task identity or harness parameters drifted")
+        raise EvaluationError("private task identity or harness parameters drifted")
     strict_spec = {
         "schema_version": "v1",
-        "instance_id": INSTANCE_ID,
-        "base_commit": BASE_COMMIT,
+        "instance_id": expected_identity.instance_id,
+        "base_commit": expected_identity.base_commit,
         "test_patch": value["test_patch"],
         "gold_patch": value["gold_patch"],
         "fail_to_pass": value["fail_to_pass"],
@@ -255,7 +290,7 @@ def prepare_private_task(*, dataset_task: Path, dataset_root: Path, output_root:
         raise EvaluationError("evaluator-private probe root is not an empty directory")
     spec_path = output / "spec.json"
     _write_exclusive(spec_path, output, canonical_json(strict_spec), 0o444)
-    load_private_spec(spec_path, output)
+    load_private_spec(spec_path, output, expected_identity)
     module = importlib.import_module("swebench.harness.test_spec.test_spec")
     module_path = Path(str(module.__file__)).resolve(strict=True)
     try:
@@ -263,10 +298,10 @@ def prepare_private_task(*, dataset_task: Path, dataset_root: Path, output_root:
     except ValueError as error:
         raise OfficialSourceError("official TestSpec factory escaped the pinned source") from error
     official_instance = {
-        "instance_id": INSTANCE_ID,
-        "repo": "axios/axios",
-        "version": "5892",
-        "base_commit": BASE_COMMIT,
+        "instance_id": expected_identity.instance_id,
+        "repo": expected_repo,
+        "version": expected_version,
+        "base_commit": expected_identity.base_commit,
         "test_patch": value["test_patch"],
         "FAIL_TO_PASS": value["fail_to_pass"],
         "PASS_TO_PASS": value["pass_to_pass"],
@@ -279,7 +314,8 @@ def prepare_private_task(*, dataset_task: Path, dataset_root: Path, output_root:
     return {
         "schema_version": "v1",
         "operation": "prepare_pristine_private_task",
-        "dataset_task_sha256": PRIVATE_DATASET_TASK_SHA256,
+        "instance_id": expected_identity.instance_id,
+        "dataset_task_sha256": expected_task_sha256,
         "strict_spec_sha256": sha256_file(str(spec_path)),
         "official_eval_script_sha256": sha256_bytes(eval_script),
     }
@@ -342,6 +378,10 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--dataset-task", type=Path, required=True)
     prepare.add_argument("--dataset-root", type=Path, required=True)
     prepare.add_argument("--output-root", type=Path, required=True)
+    prepare.add_argument("--expected-task-sha256", required=True)
+    prepare.add_argument("--expected-instance-id", required=True)
+    prepare.add_argument("--expected-base-commit", required=True)
+    prepare.add_argument("--expected-repo", required=True)
     normalize = subparsers.add_parser("normalize-probe")
     normalize.add_argument("--private-spec", type=Path, required=True)
     normalize.add_argument("--private-root", type=Path, required=True)
@@ -365,6 +405,12 @@ def main() -> int:
                 dataset_task=arguments.dataset_task,
                 dataset_root=arguments.dataset_root,
                 output_root=arguments.output_root,
+                expected_task_sha256=arguments.expected_task_sha256,
+                expected_identity=TaskIdentity(
+                    arguments.expected_instance_id,
+                    arguments.expected_base_commit,
+                ),
+                expected_repo=arguments.expected_repo,
             )
         else:
             output = normalize_probe(

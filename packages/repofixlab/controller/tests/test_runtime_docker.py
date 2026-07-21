@@ -585,11 +585,16 @@ def _backend_fixture(root: Path) -> tuple[DockerRuntimeBackend, _RuntimeDockerCl
     _write_candidates(candidate_directory, candidate_value)
     catalog = _catalog(candidate_directory)
     candidate = catalog.candidate(str(candidate_value["candidate_id"]))
-    task_lock_path = root / "task-environment-lock.json"
+    runtime_lock_root = root / "runtime-locks"
+    task_lock_directory = runtime_lock_root / "axios-5892"
+    task_lock_directory.mkdir(parents=True)
+    task_lock_path = task_lock_directory / "task-environment-lock.json"
     task_lock_path.write_text(
         json.dumps(_task_environment_lock(candidate), sort_keys=True),
         encoding="utf-8",
     )
+    dataset_lock_path = task_lock_directory / "dataset-lock.json"
+    dataset_lock_path.write_bytes(dataset_raw)
     kernel_root = root / "kernel"
     kernel_root.mkdir()
     (kernel_root / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -598,10 +603,11 @@ def _backend_fixture(root: Path) -> tuple[DockerRuntimeBackend, _RuntimeDockerCl
         task_environment_lock_schema_path=(
             SCHEMA_DIRECTORY / "task-environment-lock.schema.json"
         ),
-        dataset_lock_path=DATASET_LOCK_PATH,
+        dataset_lock_path=dataset_lock_path,
         dataset_lock_schema_path=SCHEMA_DIRECTORY / "dataset-lock.schema.json",
         evaluator_kernel_root=kernel_root,
         evaluator_kernel_sha256=evaluator_kernel_aggregate(kernel_root),
+        runtime_lock_root=runtime_lock_root,
     )
     client = _RuntimeDockerClient()
     backend = DockerRuntimeBackend(
@@ -643,7 +649,10 @@ class DockerRuntimeBackendTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             backend, client, candidate = _backend_fixture(Path(temporary).resolve())
             manifest = backend.preflight(candidate.candidate_id, candidate.instance_id)
-            self.assertEqual(manifest.task_environment_lock_sha256, backend._task_lock.seal_sha256)
+            self.assertEqual(
+                manifest.task_environment_lock_sha256,
+                backend._task_locks[candidate.candidate_id].seal_sha256,
+            )
             worker = backend.prepare_worker(
                 "attempt-production",
                 candidate.candidate_id,
@@ -765,6 +774,7 @@ class DockerRuntimeBackendTests(unittest.TestCase):
                 dataset_lock_schema_path=configuration.dataset_lock_schema_path,
                 evaluator_kernel_root=configuration.evaluator_kernel_root,
                 evaluator_kernel_sha256="0" * 64,
+                runtime_lock_root=configuration.runtime_lock_root,
             )
             with self.assertRaises(RuntimeDockerError):
                 DockerRuntimeBackend(
@@ -775,6 +785,34 @@ class DockerRuntimeBackendTests(unittest.TestCase):
                 )
             self.assertEqual(client.containers.run_calls, [])
             self.assertEqual(client.volumes.created, [])
+
+    def test_versioned_runtime_root_uses_one_shared_dataset_lock(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            backend, client, candidate = _backend_fixture(root)
+            configuration = backend._configuration
+            assert configuration.runtime_lock_root is not None
+            task_dataset_lock = configuration.runtime_lock_root / "axios-5892" / "dataset-lock.json"
+            shared_dataset_lock = configuration.runtime_lock_root / "dataset-lock.json"
+            shared_dataset_lock.write_bytes(task_dataset_lock.read_bytes())
+            task_dataset_lock.unlink()
+            shared_configuration = RuntimeDockerConfiguration(
+                task_environment_lock_path=configuration.task_environment_lock_path,
+                task_environment_lock_schema_path=configuration.task_environment_lock_schema_path,
+                dataset_lock_path=shared_dataset_lock,
+                dataset_lock_schema_path=configuration.dataset_lock_schema_path,
+                evaluator_kernel_root=configuration.evaluator_kernel_root,
+                evaluator_kernel_sha256=configuration.evaluator_kernel_sha256,
+                runtime_lock_root=configuration.runtime_lock_root,
+            )
+            shared_backend = DockerRuntimeBackend(
+                client,
+                backend._catalog,
+                shared_configuration,
+                read_only_check=lambda _path: True,
+            )
+            manifest = shared_backend.preflight(candidate.candidate_id, candidate.instance_id)
+            self.assertEqual(manifest.candidate_id, candidate.candidate_id)
 
 
 if __name__ == "__main__":

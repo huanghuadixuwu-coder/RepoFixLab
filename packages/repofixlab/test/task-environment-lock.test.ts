@@ -209,6 +209,8 @@ function candidateBuildInput(
 		timeout_seconds: 1_800,
 	};
 	return {
+		instance_id: "axios__axios-5892",
+		base_commit: "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
 		dataset_lock: {
 			lock_id: dataset.lock_id,
 			lock_sha256: taskEnvironmentEvidenceFileHash(datasetJson),
@@ -491,7 +493,7 @@ function resealLock(lock: TaskEnvironmentLock): TaskEnvironmentLock {
 	const sealSha256 = taskEnvironmentLockSealHash(lock);
 	return {
 		...lock,
-		lock_id: taskEnvironmentLockId(sealSha256),
+		lock_id: taskEnvironmentLockId(lock.instance_id, sealSha256),
 		seal_sha256: sealSha256,
 	};
 }
@@ -782,16 +784,21 @@ describe("TaskEnvironmentLock strict builder and verifier", () => {
 		).toThrow("role evidence SHA-256");
 
 		const equivalence = rawEvidence.harness_equivalence_report as HarnessEquivalenceReport;
+		const { report_sha256: _oldHash, ...unsignedEquivalence } = equivalence;
+		const changedAdapter = {
+			...unsignedEquivalence,
+			adapter_sha256: HASH_A,
+		};
 		expect(() =>
 			createTaskEnvironmentLock({
 				...rawEvidence,
 				harness_equivalence_report: {
-					...equivalence,
-					adapter_sha256: HASH_A,
+					...changedAdapter,
+					report_sha256: harnessEquivalenceReportHash(changedAdapter),
 				},
 				created_at: TIMESTAMP,
 			}),
-		).toThrow("v1 contract");
+		).toThrow("instance or adapter bindings");
 	});
 
 	it.each(MATERIAL_BINDING_DRIFTS)("rejects $name drift even after a caller recomputes the seal", ({ mutate }) => {

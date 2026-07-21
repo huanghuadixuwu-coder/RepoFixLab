@@ -96,6 +96,27 @@ describe("RepoFixLab harness provenance and equivalence contracts", () => {
 		);
 	});
 
+	it("binds the equivalence result to a non-Axios task and adapter", () => {
+		const instanceId = "immutable-js__immutable-js-2005";
+		const baseCommit = "0".repeat(40);
+		const adapterSha256 = "1".repeat(64);
+		const rewrite = (report: HarnessProbeReport): HarnessProbeReport => {
+			const { report_sha256: _oldHash, ...unsigned } = report;
+			const rewritten = {
+				...unsigned,
+				instance_id: instanceId,
+				base_commit: baseCommit,
+				adapter_sha256: report.harness_mode === "adapted" ? adapterSha256 : null,
+			};
+			return { ...rewritten, report_sha256: harnessProbeReportHash(rewritten) };
+		};
+		const report = createHarnessEquivalenceReport(four("pristine").map(rewrite), four("adapted").map(rewrite));
+		expect(report.instance_id).toBe(instanceId);
+		expect(report.base_commit).toBe(baseCommit);
+		expect(report.adapter_sha256).toBe(adapterSha256);
+		expect(report.status).toBe("pass");
+	});
+
 	it("detects parser output drift without comparing log hashes or timing", () => {
 		const adapted = four("adapted");
 		const gold = adapted[3]!;

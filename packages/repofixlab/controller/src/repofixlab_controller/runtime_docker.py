@@ -38,12 +38,9 @@ from .runtime_tools import (
 )
 
 
+# Kept for the M1 fixture tests only. Production runtime paths derive these
+# values from each sealed DatasetLock and never read these constants.
 RUNTIME_PRIVATE_VOLUME = "dataset-private-g-20260718-135934-066a8f5b6f6b"
-RUNTIME_PRIVATE_TASK_PATH = "tasks/axios__axios-5892.json"
-RUNTIME_PRIVATE_TASK_BYTES = 5_936
-RUNTIME_PRIVATE_TASK_SHA256 = (
-    "a592340952c75bf326d9ca45bdef7a2e635dcb5648c674e6a9fae25bae165f50"
-)
 RUNTIME_EVALUATOR_ARTIFACTS = (
     "evaluation.json",
     "evaluator.log",
@@ -60,6 +57,7 @@ _IMAGE_ID = re.compile(r"^sha256:[a-f0-9]{64}$")
 _CONTAINER_ID = re.compile(r"^[a-f0-9]{64}$")
 _VOLUME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _GIT_OBJECT_ID = re.compile(r"^[a-f0-9]{40}$")
+_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
 _KERNEL_LIMIT_BYTES = 2 * 1024 * 1024
 _KERNEL_FILE_LIMIT = 128
 _ARCHIVE_LIMIT_BYTES = 4 * 1024 * 1024
@@ -71,8 +69,32 @@ _PRIVATE_ROOT = "/run/repofixlab/private"
 _INPUT_ROOT = "/run/repofixlab/input"
 _EVIDENCE_ROOT = "/run/repofixlab/evidence"
 _WORKSPACE_ROOT = "/testbed"
+_M6_KERNEL_ROOT = "/opt/repofixlab"
+_M6_PREPARED_ROOT = "/run/repofixlab/private"
+_M6_EVIDENCE_ROOT = "/run/repofixlab/evidence"
+_M6_DATASET_ROOT = "/data/private"
+_M6_PRISTINE_IMAGE = "repofixlab/pristine-harness:m0-726c5461-final"
 
 _KEEPALIVE_SCRIPT = "import signal; signal.pause()"
+
+
+def _task_environment_lock_id(instance_id: str, seal_sha256: str) -> str:
+    if _INSTANCE_ID.fullmatch(instance_id) is None or "__" not in instance_id:
+        raise RuntimeDockerError("TaskEnvironmentLock instance ID is invalid")
+    repository, task = instance_id.split("__", 1)
+    if not repository or not task:
+        raise RuntimeDockerError("TaskEnvironmentLock instance ID is not repository-qualified")
+    prefix = task if task.startswith(f"{repository}-") else f"{repository}-{task}"
+    return f"task-environment-v1-{prefix}-{seal_sha256[:16]}"
+
+
+def _task_environment_lock_directory(instance_id: str) -> str:
+    if _INSTANCE_ID.fullmatch(instance_id) is None:
+        raise RuntimeDockerError("TaskEnvironmentLock instance ID is invalid")
+    repository, separator, task = instance_id.partition("__")
+    if not separator or not repository or not task:
+        raise RuntimeDockerError("TaskEnvironmentLock instance ID is not repository-qualified")
+    return task if task.startswith(f"{repository}-") else f"{repository}-{task}"
 _STDIN_WRITE_SCRIPT = r"""
 import hashlib
 import os
@@ -205,7 +227,10 @@ if actual != expected or marker.read_text(encoding='ascii').strip() != expected:
     raise SystemExit(72)
 environment = dict(os.environ)
 environment['PYTHONPATH'] = '/tmp/repofixlab-runtime'
-os.execvpe('python3', ['python3', '-m', 'repofixlab_evaluator', *sys.argv[1:]], environment)
+arguments = sys.argv[1:]
+if arguments and arguments[0] == 'm6-candidate-patch':
+    os.execvpe('python3', ['python3', '-m', 'repofixlab_evaluator.m6_candidate_patch', *arguments[1:]], environment)
+os.execvpe('python3', ['python3', '-m', 'repofixlab_evaluator', *arguments], environment)
 """.strip()
 
 
@@ -223,6 +248,22 @@ class RuntimeTaskEnvironmentLock:
 
 
 @dataclass(frozen=True)
+class RuntimePrivateTaskBinding:
+    volume_name: str
+    task_path: str
+    task_bytes: int
+    task_sha256: str
+
+
+@dataclass(frozen=True)
+class RuntimePreparedM6Task:
+    private_volume: object
+    kernel_volume: object
+    strict_spec_sha256: str
+    repo: str
+
+
+@dataclass(frozen=True)
 class RuntimeDockerConfiguration:
     task_environment_lock_path: Path
     task_environment_lock_schema_path: Path
@@ -230,6 +271,7 @@ class RuntimeDockerConfiguration:
     dataset_lock_schema_path: Path
     evaluator_kernel_root: Path
     evaluator_kernel_sha256: str
+    runtime_lock_root: Path | None = None
 
 
 @dataclass
@@ -251,6 +293,9 @@ class DockerRuntimeJob:
     container: object
     volumes: tuple[object, ...]
     labels: Mapping[str, str]
+    evidence_volume: object | None = None
+    prepared_m6_task: RuntimePreparedM6Task | None = None
+    m6_finalized: bool = False
     artifacts: dict[str, bytes] | None = field(default=None)
 
 
@@ -269,6 +314,18 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _m6_json_output(raw: bytes, label: str) -> Mapping[str, object]:
+    if len(raw) > 256 * 1024:
+        raise RuntimeDockerError(f"{label} output exceeds the M6 limit")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeDockerError(f"{label} output is malformed") from error
+    if not isinstance(value, Mapping):
+        raise RuntimeDockerError(f"{label} output root is malformed")
+    return value
 
 
 def _strict_json(path: Path, maximum_bytes: int) -> Mapping[str, object]:
@@ -308,10 +365,12 @@ def load_runtime_task_environment_lock(
     catalog: TrustedCandidateCatalog,
     *,
     read_only_check: Callable[[Path], bool],
+    lock_path: Path | None = None,
 ) -> RuntimeTaskEnvironmentLock:
-    if not read_only_check(configuration.task_environment_lock_path):
+    task_lock_path = lock_path or configuration.task_environment_lock_path
+    if not read_only_check(task_lock_path):
         raise RuntimeDockerError("TaskEnvironmentLock is not read-only")
-    value = _strict_json(configuration.task_environment_lock_path, 128 * 1024)
+    value = _strict_json(task_lock_path, 128 * 1024)
     schema = _strict_json(configuration.task_environment_lock_schema_path, 256 * 1024)
     Draft202012Validator.check_schema(dict(schema))
     errors = tuple(Draft202012Validator(dict(schema)).iter_errors(value))
@@ -329,12 +388,13 @@ def load_runtime_task_environment_lock(
     semantic["verification"] = stable_verification
     seal_sha256 = value.get("seal_sha256")
     lock_id = value.get("lock_id")
+    instance_id = value.get("instance_id")
     if (
         not isinstance(seal_sha256, str)
         or seal_sha256 != _canonical_sha256(semantic)
         or not isinstance(lock_id, str)
-        or lock_id
-        != f"task-environment-v1-axios-5892-{seal_sha256[:16]}"
+        or not isinstance(instance_id, str)
+        or lock_id != _task_environment_lock_id(instance_id, seal_sha256)
     ):
         raise RuntimeDockerError("TaskEnvironmentLock semantic seal is invalid")
     candidate_id = value.get("candidate_id")
@@ -400,8 +460,9 @@ def validate_runtime_dataset_lock(
     candidate: TrustedCandidate,
     *,
     read_only_check: Callable[[Path], bool],
-) -> None:
-    path = configuration.dataset_lock_path
+    dataset_lock_path: Path | None = None,
+) -> RuntimePrivateTaskBinding:
+    path = dataset_lock_path or configuration.dataset_lock_path
     if not read_only_check(path):
         raise RuntimeDockerError("DatasetLock is not read-only")
     try:
@@ -419,22 +480,64 @@ def validate_runtime_dataset_lock(
     files = value.get("files")
     if not isinstance(volumes, Mapping) or not isinstance(files, list):
         raise RuntimeDockerError("DatasetLock runtime bindings are malformed")
+    private_task_path = f"tasks/{candidate.instance_id}.json"
     matching = [
         item
         for item in files
         if isinstance(item, Mapping)
         and item.get("scope") == "private"
-        and item.get("path") == RUNTIME_PRIVATE_TASK_PATH
+        and item.get("path") == private_task_path
     ]
     if (
         value.get("lock_id") != candidate.dataset_lock_id
         or hashlib.sha256(raw).hexdigest() != candidate.dataset_lock_sha256
-        or volumes.get("private") != RUNTIME_PRIVATE_VOLUME
         or len(matching) != 1
-        or matching[0].get("bytes") != RUNTIME_PRIVATE_TASK_BYTES
-        or matching[0].get("sha256") != RUNTIME_PRIVATE_TASK_SHA256
     ):
         raise RuntimeDockerError("DatasetLock private task binding drifted")
+    private_volume = volumes.get("private")
+    task_bytes = matching[0].get("bytes")
+    task_sha256 = matching[0].get("sha256")
+    if (
+        not isinstance(private_volume, str)
+        or _VOLUME_NAME.fullmatch(private_volume) is None
+        or isinstance(task_bytes, bool)
+        or not isinstance(task_bytes, int)
+        or task_bytes < 1
+        or not isinstance(task_sha256, str)
+        or _SHA256.fullmatch(task_sha256) is None
+    ):
+        raise RuntimeDockerError("DatasetLock private task descriptor is malformed")
+    return RuntimePrivateTaskBinding(
+        volume_name=private_volume,
+        task_path=private_task_path,
+        task_bytes=task_bytes,
+        task_sha256=task_sha256,
+    )
+
+
+def runtime_task_lock_paths(
+    configuration: RuntimeDockerConfiguration,
+    instance_id: str,
+    *,
+    read_only_check: Callable[[Path], bool],
+) -> tuple[Path, Path]:
+    root = configuration.runtime_lock_root
+    if root is None:
+        return configuration.task_environment_lock_path, configuration.dataset_lock_path
+    if (
+        not root.is_absolute()
+        or root.is_symlink()
+        or not root.is_dir()
+        or not read_only_check(root)
+    ):
+        raise RuntimeDockerError("runtime task lock root violates the read-only path policy")
+    task_directory = root / _task_environment_lock_directory(instance_id)
+    if task_directory.is_symlink() or not task_directory.is_dir() or not read_only_check(task_directory):
+        raise RuntimeDockerError("runtime task lock directory violates the read-only path policy")
+    shared_dataset_lock = root / "dataset-lock.json"
+    if shared_dataset_lock.is_file() and not shared_dataset_lock.is_symlink():
+        return task_directory / "task-environment-lock.json", shared_dataset_lock
+    return task_directory / "task-environment-lock.json", task_directory / "dataset-lock.json"
 
 
 def _kernel_entries(root: Path) -> tuple[list[dict[str, object]], int]:
@@ -583,35 +686,89 @@ class DockerRuntimeBackend:
             configuration.evaluator_kernel_root,
             aggregate,
         )
+        self._m6_runtime = (
+            configuration.runtime_lock_root is not None
+            and configuration.runtime_lock_root.name.startswith("m6-")
+        )
+        m3_kernel = configuration.evaluator_kernel_root / "m3_task_kernel.py"
+        if self._m6_runtime:
+            if m3_kernel.is_symlink() or not m3_kernel.is_file():
+                raise RuntimeDockerError("M6 runtime is missing the sealed M3 adapter")
+            self._m6_adapter_sha256 = hashlib.sha256(m3_kernel.read_bytes()).hexdigest()
+            self._m6_kernel_archive = _tar_bytes(
+                {
+                    path.removeprefix("repofixlab-runtime/"): content
+                    for path, content in self._kernel_files.items()
+                    if path.startswith("repofixlab-runtime/repofixlab_evaluator/")
+                }
+            )
+        else:
+            self._m6_adapter_sha256 = None
+            self._m6_kernel_archive = None
         self._worker_files, self._worker_aggregate = _worker_helper_material()
-        self._task_lock = load_runtime_task_environment_lock(
-            configuration,
-            catalog,
-            read_only_check=read_only_check,
-        )
-        validate_runtime_dataset_lock(
-            configuration,
-            catalog.candidate(self._task_lock.candidate_id),
-            read_only_check=read_only_check,
-        )
-        self._require_private_volume()
+        task_locks: dict[str, RuntimeTaskEnvironmentLock] = {}
+        private_task_bindings: dict[str, RuntimePrivateTaskBinding] = {}
+        for candidate in catalog.candidates.values():
+            if configuration.runtime_lock_root is not None:
+                task_directory = configuration.runtime_lock_root / _task_environment_lock_directory(
+                    candidate.instance_id
+                )
+                # One Controller catalog can hold immutable candidates from
+                # multiple protocol generations. A versioned runtime root
+                # selects its own task set; an absent directory is not an
+                # implicit fallback to another generation.
+                if not task_directory.exists():
+                    continue
+            task_lock_path, dataset_lock_path = runtime_task_lock_paths(
+                configuration,
+                candidate.instance_id,
+                read_only_check=read_only_check,
+            )
+            task_lock = load_runtime_task_environment_lock(
+                configuration,
+                catalog,
+                read_only_check=read_only_check,
+                lock_path=task_lock_path,
+            )
+            if task_lock.candidate_id != candidate.candidate_id:
+                if configuration.runtime_lock_root is not None:
+                    # The same instance may occur in an older candidate that
+                    # remains available for evidence replay. It is not part of
+                    # this root unless the sealed candidate ID matches.
+                    continue
+                raise RuntimeDockerError("runtime task lock catalog coverage is incomplete")
+            task_locks[candidate.candidate_id] = task_lock
+            private_task_bindings[candidate.candidate_id] = validate_runtime_dataset_lock(
+                configuration,
+                candidate,
+                read_only_check=read_only_check,
+                dataset_lock_path=dataset_lock_path,
+            )
+        if not task_locks:
+            raise RuntimeDockerError("runtime task lock root does not bind any trusted candidate")
+        self._task_locks = MappingProxyType(task_locks)
+        self._private_task_bindings = MappingProxyType(private_task_bindings)
+        for binding in self._private_task_bindings.values():
+            self._require_private_volume(binding.volume_name)
 
     def preflight(
         self, candidate_id: str, instance_id: str
     ) -> RuntimePreflightManifest:
         candidate = self._candidate(candidate_id, instance_id)
+        task_lock = self._task_locks[candidate.candidate_id]
+        private_task = self._private_task_bindings[candidate.candidate_id]
         self._validate_local_images()
         policy = {
             "schema_version": "v1",
             "candidate_sha256": candidate.candidate_sha256,
-            "task_environment_lock_sha256": self._task_lock.seal_sha256,
+            "task_environment_lock_sha256": task_lock.seal_sha256,
             "worker_image_id": candidate.definition.worker.image_id,
             "evaluator_image_id": candidate.definition.evaluator.image_id,
             "worker_resources": _resource_identity(candidate.definition.worker),
             "evaluator_resources": _resource_identity(candidate.definition.evaluator),
             "worker_helper_sha256": self._worker_aggregate,
             "evaluator_kernel_sha256": self._configuration.evaluator_kernel_sha256,
-            "private_task_sha256": RUNTIME_PRIVATE_TASK_SHA256,
+            "private_task_sha256": private_task.task_sha256,
             "tools": list(RUNTIME_TOOL_NAMES),
         }
         policy_sha256 = _canonical_sha256(policy)
@@ -620,8 +777,8 @@ class DockerRuntimeBackend:
             candidate_id=candidate.candidate_id,
             instance_id=candidate.instance_id,
             policy_sha256=policy_sha256,
-            task_environment_lock_id=self._task_lock.lock_id,
-            task_environment_lock_sha256=self._task_lock.seal_sha256,
+            task_environment_lock_id=task_lock.lock_id,
+            task_environment_lock_sha256=task_lock.seal_sha256,
             candidate_sha256=candidate.candidate_sha256,
             base_commit=candidate.base_commit,
         )
@@ -742,11 +899,21 @@ class DockerRuntimeBackend:
         patch: bytes,
     ) -> object:
         candidate = self._candidate(candidate_id, instance_id)
+        if self._m6_runtime:
+            return self._start_m6_evaluation(
+                attempt_id,
+                run_id,
+                job_id,
+                evaluation_id,
+                candidate,
+                patch,
+            )
+        private_task = self._private_task_bindings[candidate.candidate_id]
         for identifier in (run_id, job_id, evaluation_id):
             if _IDENTIFIER.fullmatch(identifier) is None:
                 raise RuntimeDockerError("evaluation identity is malformed")
         self._validate_local_images()
-        self._require_private_volume()
+        self._require_private_volume(private_task.volume_name)
         labels = _labels(attempt_id, candidate_id, "evaluator")
         created: list[object] = []
         seed: object | None = None
@@ -796,9 +963,9 @@ class DockerRuntimeBackend:
             evaluator_command = [
                 "agent-patch",
                 "--private-spec",
-                f"{_PRIVATE_ROOT}/{RUNTIME_PRIVATE_TASK_PATH}",
+                f"{_PRIVATE_ROOT}/{private_task.task_path}",
                 "--private-spec-sha256",
-                RUNTIME_PRIVATE_TASK_SHA256,
+                private_task.task_sha256,
                 "--private-root",
                 _PRIVATE_ROOT,
                 "--workspace",
@@ -837,7 +1004,7 @@ class DockerRuntimeBackend:
                         "bind": _EVIDENCE_ROOT,
                         "mode": "rw",
                     },
-                    RUNTIME_PRIVATE_VOLUME: {
+                    private_task.volume_name: {
                         "bind": _PRIVATE_ROOT,
                         "mode": "ro",
                     },
@@ -890,6 +1057,344 @@ class DockerRuntimeBackend:
             self._remove_resources(evaluator, tuple(created), attempt_id)
             raise
 
+    def _m6_repository(self, instance_id: str) -> str:
+        owner, separator, _task = instance_id.partition("__")
+        repositories = {
+            "axios": "axios/axios",
+            "immutable-js": "immutable-js/immutable-js",
+            "mrdoob": "mrdoob/three.js",
+            "preactjs": "preactjs/preact",
+        }
+        repository = repositories.get(owner) if separator else None
+        if repository is None:
+            raise RuntimeDockerError("M6 instance is outside the frozen repository population")
+        return repository
+
+    def _run_m6_pristine(
+        self,
+        command: list[str],
+        *,
+        entrypoint: list[str],
+        name: str,
+        labels: Mapping[str, str],
+        volumes: Mapping[str, object],
+        user: str,
+        cap_add: tuple[str, ...] = (),
+    ) -> object:
+        container = self._client.containers.run(
+            _M6_PRISTINE_IMAGE,
+            command,
+            entrypoint=entrypoint,
+            name=name,
+            detach=True,
+            remove=False,
+            auto_remove=False,
+            platform="linux/amd64",
+            network_mode="none",
+            read_only=True,
+            cap_drop=["ALL"],
+            cap_add=list(cap_add),
+            security_opt=["no-new-privileges:true"],
+            privileged=False,
+            devices=[],
+            ports={},
+            tty=False,
+            stdin_open=False,
+            user=user,
+            nano_cpus=2_000_000_000,
+            mem_limit="4g",
+            memswap_limit="4g",
+            pids_limit=256,
+            volumes=dict(volumes),
+            tmpfs={"/tmp": "rw,noexec,nosuid,size=64m"},
+            environment={"PYTHONPATH": f"{_M6_KERNEL_ROOT}:/opt/upstream"},
+            labels=dict(labels),
+        )
+        container_id = getattr(container, "id", None)
+        if not isinstance(container_id, str) or _CONTAINER_ID.fullmatch(container_id) is None:
+            raise RuntimeDockerError("M6 pristine container ID is malformed")
+        return container
+
+    def _create_m6_kernel_volume(
+        self,
+        attempt_id: str,
+        labels: Mapping[str, str],
+    ) -> object:
+        if self._m6_kernel_archive is None:
+            raise RuntimeDockerError("M6 kernel archive is unavailable")
+        volume = self._create_volume(
+            _resource_name(attempt_id, "m6", "kernel"), labels
+        )
+        initializer = self._client.containers.create(
+            _M6_PRISTINE_IMAGE,
+            ["-c", "sleep 30"],
+            entrypoint=["/bin/sh"],
+            volumes={_volume_name(volume): {"bind": _M6_KERNEL_ROOT, "mode": "rw"}},
+            labels=dict(labels),
+        )
+        try:
+            if not initializer.put_archive(_M6_KERNEL_ROOT, self._m6_kernel_archive):
+                raise RuntimeDockerError("Controller could not inject the M6 evaluator kernel")
+        finally:
+            _remove_container(initializer)
+        return volume
+
+    def _prepare_m6_task(
+        self,
+        attempt_id: str,
+        candidate: TrustedCandidate,
+        private_task: RuntimePrivateTaskBinding,
+        labels: Mapping[str, str],
+    ) -> RuntimePreparedM6Task:
+        if candidate.adapter_sha256 != self._m6_adapter_sha256:
+            raise RuntimeDockerError("M6 sealed M3 adapter hash drifted")
+        self._require_private_volume(private_task.volume_name)
+        kernel_volume = self._create_m6_kernel_volume(attempt_id, labels)
+        prepared_volume: object | None = None
+        try:
+            prepared_volume = self._create_volume(
+                _resource_name(attempt_id, "m6", "private"), labels
+            )
+            permissions = self._run_m6_pristine(
+                ["-c", "chmod 700 /work && chown 65532:65532 /work"],
+                entrypoint=["/bin/sh"],
+                name=_resource_name(attempt_id, "m6", "private-permissions"),
+                labels=labels,
+                volumes={_volume_name(prepared_volume): {"bind": "/work", "mode": "rw"}},
+                user="0:0",
+                cap_add=("CHOWN",),
+            )
+            try:
+                if permissions.wait(timeout=30).get("StatusCode") != 0:
+                    raise RuntimeDockerError("M6 prepared private volume initialization failed")
+            finally:
+                _remove_container(permissions)
+            repository = self._m6_repository(candidate.instance_id)
+            preparation = self._run_m6_pristine(
+                [
+                    "-m", "repofixlab_evaluator.m3_task_kernel", "prepare",
+                    "--dataset-task", f"{_M6_DATASET_ROOT}/{private_task.task_path}",
+                    "--dataset-root", _M6_DATASET_ROOT,
+                    "--output-root", _M6_PREPARED_ROOT,
+                    "--expected-task-sha256", private_task.task_sha256,
+                    "--instance-id", candidate.instance_id,
+                    "--base-commit", candidate.base_commit,
+                    "--repo", repository,
+                    "--source-root", "/opt/upstream",
+                ],
+                entrypoint=["python"],
+                name=_resource_name(attempt_id, "m6", "prepare"),
+                labels=labels,
+                volumes={
+                    private_task.volume_name: {"bind": _M6_DATASET_ROOT, "mode": "ro"},
+                    _volume_name(prepared_volume): {"bind": _M6_PREPARED_ROOT, "mode": "rw"},
+                    _volume_name(kernel_volume): {"bind": _M6_KERNEL_ROOT, "mode": "ro"},
+                },
+                user="65532:65532",
+            )
+            try:
+                if preparation.wait(timeout=120).get("StatusCode") != 0:
+                    raise RuntimeDockerError("M6 private task preparation failed")
+                report = _m6_json_output(
+                    preparation.logs(stdout=True, stderr=False),
+                    "M6 private task preparation",
+                )
+            finally:
+                _remove_container(preparation)
+            strict_spec_sha256 = report.get("strict_spec_sha256")
+            if (
+                set(report)
+                != {
+                    "schema_version", "record_type", "instance_id", "dataset_task_sha256",
+                    "strict_spec_sha256", "official_eval_script_sha256",
+                }
+                or report.get("schema_version") != "v1"
+                or report.get("record_type") != "m3_private_task_preparation"
+                or report.get("instance_id") != candidate.instance_id
+                or report.get("dataset_task_sha256") != private_task.task_sha256
+                or not isinstance(strict_spec_sha256, str)
+                or _SHA256.fullmatch(strict_spec_sha256) is None
+                or not isinstance(report.get("official_eval_script_sha256"), str)
+                or _SHA256.fullmatch(str(report["official_eval_script_sha256"])) is None
+            ):
+                raise RuntimeDockerError("M6 private task preparation report drifted")
+            return RuntimePreparedM6Task(
+                private_volume=prepared_volume,
+                kernel_volume=kernel_volume,
+                strict_spec_sha256=strict_spec_sha256,
+                repo=repository,
+            )
+        except Exception:
+            if prepared_volume is not None:
+                try:
+                    prepared_volume.remove(force=True)
+                except Exception:
+                    pass
+            try:
+                kernel_volume.remove(force=True)
+            except Exception:
+                pass
+            raise
+
+    def _start_m6_evaluation(
+        self,
+        attempt_id: str,
+        run_id: str,
+        job_id: str,
+        evaluation_id: str,
+        candidate: TrustedCandidate,
+        patch: bytes,
+    ) -> DockerRuntimeJob:
+        for identifier in (run_id, job_id, evaluation_id):
+            if _IDENTIFIER.fullmatch(identifier) is None:
+                raise RuntimeDockerError("evaluation identity is malformed")
+        private_task = self._private_task_bindings[candidate.candidate_id]
+        self._validate_local_images()
+        labels = _labels(attempt_id, candidate.candidate_id, "evaluator")
+        created: list[object] = []
+        seed: object | None = None
+        evaluator: object | None = None
+        try:
+            workspace = self._create_volume(
+                _resource_name(attempt_id, "evaluator", "testbed"), labels
+            )
+            input_volume = self._create_volume(
+                _resource_name(attempt_id, "evaluator", "input"), labels
+            )
+            evidence = self._create_volume(
+                _resource_name(attempt_id, "evaluator", "evidence"), labels
+            )
+            created.extend((workspace, input_volume, evidence))
+            prepared = self._prepare_m6_task(
+                attempt_id, candidate, private_task, labels
+            )
+            created.extend((prepared.private_volume, prepared.kernel_volume))
+            seed = self._run_container(
+                candidate.definition.evaluator,
+                name=_resource_name(attempt_id, "evaluator", "seed"),
+                labels=labels,
+                volumes={_volume_name(input_volume): {"bind": _INPUT_ROOT, "mode": "rw"}},
+                command=["-c", _KEEPALIVE_SCRIPT],
+                entrypoint=["python3"],
+                environment={},
+            )
+            patch_path = f"{_INPUT_ROOT}/candidate.patch"
+            _inject_file(
+                seed,
+                patch_path,
+                patch,
+                user=candidate.definition.evaluator.user,
+                writable_roots=(_INPUT_ROOT,),
+            )
+            staged_hash = _verified_file_identity(
+                seed, patch_path, user=candidate.definition.evaluator.user
+            ).split(":", 1)[1]
+            if staged_hash != hashlib.sha256(patch).hexdigest():
+                raise RuntimeDockerError("M6 candidate patch staging hash drifted")
+            _remove_container(seed)
+            seed = None
+            evaluator_command = [
+                "m6-candidate-patch", "execute",
+                "--private-spec", f"{_M6_PREPARED_ROOT}/spec.json",
+                "--private-root", _M6_PREPARED_ROOT,
+                "--workspace", _WORKSPACE_ROOT,
+                "--candidate-root", _INPUT_ROOT,
+                "--evidence-root", _EVIDENCE_ROOT,
+                "--private-spec-sha256", prepared.strict_spec_sha256,
+                "--candidate-patch-sha256", hashlib.sha256(patch).hexdigest(),
+                "--instance-id", candidate.instance_id,
+                "--base-commit", candidate.base_commit,
+                "--evaluation-id", evaluation_id,
+                "--job-id", job_id,
+                "--run-id", run_id,
+                "--attempt-id", attempt_id,
+                "--timeout-seconds", str(min(candidate.definition.evaluator.timeout_seconds, 300)),
+            ]
+            evaluator = self._run_container(
+                candidate.definition.evaluator,
+                name=_resource_name(attempt_id, "evaluator", "container"),
+                labels=labels,
+                volumes={
+                    _volume_name(workspace): {"bind": _WORKSPACE_ROOT, "mode": "rw"},
+                    _volume_name(input_volume): {"bind": _INPUT_ROOT, "mode": "ro"},
+                    _volume_name(evidence): {"bind": _EVIDENCE_ROOT, "mode": "rw"},
+                    _volume_name(prepared.private_volume): {"bind": _M6_PREPARED_ROOT, "mode": "ro"},
+                },
+                command=["-c", _EVALUATOR_WAIT_SCRIPT, *evaluator_command],
+                entrypoint=["python3"],
+                environment={"REPOFIXLAB_EVALUATOR_KERNEL_SHA256": self._configuration.evaluator_kernel_sha256},
+            )
+            evaluator_roots = _policy_writable_roots(candidate.definition.evaluator)
+            for relative, content in self._kernel_files.items():
+                _inject_file(
+                    evaluator,
+                    f"/tmp/{relative}",
+                    content,
+                    user=candidate.definition.evaluator.user,
+                    writable_roots=evaluator_roots,
+                )
+            _publish_ready_marker(
+                evaluator,
+                f"{_EVALUATOR_KERNEL_ROOT}/.ready.pending",
+                f"{_EVALUATOR_KERNEL_ROOT}/.ready",
+                f"{self._configuration.evaluator_kernel_sha256}\n".encode("ascii"),
+                user=candidate.definition.evaluator.user,
+                writable_roots=evaluator_roots,
+            )
+            return DockerRuntimeJob(
+                attempt_id=attempt_id,
+                run_id=run_id,
+                job_id=job_id,
+                evaluation_id=evaluation_id,
+                candidate=candidate,
+                container=evaluator,
+                volumes=tuple(created),
+                labels=labels,
+                evidence_volume=evidence,
+                prepared_m6_task=prepared,
+            )
+        except Exception:
+            if seed is not None:
+                try:
+                    _remove_container(seed)
+                except Exception:
+                    pass
+            self._remove_resources(evaluator, tuple(created), attempt_id)
+            raise
+
+    def _finalize_m6_evaluation(self, handle: DockerRuntimeJob) -> None:
+        prepared = handle.prepared_m6_task
+        evidence = handle.evidence_volume
+        if prepared is None or evidence is None:
+            raise RuntimeDockerError("M6 evaluation job lacks sealed finalization inputs")
+        finalizer = self._run_m6_pristine(
+            [
+                "-m", "repofixlab_evaluator.m6_candidate_patch", "finalize",
+                "--private-root", _M6_PREPARED_ROOT,
+                "--evidence-root", _M6_EVIDENCE_ROOT,
+                "--instance-id", handle.candidate.instance_id,
+                "--base-commit", handle.candidate.base_commit,
+                "--repo", prepared.repo,
+                "--source-root", "/opt/upstream",
+            ],
+            entrypoint=["python"],
+            name=_resource_name(handle.attempt_id, "m6", "finalize"),
+            labels=handle.labels,
+            volumes={
+                _volume_name(prepared.private_volume): {"bind": _M6_PREPARED_ROOT, "mode": "ro"},
+                _volume_name(evidence): {"bind": _M6_EVIDENCE_ROOT, "mode": "rw"},
+                _volume_name(prepared.kernel_volume): {"bind": _M6_KERNEL_ROOT, "mode": "ro"},
+            },
+            user="0:0",
+        )
+        try:
+            if finalizer.wait(timeout=90).get("StatusCode") != 0:
+                raise RuntimeDockerError("M6 pristine official grader failed")
+            _m6_json_output(finalizer.logs(stdout=True, stderr=False), "M6 finalizer")
+        finally:
+            _remove_container(finalizer)
+        handle.m6_finalized = True
+
     def get_job(self, job: object) -> RuntimeJobStatus:
         handle = _job_handle(job)
         _reload(handle.container)
@@ -906,6 +1411,11 @@ class DockerRuntimeBackend:
             raise RuntimeDockerError("evaluator exit code is malformed")
         if exit_code != 0:
             return RuntimeJobStatus("failed", False, "evaluator_process_failed")
+        if handle.prepared_m6_task is not None and not handle.m6_finalized:
+            try:
+                self._finalize_m6_evaluation(handle)
+            except RuntimeDockerError:
+                return RuntimeJobStatus("failed", False, "official_grading_failed")
         artifacts = self.get_artifacts(handle)
         try:
             report = json.loads(artifacts["evaluation.json"].decode("utf-8"))
@@ -973,25 +1483,26 @@ class DockerRuntimeBackend:
         )
 
     def _candidate(self, candidate_id: str, instance_id: str) -> TrustedCandidate:
-        if candidate_id != self._task_lock.candidate_id:
+        task_lock = self._task_locks.get(candidate_id)
+        if task_lock is None:
             raise RuntimeDockerError("runtime candidate is not TaskEnvironmentLock bound")
         candidate = self._catalog.candidate(candidate_id)
-        if instance_id != candidate.instance_id or instance_id != self._task_lock.instance_id:
+        if instance_id != candidate.instance_id or instance_id != task_lock.instance_id:
             raise RuntimeDockerError("runtime instance is not TaskEnvironmentLock bound")
         return candidate
 
     def _validate_local_images(self) -> None:
         validate_candidate_images(self._client, self._catalog)
 
-    def _require_private_volume(self) -> object:
+    def _require_private_volume(self, volume_name: str) -> object:
         get = getattr(self._client.volumes, "get", None)
         if not callable(get):
             raise RuntimeDockerError("Docker volume lookup is unavailable")
         try:
-            volume = get(RUNTIME_PRIVATE_VOLUME)
+            volume = get(volume_name)
         except Exception as error:
             raise RuntimeDockerError("trusted private task volume is unavailable") from error
-        if _volume_name(volume) != RUNTIME_PRIVATE_VOLUME:
+        if _volume_name(volume) != volume_name:
             raise RuntimeDockerError("trusted private task volume identity drifted")
         return volume
 

@@ -15,7 +15,6 @@ from types import MappingProxyType
 from jsonschema import Draft202012Validator
 
 from .container_factory import (
-    AXIOS_SMOKE_INSTANCE_ID,
     IMAGE_PROVENANCE_LABEL,
     TASK_ROLE_FACTORY_PROBE_PROFILE,
     CandidateLaunchDefinition,
@@ -52,7 +51,7 @@ IMAGE_INSTANCE_LABEL = "io.repofixlab.instance-id"
 IMAGE_BASE_COMMIT_LABEL = "io.repofixlab.base-commit"
 FACTORY_TMPFS_OPTIONS: Mapping[str, str] = MappingProxyType(
     {
-        "/tmp": "rw,noexec,nosuid,nodev,size=64m",
+        "/tmp": "rw,noexec,nosuid,nodev,size=512m",
         "/run/repofixlab": "rw,noexec,nosuid,nodev,size=16m",
     }
 )
@@ -62,8 +61,8 @@ _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _IMAGE_ID = re.compile(r"^sha256:[a-f0-9]{64}$")
 _CONTAINER_HOSTNAME = re.compile(r"^[a-f0-9]{12,64}$")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_PROFILE_ID_PREFIX = "task-environment-profile-v1-axios-5892"
-_CANDIDATE_ID_PREFIX = "task-environment-candidate-v1-axios-5892"
+_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
+_HEAD_SHA = re.compile(r"^[a-f0-9]{40}$")
 _SENSITIVE_ENVIRONMENT_NAMES = frozenset(
     {"ZHIPU_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DOCKER_HOST"}
 )
@@ -197,11 +196,22 @@ def _required_int(value: object, description: str) -> int:
     return value
 
 
-def _profile_id(role: str, kind: str, body: Mapping[str, object]) -> str:
-    return f"{_PROFILE_ID_PREFIX}-{role}-{kind}-{_canonical_sha256(body)}"
+def _instance_prefix(instance_id: str) -> str:
+    repository, separator, task = instance_id.partition("__")
+    if not separator or not repository or not task:
+        raise CandidateCatalogError("candidate instance ID is not repository-qualified")
+    return task if task.startswith(f"{repository}-") else f"{repository}-{task}"
+
+
+def _profile_id(instance_id: str, role: str, kind: str, body: Mapping[str, object]) -> str:
+    return (
+        f"task-environment-profile-v1-{_instance_prefix(instance_id)}-"
+        f"{role}-{kind}-{_canonical_sha256(body)}"
+    )
 
 
 def _verify_role_profile(
+    instance_id: str,
     role: str,
     kind: str,
     profile_value: object,
@@ -217,7 +227,7 @@ def _verify_role_profile(
     )
     body = dict(unsigned)
     body.pop("profile_id", None)
-    if actual_id != _profile_id(role, kind, body):
+    if actual_id != _profile_id(instance_id, role, kind, body):
         raise CandidateCatalogError(
             f"{role} {kind} profile ID does not match canonical content"
         )
@@ -229,6 +239,12 @@ def _verify_role_profile(
 
 
 def _verify_candidate_semantics(value: Mapping[str, object]) -> None:
+    instance_id = _required_string(value.get("instance_id"), "candidate instance")
+    base_commit = _required_string(value.get("base_commit"), "candidate base commit")
+    if _INSTANCE_ID.fullmatch(instance_id) is None:
+        raise CandidateCatalogError("candidate instance ID is malformed")
+    if _HEAD_SHA.fullmatch(base_commit) is None:
+        raise CandidateCatalogError("candidate base commit is malformed")
     dataset_lock = _required_mapping(value.get("dataset_lock"), "dataset lock")
     official_lock = _required_mapping(
         value.get("official_image_source_lock"), "official image source lock"
@@ -269,13 +285,13 @@ def _verify_candidate_semantics(value: Mapping[str, object]) -> None:
 
     for role, role_value in (("worker", worker), ("evaluator", evaluator)):
         security = _verify_role_profile(
-            role, "security", role_value.get("security_profile")
+            instance_id, role, "security", role_value.get("security_profile")
         )
         resources = _verify_role_profile(
-            role, "resource", role_value.get("resource_profile")
+            instance_id, role, "resource", role_value.get("resource_profile")
         )
         filesystem = _verify_role_profile(
-            role, "filesystem", role_value.get("filesystem_profile")
+            instance_id, role, "filesystem", role_value.get("filesystem_profile")
         )
         if security.get("cap_drop") != ["ALL"]:
             raise CandidateCatalogError(
@@ -329,7 +345,10 @@ def _verify_candidate_semantics(value: Mapping[str, object]) -> None:
     identity.pop("candidate_id", None)
     identity.pop("candidate_sha256", None)
     identity.pop("created_at", None)
-    expected_candidate_id = f"{_CANDIDATE_ID_PREFIX}-{_canonical_sha256(identity)}"
+    expected_candidate_id = (
+        f"task-environment-candidate-v1-{_instance_prefix(instance_id)}-"
+        f"{_canonical_sha256(identity)}"
+    )
     if value.get("candidate_id") != expected_candidate_id:
         raise CandidateCatalogError(
             "candidate ID does not match canonical environment identity"
@@ -1049,7 +1068,8 @@ class FactoryOperationJournal:
             or len(candidate_id) > 160
             or not isinstance(candidate_sha256, str)
             or _SHA256.fullmatch(candidate_sha256) is None
-            or instance_id != AXIOS_SMOKE_INSTANCE_ID
+            or not isinstance(instance_id, str)
+            or _INSTANCE_ID.fullmatch(instance_id) is None
             or not isinstance(request_sha256, str)
             or _SHA256.fullmatch(request_sha256) is None
             or not isinstance(http_request_sha256, str)

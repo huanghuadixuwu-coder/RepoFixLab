@@ -28,6 +28,7 @@ RUN --network=none npm --prefix packages/tui run build \
 	&& npm --prefix packages/repofixlab run build
 RUN --network=none node --check packages/repofixlab/docker/public-volume-permissions.mjs \
 	&& node --check packages/repofixlab/docker/private-volume-permissions.mjs \
+	&& node --check packages/repofixlab/docker/m6-p0-readiness.mjs \
 	&& node packages/repofixlab/docker/orchestrator-module-smoke.mjs
 
 ENV NODE_ENV=production

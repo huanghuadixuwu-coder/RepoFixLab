@@ -28,45 +28,46 @@ describe("experiment plans", () => {
 		expect(plan.matrix[0]?.config_ids).toEqual(["pi-general"]);
 	});
 
-	it("mechanically calculates the formal 130-run, 26M-token matrix", () => {
+	it("mechanically calculates the frozen 26-task, 74-run, 14.8M-token matrix", () => {
 		const plan = parseExperimentPlan(config("v1.yaml"));
 		const summary = createExperimentDryRunSummary(plan);
-		expect(summary.logical_run_count).toBe(130);
-		expect(summary.total_accounted_admission_cap_tokens).toBe(26_000_000);
+		expect(summary.logical_run_count).toBe(74);
+		expect(summary.total_accounted_admission_cap_tokens).toBe(14_800_000);
 		expect(summary.groups).toEqual([
 			{
 				group_id: "main",
-				task_count: 30,
+				task_count: 17,
 				config_ids: ["pi-general", "repofix-full"],
 				replicates: 1,
-				logical_run_count: 60,
+				logical_run_count: 34,
 			},
 			{
 				group_id: "ablation-no-localize",
-				task_count: 15,
+				task_count: 8,
 				config_ids: ["repofix-no-localize"],
 				replicates: 1,
-				logical_run_count: 15,
+				logical_run_count: 8,
 			},
 			{
 				group_id: "ablation-no-verify-feedback",
-				task_count: 15,
+				task_count: 8,
 				config_ids: ["repofix-no-verify-feedback"],
 				replicates: 1,
-				logical_run_count: 15,
+				logical_run_count: 8,
 			},
 			{
 				group_id: "stability-additional",
-				task_count: 10,
+				task_count: 6,
 				config_ids: ["pi-general", "repofix-full"],
 				replicates: 2,
-				logical_run_count: 40,
+				logical_run_count: 24,
 			},
 		]);
-		expect(plan.task_selection).toEqual({ status: "pending_m3", declared_task_count: 30 });
+		expect(plan.task_selection.status).toBe("frozen");
+		expect(plan.task_selection.declared_task_count).toBe(26);
+		expect(plan.task_selection.instance_ids).toHaveLength(26);
 		expect(summary.runtime_status).toBe("lifecycle_unavailable");
 		expect(summary.lifecycle_available).toBe(false);
-		expect("instance_ids" in plan.task_selection).toBe(false);
 	});
 
 	it("rejects unknown fields, duplicate keys, and inconsistent budgets", () => {

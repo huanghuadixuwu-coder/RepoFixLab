@@ -1,16 +1,55 @@
 import { createHash } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Compile } from "typebox/compile";
 import type { RepoToolTransport } from "../controller/client.ts";
 import {
 	REPO_TOOL_NAMES,
 	RepoDiffInputSchema,
 	RepoEditInputSchema,
+	RepoEditToolWireSchema,
 	RepoExecInputSchema,
 	RepoListInputSchema,
 	RepoReadInputSchema,
 	RepoSearchInputSchema,
+	type RepoEditInput,
+	type RepoEditToolWireInput,
 	type RepoToolResponse,
 } from "./protocol.ts";
+
+export const MODEL_VISIBLE_TOOL_OUTPUT_LIMIT = 12 * 1_024;
+export const MODEL_VISIBLE_STAGE_OUTPUT_LIMIT = 48 * 1_024;
+
+const repoEditInputValidator = Compile(RepoEditInputSchema);
+
+export interface RepoToolOutputBudgetSnapshot {
+	readonly stage: string | null;
+	readonly visible_chars: number;
+	readonly truncated_calls: number;
+}
+
+/** Mutable per-session accounting. Raw Controller results remain in details. */
+export class RepoToolOutputBudget {
+	private activeStage: string | null = null;
+	private visibleChars = 0;
+	private truncatedCalls = 0;
+
+	startStage(stage: string): void {
+		this.activeStage = stage;
+		this.visibleChars = 0;
+		this.truncatedCalls = 0;
+	}
+
+	allocate(requestedChars: number): number {
+		const allowance = Math.max(0, Math.min(requestedChars, MODEL_VISIBLE_STAGE_OUTPUT_LIMIT - this.visibleChars));
+		this.visibleChars += allowance;
+		if (allowance < requestedChars) this.truncatedCalls += 1;
+		return allowance;
+	}
+
+	get snapshot(): RepoToolOutputBudgetSnapshot {
+		return { stage: this.activeStage, visible_chars: this.visibleChars, truncated_calls: this.truncatedCalls };
+	}
+}
 
 function assertExpectedTool(response: RepoToolResponse, expectedTool: RepoToolResponse["tool"]): RepoToolResponse {
 	if (response.tool !== expectedTool) {
@@ -19,33 +58,41 @@ function assertExpectedTool(response: RepoToolResponse, expectedTool: RepoToolRe
 	return response;
 }
 
-const MODEL_VISIBLE_STREAM_CHAR_LIMIT = 64 * 1_024;
-
-function formatToolResult(response: RepoToolResponse): string {
-	const stdout = response.result.stdout.slice(0, MODEL_VISIBLE_STREAM_CHAR_LIMIT);
-	const remaining = MODEL_VISIBLE_STREAM_CHAR_LIMIT - stdout.length;
-	const stderr = response.result.stderr.slice(0, remaining);
-	const modelOutputTruncated =
-		stdout.length !== response.result.stdout.length || stderr.length !== response.result.stderr.length;
-	return [
+function formatToolResult(response: RepoToolResponse, visibleCharacterLimit: number): string {
+	const raw = [
 		`tool: ${response.result.tool}`,
 		`exit_code: ${response.result.exit_code === null ? "null" : response.result.exit_code}`,
 		`timed_out: ${response.result.timed_out}`,
 		`truncated: ${response.result.truncated}`,
-		`model_output_truncated: ${modelOutputTruncated}`,
+		"model_output_truncated: false",
 		`duration_ms: ${response.result.duration_ms}`,
 		"stdout:",
-		stdout.length === 0 ? "<empty>" : stdout,
+		response.result.stdout.length === 0 ? "<empty>" : response.result.stdout,
 		"stderr:",
-		stderr.length === 0 ? "<empty>" : stderr,
+		response.result.stderr.length === 0 ? "<empty>" : response.result.stderr,
 	].join("\n");
+	if (raw.length <= visibleCharacterLimit) return raw;
+	const marker = "\nmodel_output_truncated: true\n<full Controller output retained in trajectory details>";
+	if (visibleCharacterLimit <= marker.length) return marker.slice(0, visibleCharacterLimit);
+	return `${raw.slice(0, visibleCharacterLimit - marker.length)}${marker}`;
 }
 
-function toToolResult(response: RepoToolResponse) {
+function toToolResult(response: RepoToolResponse, outputBudget: RepoToolOutputBudget | undefined) {
+	const requested = Math.min(MODEL_VISIBLE_TOOL_OUTPUT_LIMIT, Math.max(1, response.result.stdout.length + response.result.stderr.length + 512));
+	const visibleLimit = outputBudget?.allocate(requested) ?? requested;
 	return {
-		content: [{ type: "text" as const, text: formatToolResult(response) }],
+		content: [{ type: "text" as const, text: formatToolResult(response, visibleLimit) }],
 		details: response.result,
 	};
+}
+
+function normalizeRepoEditInput(input: RepoEditToolWireInput): RepoEditInput {
+	if (!repoEditInputValidator.Check(input)) {
+		throw new Error(
+			"repo_edit requires exactly one of { path, content } for a new file or { path, old_text, new_text } for an exact replacement.",
+		);
+	}
+	return input;
 }
 
 export function toolCallOperationId(toolCallId: string): string {
@@ -55,7 +102,7 @@ export function toolCallOperationId(toolCallId: string): string {
 	return `tool:${createHash("sha256").update(toolCallId).digest("hex")}`;
 }
 
-export function createRepoTools(leaseId: string, transport: RepoToolTransport): ToolDefinition[] {
+export function createRepoTools(leaseId: string, transport: RepoToolTransport, outputBudget?: RepoToolOutputBudget): ToolDefinition[] {
 	if (leaseId.length === 0) {
 		throw new Error("leaseId must not be empty");
 	}
@@ -81,7 +128,7 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport): 
 							signal,
 						),
 						"repo_list",
-					),
+					), outputBudget,
 				),
 		}),
 		defineTool({
@@ -104,7 +151,7 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport): 
 							signal,
 						),
 						"repo_read",
-					),
+					), outputBudget,
 				),
 		}),
 		defineTool({
@@ -127,7 +174,7 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport): 
 							signal,
 						),
 						"repo_search",
-					),
+					), outputBudget,
 				),
 		}),
 		defineTool({
@@ -136,7 +183,7 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport): 
 			description:
 				"Create a new repository-relative UTF-8 source file with complete content, or atomically replace exactly one old_text occurrence in an existing source file. In this controlled evaluation, test paths and standalone test files are prohibited because a private test patch is applied later. Never send a fragment as content for an existing file.",
 			promptSnippet: "Create a new file or make one exact, atomic text replacement",
-			parameters: RepoEditInputSchema,
+			parameters: RepoEditToolWireSchema,
 			executionMode: "sequential",
 			execute: async (toolCallId, params, signal) =>
 				toToolResult(
@@ -146,12 +193,12 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport): 
 								leaseId,
 								operationId: toolCallOperationId(toolCallId),
 								tool: "repo_edit",
-								input: params,
+								input: normalizeRepoEditInput(params),
 							},
 							signal,
 						),
 						"repo_edit",
-					),
+					), outputBudget,
 				),
 		}),
 		defineTool({
@@ -175,7 +222,7 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport): 
 							signal,
 						),
 						"repo_exec",
-					),
+					), outputBudget,
 				),
 		}),
 		defineTool({
@@ -198,7 +245,7 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport): 
 							signal,
 						),
 						"repo_diff",
-					),
+					), outputBudget,
 				),
 		}),
 	];

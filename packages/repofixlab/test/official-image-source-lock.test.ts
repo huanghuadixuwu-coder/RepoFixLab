@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	type ExpectedOfficialImageSourceLockFacts,
 	officialImageSourceLockFileSha256,
+	officialImageSourceLockId,
 	officialImageSourceLockSemanticSha256,
 	officialImageSourceLockSemanticSubset,
 	verifyOfficialImageSourceLock,
@@ -21,12 +22,16 @@ const GOLDEN_SEMANTIC_SHA256 = "0ee78c1e1d7f205c88329bc1d28c03d3a8f07bf4e4ec4fe1
 const expected: ExpectedOfficialImageSourceLockFacts = {
 	datasetRevision: DATASET_REVISION,
 	harnessRevision: HARNESS_REVISION,
-	imageKey: "axios__axios-5892",
-	requestedReference: REQUESTED_REFERENCE,
-	repositoryDigest: REPOSITORY_DIGEST,
-	localImageId: IMAGE_ID,
-	platform: "linux/amd64",
-	registryResponseSha256: REGISTRY_RESPONSE_SHA256,
+	images: [
+		{
+			imageKey: "axios__axios-5892",
+			requestedReference: REQUESTED_REFERENCE,
+			repositoryDigest: REPOSITORY_DIGEST,
+			localImageId: IMAGE_ID,
+			platform: "linux/amd64",
+			registryResponseSha256: REGISTRY_RESPONSE_SHA256,
+		},
+	],
 };
 
 function officialLock(timestamp = TIMESTAMP): OfficialImageSourceLock {
@@ -57,7 +62,7 @@ function reseal(lock: OfficialImageSourceLock): OfficialImageSourceLock {
 	const seal = officialImageSourceLockSemanticSha256(lock);
 	return {
 		...lock,
-		lock_id: `official-images-v1-axios-5892-${seal.slice(0, 16)}`,
+		lock_id: officialImageSourceLockId(lock),
 		seal_sha256: seal,
 	};
 }
@@ -109,9 +114,9 @@ describe("OfficialImageSourceLock semantic verifier", () => {
 			verifyOfficialImageSourceLock({ ...lock, lock_id: "official-images-v1-axios-5892-deadbeef" }, expected),
 		).toThrow("ID");
 		expect(() => verifyOfficialImageSourceLock({ ...lock, unexpected: true }, expected)).toThrow("strict v1 schema");
-		expect(() =>
-			verifyOfficialImageSourceLock({ ...lock, images: [...lock.images, lock.images[0]!] }, expected),
-		).toThrow("exactly one Axios image");
+		expect(() => verifyOfficialImageSourceLock({ ...lock, images: [...lock.images, lock.images[0]!] }, expected)).toThrow(
+			"canonical-order",
+		);
 		expect(() => verifyOfficialImageSourceLock(semanticTamper, expected)).toThrow("expected frozen facts");
 	});
 
@@ -140,5 +145,46 @@ describe("OfficialImageSourceLock semantic verifier", () => {
 				harnessRevision: "0".repeat(40),
 			}),
 		).toThrow("expected frozen facts");
+	});
+
+	it("seals a complete canonical-order task-image set for M3", () => {
+		const lock = officialLock();
+		const secondImage = {
+			image_key: "babel__babel-13928",
+			requested_reference: "swebench/sweb.eval.x86_64.babel_1776_babel-13928:latest",
+			repository_digest: `swebench/sweb.eval.x86_64.babel_1776_babel-13928@sha256:${"d".repeat(64)}`,
+			local_image_id: `sha256:${"d".repeat(64)}`,
+			platform: "linux/amd64" as const,
+			registry_response_sha256: "e".repeat(64),
+			resolved_at: TIMESTAMP,
+		};
+		const multi = reseal({ ...lock, images: [lock.images[0]!, secondImage] });
+		const expectedMulti: ExpectedOfficialImageSourceLockFacts = {
+			datasetRevision: DATASET_REVISION,
+			harnessRevision: HARNESS_REVISION,
+			images: [
+				{
+					imageKey: "axios__axios-5892",
+					requestedReference: REQUESTED_REFERENCE,
+					repositoryDigest: REPOSITORY_DIGEST,
+					localImageId: IMAGE_ID,
+					platform: "linux/amd64",
+					registryResponseSha256: REGISTRY_RESPONSE_SHA256,
+				},
+				{
+					imageKey: secondImage.image_key,
+					requestedReference: secondImage.requested_reference,
+					repositoryDigest: secondImage.repository_digest,
+					localImageId: secondImage.local_image_id,
+					platform: secondImage.platform,
+					registryResponseSha256: secondImage.registry_response_sha256,
+				},
+			],
+		};
+		expect(multi.lock_id).toMatch(/^official-images-v1-set-2-[a-f0-9]{16}$/);
+		expect(verifyOfficialImageSourceLock(multi, expectedMulti)).toBe(multi);
+		expect(() => verifyOfficialImageSourceLock({ ...multi, images: [...multi.images].reverse() }, expectedMulti)).toThrow(
+			"canonical-order",
+		);
 	});
 });

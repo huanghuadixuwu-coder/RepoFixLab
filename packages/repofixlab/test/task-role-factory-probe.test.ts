@@ -91,6 +91,8 @@ function controllerExecution(): ControllerExecution {
 
 function candidateBuildInput(): TaskEnvironmentCandidateBuildInput {
 	return {
+		instance_id: AXIOS_SMOKE_INSTANCE_ID,
+		base_commit: AXIOS_SMOKE_BASE_COMMIT,
 		dataset_lock: { lock_id: "dataset-lock-v1", lock_sha256: HASH_A },
 		official_image_source_lock: {
 			lock_id: "official-images-v1",
@@ -336,6 +338,25 @@ describe("task role factory probe v1 contracts", () => {
 		expect(first.base_commit).toBe(AXIOS_SMOKE_BASE_COMMIT);
 		expect(first.roles.worker.image.platform).toBe("linux/amd64");
 		expect(first.roles.evaluator.image.platform).toBe("linux/amd64");
+	});
+
+	it("binds a non-Axios candidate identity and every derived profile to its own frozen task", () => {
+		const candidate = createTaskEnvironmentCandidate({
+			...candidateBuildInput(),
+			instance_id: "immutable-js__immutable-js-2005",
+			base_commit: "1234567890abcdef1234567890abcdef12345678",
+		});
+
+		expect(candidate.instance_id).toBe("immutable-js__immutable-js-2005");
+		expect(candidate.base_commit).toBe("1234567890abcdef1234567890abcdef12345678");
+		expect(candidate.candidate_id).toMatch(/^task-environment-candidate-v1-immutable-js-2005-[a-f0-9]{64}$/);
+		expect(candidate.roles.worker.security_profile.profile_id).toMatch(
+			/^task-environment-profile-v1-immutable-js-2005-worker-security-[a-f0-9]{64}$/,
+		);
+		expect(candidate.roles.evaluator.filesystem_profile.profile_id).toMatch(
+			/^task-environment-profile-v1-immutable-js-2005-evaluator-filesystem-[a-f0-9]{64}$/,
+		);
+		expect(verifyTaskEnvironmentCandidate(candidate)).toBe(candidate);
 	});
 
 	it("builds a canonical probe request from a verified candidate and operation ID", () => {

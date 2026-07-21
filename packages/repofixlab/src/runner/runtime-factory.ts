@@ -15,13 +15,22 @@ import {
 	type PiGeneralSessionOptions,
 	type PiGeneralSessionResult,
 } from "../agent/pi-general.ts";
+import {
+	createRepoFixSession,
+	type RepoFixSessionOptions,
+	type RepoFixSessionResult,
+} from "../agent/repofix.ts";
 import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
-import { FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256 } from "./pricing.ts";
+import {
+	FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256,
+	FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256,
+} from "./pricing.ts";
 
 export const FROZEN_MODEL_PROVIDER = "zhipu-standard";
 export const FROZEN_MODEL_ID = "glm-4.5-air";
 export const FROZEN_MODEL_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
 export const FROZEN_TEMPERATURE = 0.2;
+export const FROZEN_PROVIDER_REQUEST_TIMEOUT_MS = 600_000;
 export const RUN_ADMISSION_BUDGET_ERROR = "repofixlab_accounted_admission_cap_reached";
 
 export const FROZEN_MODEL_SPEC = {
@@ -32,6 +41,7 @@ export const FROZEN_MODEL_SPEC = {
 	reasoning: true,
 	thinking_level: "high",
 	temperature: FROZEN_TEMPERATURE,
+	request_timeout_ms: FROZEN_PROVIDER_REQUEST_TIMEOUT_MS,
 	context_window: 131_072,
 	max_tokens: 16_384,
 	input: ["text"],
@@ -45,12 +55,41 @@ export const FROZEN_MODEL_SPEC = {
 	},
 } as const;
 
+export const DEEPSEEK_V4_FLASH_MODEL_PROVIDER = "deepseek";
+export const DEEPSEEK_V4_FLASH_MODEL_ID = "deepseek-v4-flash";
+export const DEEPSEEK_V4_FLASH_MODEL_BASE_URL = "https://api.deepseek.com";
+
+export const DEEPSEEK_V4_FLASH_MODEL_SPEC = {
+	provider: DEEPSEEK_V4_FLASH_MODEL_PROVIDER,
+	model_id: DEEPSEEK_V4_FLASH_MODEL_ID,
+	api: "openai-completions",
+	base_url: DEEPSEEK_V4_FLASH_MODEL_BASE_URL,
+	reasoning: true,
+	thinking_level: "high",
+	temperature: FROZEN_TEMPERATURE,
+	request_timeout_ms: FROZEN_PROVIDER_REQUEST_TIMEOUT_MS,
+	provider_context_window: 1_000_000,
+	provider_max_tokens: 384_000,
+	context_window: 131_072,
+	max_tokens: 16_384,
+	input: ["text"],
+	pricing_spec_sha256: FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256,
+	registry_cost_semantics: "conservative_upper_bound_only",
+	compat: {
+		supportsStore: false,
+		supportsDeveloperRole: false,
+		requiresReasoningContentOnAssistantMessages: true,
+		thinkingFormat: "deepseek",
+	},
+} as const;
+
 export interface FrozenModelRuntime {
 	readonly authStorage: AuthStorage;
 	readonly modelRegistry: ModelRegistry;
 	readonly model: Model<Api>;
 	readonly modelSpecSha256: string;
 	readonly pricingSpecSha256: string;
+	readonly forceStageCompletionToolChoice: boolean;
 }
 
 export interface AdmissionGatedSession {
@@ -63,58 +102,127 @@ export interface AdmissionGatedSession {
 	};
 }
 
+interface ModelRuntimeDefinition {
+	readonly provider: string;
+	readonly providerName: string;
+	readonly baseUrl: string;
+	readonly apiKeyEnvironmentName: string;
+	readonly modelId: string;
+	readonly modelName: string;
+	readonly modelSpec: unknown;
+	readonly pricingSpecSha256: string;
+	readonly compat: Model<Api>["compat"];
+	readonly contextWindow: number;
+	readonly maxTokens: number;
+	readonly cost: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number };
+	readonly thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
+	readonly forceStageCompletionToolChoice: boolean;
+}
+
+const GLM_45_AIR_RUNTIME: ModelRuntimeDefinition = {
+	provider: FROZEN_MODEL_PROVIDER,
+	providerName: "Zhipu Standard",
+	baseUrl: FROZEN_MODEL_BASE_URL,
+	apiKeyEnvironmentName: "ZHIPU_API_KEY",
+	modelId: FROZEN_MODEL_ID,
+	modelName: "GLM-4.5-Air",
+	modelSpec: FROZEN_MODEL_SPEC,
+	pricingSpecSha256: FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256,
+	compat: FROZEN_MODEL_SPEC.compat,
+	contextWindow: 131_072,
+	maxTokens: 16_384,
+	cost: { input: 1.2, output: 8, cacheRead: 0.24, cacheWrite: 0 },
+	forceStageCompletionToolChoice: true,
+};
+
+const DEEPSEEK_V4_FLASH_RUNTIME: ModelRuntimeDefinition = {
+	provider: DEEPSEEK_V4_FLASH_MODEL_PROVIDER,
+	providerName: "DeepSeek",
+	baseUrl: DEEPSEEK_V4_FLASH_MODEL_BASE_URL,
+	apiKeyEnvironmentName: "DEEPSEEK_API_KEY",
+	modelId: DEEPSEEK_V4_FLASH_MODEL_ID,
+	modelName: "DeepSeek V4 Flash",
+	modelSpec: DEEPSEEK_V4_FLASH_MODEL_SPEC,
+	pricingSpecSha256: FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256,
+	compat: DEEPSEEK_V4_FLASH_MODEL_SPEC.compat,
+	contextWindow: DEEPSEEK_V4_FLASH_MODEL_SPEC.context_window,
+	maxTokens: DEEPSEEK_V4_FLASH_MODEL_SPEC.max_tokens,
+	cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+	thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" },
+	forceStageCompletionToolChoice: false,
+};
+
 export function createFrozenModelRuntime(
 	apiKey?: string,
 	apiKeyFile?: string,
 	useEnvironment = true,
 ): FrozenModelRuntime {
-	const configuredApiKey = apiKey ?? (useEnvironment ? process.env.ZHIPU_API_KEY : undefined);
-	const configuredApiKeyFile = apiKeyFile ?? (useEnvironment ? process.env.ZHIPU_API_KEY_FILE : undefined);
+	return createModelRuntime(GLM_45_AIR_RUNTIME, apiKey, apiKeyFile, useEnvironment);
+}
+
+export function createDeepSeekV4FlashRuntime(
+	apiKey?: string,
+	apiKeyFile?: string,
+	useEnvironment = true,
+): FrozenModelRuntime {
+	return createModelRuntime(DEEPSEEK_V4_FLASH_RUNTIME, apiKey, apiKeyFile, useEnvironment);
+}
+
+function createModelRuntime(
+	definition: ModelRuntimeDefinition,
+	apiKey?: string,
+	apiKeyFile?: string,
+	useEnvironment = true,
+): FrozenModelRuntime {
+	const configuredApiKey = apiKey ?? (useEnvironment ? process.env[definition.apiKeyEnvironmentName] : undefined);
+	const configuredApiKeyFile = apiKeyFile ?? (useEnvironment ? process.env[`${definition.apiKeyEnvironmentName}_FILE`] : undefined);
 	let fileApiKey: string | undefined;
 	if (configuredApiKeyFile !== undefined) {
 		const stats = lstatSync(configuredApiKeyFile);
 		if (!stats.isFile() || stats.isSymbolicLink() || stats.size > 16_384)
-			throw new Error("ZHIPU_API_KEY_FILE must be a small regular non-symlink file");
+			throw new Error(`${definition.apiKeyEnvironmentName}_FILE must be a small regular non-symlink file`);
 		fileApiKey = readFileSync(realpathSync(configuredApiKeyFile), "utf8").trim();
-		if (fileApiKey.length === 0) throw new Error("ZHIPU_API_KEY_FILE contains no API key");
+		if (fileApiKey.length === 0) throw new Error(`${definition.apiKeyEnvironmentName}_FILE contains no API key`);
 	}
 	const environmentApiKey = configuredApiKey?.trim();
 	if (fileApiKey !== undefined && environmentApiKey !== undefined && fileApiKey !== environmentApiKey) {
-		throw new Error("ZHIPU_API_KEY_FILE and ZHIPU_API_KEY disagree");
+		throw new Error(`${definition.apiKeyEnvironmentName}_FILE and ${definition.apiKeyEnvironmentName} disagree`);
 	}
 	const resolvedApiKey = fileApiKey ?? environmentApiKey;
 	if (resolvedApiKey === undefined || resolvedApiKey.length === 0) {
-		throw new Error("ZHIPU_API_KEY is required for a non-dry-run experiment");
+		throw new Error(`${definition.apiKeyEnvironmentName} is required for a non-dry-run experiment`);
 	}
 	const authStorage = AuthStorage.inMemory();
-	authStorage.setRuntimeApiKey(FROZEN_MODEL_PROVIDER, resolvedApiKey);
+	authStorage.setRuntimeApiKey(definition.provider, resolvedApiKey);
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
-	modelRegistry.registerProvider(FROZEN_MODEL_PROVIDER, {
-		name: "Zhipu Standard",
-		baseUrl: FROZEN_MODEL_BASE_URL,
-		apiKey: "$ZHIPU_API_KEY",
+	modelRegistry.registerProvider(definition.provider, {
+		name: definition.providerName,
+		baseUrl: definition.baseUrl,
+		apiKey: `$${definition.apiKeyEnvironmentName}`,
 		api: "openai-completions",
 		models: [
 			{
-				id: FROZEN_MODEL_ID,
-				name: "GLM-4.5-Air",
+				id: definition.modelId,
+				name: definition.modelName,
 				reasoning: true,
 				input: ["text"],
-				cost: { input: 1.2, output: 8, cacheRead: 0.24, cacheWrite: 0 },
-				contextWindow: 131_072,
-				maxTokens: 16_384,
-				compat: FROZEN_MODEL_SPEC.compat,
+				cost: definition.cost,
+				contextWindow: definition.contextWindow,
+				maxTokens: definition.maxTokens,
+				compat: definition.compat,
+				...(definition.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: definition.thinkingLevelMap }),
 			},
 		],
 	});
-	const model = modelRegistry.find(FROZEN_MODEL_PROVIDER, FROZEN_MODEL_ID);
+	const model = modelRegistry.find(definition.provider, definition.modelId);
 	if (model === undefined) throw new Error("Frozen model registration failed");
 	return {
 		authStorage,
 		modelRegistry,
 		model,
-		modelSpecSha256: canonicalContractSha256(FROZEN_MODEL_SPEC),
-		pricingSpecSha256: FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256,
+		modelSpecSha256: canonicalContractSha256(definition.modelSpec),
+		pricingSpecSha256: definition.pricingSpecSha256,
+		forceStageCompletionToolChoice: definition.forceStageCompletionToolChoice,
 	};
 }
 
@@ -131,8 +239,38 @@ export async function createFrozenPiGeneralSession(
 	});
 	const stream = result.session.agent.streamFn;
 	result.session.agent.streamFn = (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) =>
-		stream(model, context, { ...streamOptions, temperature: FROZEN_TEMPERATURE, maxTokens: 16_384 });
+		stream(model, context, frozenProviderStreamOptions(streamOptions));
 	return result;
+}
+
+export async function createFrozenRepoFixSession(
+	runtime: FrozenModelRuntime,
+	options: Omit<RepoFixSessionOptions, "model" | "authStorage" | "modelRegistry" | "thinkingLevel">,
+): Promise<RepoFixSessionResult> {
+	const result = await createRepoFixSession({
+		...options,
+		model: runtime.model,
+		authStorage: runtime.authStorage,
+		modelRegistry: runtime.modelRegistry,
+		thinkingLevel: "high",
+		forceStageCompletionToolChoice: runtime.forceStageCompletionToolChoice,
+	});
+	const stream = result.session.agent.streamFn;
+	result.session.agent.streamFn = (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) =>
+		stream(model, context, frozenProviderStreamOptions(streamOptions));
+	return result;
+}
+
+export function frozenProviderStreamOptions(streamOptions?: SimpleStreamOptions): SimpleStreamOptions {
+	const deadline = AbortSignal.timeout(FROZEN_PROVIDER_REQUEST_TIMEOUT_MS);
+	const signal = streamOptions?.signal === undefined ? deadline : AbortSignal.any([streamOptions.signal, deadline]);
+	return {
+		...streamOptions,
+		temperature: FROZEN_TEMPERATURE,
+		maxTokens: 16_384,
+		timeoutMs: FROZEN_PROVIDER_REQUEST_TIMEOUT_MS,
+		signal,
+	};
 }
 
 export function runtimeIdentityFromSession(

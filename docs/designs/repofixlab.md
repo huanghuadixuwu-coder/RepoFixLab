@@ -16,7 +16,7 @@ RepoFixLab 面向代码智能体研发与仓库维护场景，提供从真实 Gi
 
 > 在固定模型、任务环境和最大预算下，结构化代码修复流程能否比通用代码智能体更可靠地解决真实 GitHub Issue，并量化其正确性、成本、耗时、稳定性和安全性？
 
-项目采用 SWE-bench Multilingual 中全部 43 个 JavaScript/TypeScript 任务，使用 Docker 隔离代码执行，使用运行时不可见的官方测试判定候选补丁，并比较通用 Pi 工作流、完整 RepoFix 工作流以及两组消融配置。所有正式实验保留配置、轨迹、补丁、测试日志与资源消耗，最终生成可追溯的静态报告。
+项目先对 SWE-bench Multilingual 中全部 43 个 JavaScript/TypeScript 候选任务执行官方镜像预检；仅将其中 26 个可复现通过金标准判定的任务冻结为评测池。系统使用 Docker 隔离代码执行，使用运行时不可见的官方测试判定候选补丁，并比较通用 Pi 工作流、完整 RepoFix 工作流以及两组消融配置。所有正式实验保留配置、轨迹、补丁、测试日志与资源消耗，最终生成可追溯的静态报告。
 
 本项目的成功不以“RepoFix 必须优于基线”为前提。系统能够在受控条件下复现实验、如实拒绝假设并解释失败，才是评测平台的核心价值。
 
@@ -117,7 +117,7 @@ RepoFixLab 将逻辑控制面拆成两个可信容器：Node Orchestrator 负责
 
 | 假设 | 预期验证方式 |
 | --- | --- |
-| H1：完整 RepoFix 产生有实际意义的修复率提升 | 30 个冻结测试任务上的配对 `ΔResolved Rate` |
+| H1：完整 RepoFix 产生有实际意义的修复率提升 | 17 个冻结测试任务上的配对 `ΔResolved Rate` |
 | H2：显式仓库定位门控提高定位效率 | 移除强制定位阶段和定位产物；比较修复率、首次最终保留编辑前调用数和搜索调用数 |
 | H3：向 Agent 返回测试反馈能减少未解决补丁与回归 | 屏蔽测试反馈但保留一次匹配的自审/修订机会；比较 F2P、P2P 与修订结果 |
 | H4：平台满足受限执行要求 | 独立安全门禁和可审计的资源限制测试 |
@@ -130,7 +130,7 @@ H1 的主效应预先定义为：
 ΔResolved Rate = Resolved Rate(repofix-full) - Resolved Rate(pi-general)
 ```
 
-`+10` 个百分点（30 个任务中净增加至少 3 个成功）定义为最小实际意义阈值。点估计达到该阈值只表示“具有实际意义”；只有配对 95% 区间同时排除 0 才表述为“有统计支持”。其余结果按“方向为正但证据不足”“无实际差异”或“方向为负”报告，不能统一包装为提升。
+`+10` 个百分点定义为最小实际意义阈值；在 17 个冻结测试任务上，实际采用“净增加至少 2 个成功”（11.8pp）这一保守的可实现阈值。点估计达到该阈值只表示“具有实际意义”；只有配对 95% 区间同时排除 0 才表述为“有统计支持”。其余结果按“方向为正但证据不足”“无实际差异”或“方向为负”报告，不能统一包装为提升。
 
 ## 6. 系统架构
 
@@ -282,7 +282,7 @@ RepoFix 阶段不能只依赖提示词自觉遵守。Runner 维护阶段状态�
 | 提权 | `no-new-privileges` |
 | 网络 | Worker/Evaluator 为 `none`；Orchestrator 连接 provider egress；Dataset Preparer 仅准备期连接 dataset egress；Controller 只有 internal control |
 | Docker socket | 只挂载到可信 Controller；Orchestrator、Dataset Preparer、Worker、Evaluator 均不挂载 |
-| 根文件系统 | Worker 只读根；Evaluator 使用经 43 任务预检冻结的只读根与任务级可写路径 profile，若不兼容则协议不得冻结 |
+| 根文件系统 | Worker 只读根；Evaluator 使用经 43 个候选任务预检、其中 26 个合格任务冻结的只读根与任务级可写路径 profile，若不兼容则协议不得冻结 |
 | CPU | 每个任务最多 4 vCPU |
 | 内存 | 每个任务最多 8 GiB，无无限制 swap |
 | PID | 固定上限，具体值经 dev 校准后冻结 |
@@ -301,7 +301,7 @@ Token、模型轮次、工具次数和时间限制同时启用，先到者终止
 
 在 JS/TS 子集完成实测前，doctor 采用官方 harness 的通用建议作为保守门槛：Linux/x86_64 容器、E 盘宿主与 Docker 数据文件系统内部都至少有 120,000,000,000 bytes 可用空间、Docker 可用 8 核 CPU 和 16 GiB 内存。建议将 E 盘余量清理到 150 GB；低于最低线时阻止批量镜像准备和正式实验，但不阻止代码开发。
 
-doctor 分三层，避免生命周期循环依赖：`bootstrap` 在 dataset prepare 前运行，只检查 daemon、架构、宿主/Docker 内部空间、CPU/内存、控制网络、准备基础镜像，以及此时真实常驻的 Controller/Orchestrator；它不要求尚未进入生命周期的 Dataset Preparer、Worker 或 Evaluator 容器存在。`smoke` 在 Axios materialize 后验证单任务清单、真实 Worker/Evaluator 工厂探针与四探针；`formal` 必须等 M2 角色安全 profile 和 M3 的 43-task locks 完成后，在 M6 前验证全量门禁。宿主空间通过 Orchestrator 对容器 `/artifacts`（由仓库根目录的 `artifacts/` bind）执行 `statvfs` 测量；Docker 内部空间不能从 `docker info` 推断，必须由 Controller 用固定 digest 的一次性探针容器在 Docker managed named volume 上执行 `statvfs`，同时记录原始字节、Docker root、volume ID 和探针镜像 digest。
+doctor 分三层，避免生命周期循环依赖：`bootstrap` 在 dataset prepare 前运行，只检查 daemon、架构、宿主/Docker 内部空间、CPU/内存、控制网络、准备基础镜像，以及此时真实常驻的 Controller/Orchestrator；它不要求尚未进入生命周期的 Dataset Preparer、Worker 或 Evaluator 容器存在。`smoke` 在 Axios materialize 后验证单任务清单、真实 Worker/Evaluator 工厂探针与四探针；`formal` 必须等 M2 角色安全 profile、M3 的 43-task candidate image lock 与 26-task eligible-environment locks 完成后，在 M6 前验证全量门禁。宿主空间通过 Orchestrator 对容器 `/artifacts`（由仓库根目录的 `artifacts/` bind）执行 `statvfs` 测量；Docker 内部空间不能从 `docker info` 推断，必须由 Controller 用固定 digest 的一次性探针容器在 Docker managed named volume 上执行 `statvfs`，同时记录原始字节、Docker root、volume ID 和探针镜像 digest。
 
 截至 2026-07-18，bootstrap 规范证据 `artifacts/m0/bootstrap-doctor-audited-v6.json` 为首次 `pass`。它确认 Docker Linux/amd64、12 CPU、`MemTotal=20,972,773,376` bytes、`/artifacts` 可用 `210,370,609,152` bytes、Docker managed volume 可用 `947,109,801,984` bytes；Controller socket=`read-write`、Orchestrator socket=`none`，Dataset Preparer、Worker、Evaluator 为 lifecycle=`deferred` 且容器观测值为 `null`。报告语义/文件 SHA-256 分别为 `5234eae6291a0f808ca2db885efffa56354b90c5467c7d590ed3276117ab4c60` 与 `744869dc1662595bc9356cf5ac690b0b558ffe272eeb3b1c8a848f809eaf6d24`；外部锁语义/文件 SHA-256 分别为 `f51ddfb48d579d34e848f6bb5566f69140eebc606f564e9271c769838a4a5e5d` 与 `9dedf48ac209f58c318fd14ef8a2ebed11b316e0c2c1f9749eaa1476703fa466`。audited-v4 暴露 Compose config hash 不稳定，audited-v5 暴露 deferred 角色生命周期误判，audited-v6 验证了对应修复；该锁只证明当时的源码和镜像快照。
 
@@ -333,7 +333,7 @@ Dataset Preparer 在写入任何 generation 数据前必须输出严格的 v1 `D
 
 官方 Multilingual 镜像只作为固定 digest 的可信源层，不能原样进入任何会执行候选代码的容器。Worker 净化过程删除原 `.git`，从 base tree 以固定 author、timestamp、timezone、uid/gid、文件顺序和 mtime 重新初始化唯一 baseline commit，并确保无 remote、tag、reflog 和不可达未来对象。Evaluator 净化过程 detached checkout 原 base commit，删除其他 refs、remote、tag 和 reflog，再 prune 所有不可达对象；它必须保留原 base commit ID，以兼容 official harness。清单分别记录 source、worker、evaluator digest、base tree/commit hash、sanitizer version 和 Git 可达性证明；正式 Worker/Evaluator 均断网。
 
-Evaluator 使用上述固定 sanitized-evaluator image。正式判定前必须检查 candidate patch 路径策略、candidate 在 base tree 上的 `git apply --check`、candidate 与 evaluator/test patch 路径冲突，以及应用 candidate 后 test patch 是否仍可应用。test patch 应用失败、目标测试未收集或全部跳过时不得进入 `resolved`。43 任务的 pristine official image 与 sanitized/adapted Evaluator 必须通过 base/gold 判分等价门禁，证明净化和启动参数未改变官方测试语义。
+Evaluator 使用上述固定 sanitized-evaluator image。正式判定前必须检查 candidate patch 路径策略、candidate 在 base tree 上的 `git apply --check`、candidate 与 evaluator/test patch 路径冲突，以及应用 candidate 后 test patch 是否仍可应用。test patch 应用失败、目标测试未收集或全部跳过时不得进入 `resolved`。先对 43 个候选任务的 pristine official image 与 sanitized/adapted Evaluator 运行 base/gold 判分预检；只有 26 个通过该门禁的任务可进入正式评测，证明净化和启动参数未改变官方测试语义。
 
 ### 8.6 威胁模型边界
 
@@ -356,11 +356,11 @@ Evaluator 使用上述固定 sanitized-evaluator image。正式判定前必须�
 
 | 划分 | 数量 | 用途 | 可否用于调参 |
 | --- | ---: | --- | --- |
-| Dev | 8 | 打通容器、提示词、工具和故障处理 | 可以 |
-| Validation | 5 | 在预先列出的候选配置中做一次最终选择 | 不允许反复迭代 |
-| Test | 30 | 正式主结果 | 不可以 |
+| Dev | 5 | 打通容器、提示词、工具和故障处理 | 可以 |
+| Validation | 4 | 在预先列出的候选配置中做一次最终选择 | 不允许反复迭代 |
+| Test | 17 | 正式主结果 | 不可以 |
 
-划分脚本按仓库分层，并使用 seed `20260718` 对 `instance_id` 做稳定哈希排序和比例分配。消融、稳定性、正式顺序和 bootstrap seed 分别为 `20260719`、`20260720`、`20260721`、`20260722`。Dataset Preparer 向 control volume 写 `SamplingMetadata` 原始整数：problem_statement 规范化换行后的 UTF-8 byte length，以及冻结 unified-diff parser 统计的 hunk body added/deleted record 总数（不把 file header 当变更行）。完成 8/5/30 后，只在冻结的 30 个 Test 内对每项按 `(value asc, instance_id asc)` 排序，以 `floor(3×rank/30)` 得到确定的 10/10/10 等频 tertile；抽样按 repo×两类 tertile 分层。Orchestrator 不挂载 private volume，PublicTaskManifest 与 Agent prompt 明确排除原始值和桶。最终清单记录 parser version、原始值、桶、quota、数据集 revision/generation、每个 base commit、镜像 ID/digest、全部 seed 和 SHA-256。划分一旦冻结，正式实验前不得替换任务。
+划分脚本只在通过官方预检的 26 项任务上按仓库分层，并使用 seed `repofixlab-m3-repo-stratified-v1` 对 `instance_id` 与密封 control metadata 做稳定哈希排序和比例分配，得到 5/4/17。43 项候选集、官方镜像锁、全部拒绝项和预检摘要均保留，不能把 17 项拒绝任务静默删除。Dataset Preparer 向 control volume 写 `SamplingMetadata` 原始整数：problem_statement 规范化换行后的 UTF-8 byte length，以及冻结 unified-diff parser 统计的 hunk body added/deleted record 总数（不把 file header 当变更行）。只在冻结的 17 个 Test 内对每项按 `(value asc, instance_id asc)` 排序，以 `floor(3×rank/17)` 得到确定的 6/6/5 tertile；抽样按 repo×两类 tertile 分层。Orchestrator 不挂载 private volume，PublicTaskManifest 与 Agent prompt 明确排除原始值和桶。最终清单记录 parser version、原始值、桶、quota、数据集 revision/generation、每个 base commit、镜像 ID/digest、全部 seed 和 SHA-256。划分一旦冻结，正式实验前不得替换任务。
 
 Dev 可反复用于实现调试；进入 Validation 前最多登记 3 个候选工作流配置及选择规则，并保留全部候选结果。Validation 只在候选工作流已经用 Dev 收敛后运行一次。若查看 Validation 结果后继续改动工作流，必须提升实验协议版本并如实记录，不能把同一组结果继续当作未见数据。Test 配置、消融子集和稳定性子集在读取任何 Test 结果前写入只读实验计划并计算哈希。
 
@@ -375,7 +375,7 @@ Dev 可反复用于实现调试；进入 Validation 前最多登记 3 个候选�
 5. pristine official 与 sanitized/adapted Evaluator 的 base/gold 判定和测试集合一致；
 6. 预构建镜像在与正式运行完全相同的角色化 user、网络、挂载、CPU、内存、PID、只读/可写路径和超时参数下可复现。
 
-数据集 revision、划分 seed、任务 ID 和上述预检判定规则必须在工作流调优前登记。任一任务未通过预检时，正式实验暂停：先修复统一环境；若确认是数据本身不可判定，则必须发布新的协议版本并重新审定样本数量，不能在当前 8/5/30 清单中自动排除或替换。冻结后出现的环境失败留在 30 个测试任务分母中，并单独归类，不能静默删样本。
+数据集 revision、划分 seed、任务 ID 和上述预检判定规则必须在工作流调优前登记。任一候选任务未通过预检时，正式实验暂停：先修复统一环境；若确认是数据本身不可判定，则必须发布新的协议版本并重新审定样本数量。当前协议版本已将 43 项候选的完整预检结果封存，并以可验证资格清单冻结其中 26 项，不能在 5/4/17 清单中继续自动排除或替换。冻结后出现的环境失败留在 17 个测试任务分母中，并单独归类，不能静默删样本。
 
 ### 9.4 运行时信息隔离
 
@@ -398,7 +398,7 @@ RepoFixLab 不在 TypeScript 中重新实现 SWE-bench 的通过判定。Node Or
 
 但固定 v4.1.0 的容器启动默认不满足本项目门禁：`DOCKER_USER` 为 root，远端镜像缺失时会 pull，`build_container` 未固定网络、capability drop、`no-new-privileges`、CPU、内存、PID 或只读路径。因此 Controller image 构建时必须对固定 upstream tree 应用带 SHA-256 的 `harness-security-v1.patch`；补丁范围只能覆盖镜像解析和容器创建参数。official `repository@digest + platform` 只用于 source provenance；formal profile 从 TaskEnvironmentLock 取精确 sanitized evaluator local image ID，inspect 对账其 platform、source-digest/sanitizer-hash/fs-profile labels 后直接按 image ID 启动。缺失或不匹配即 fail closed，禁止退回 source image、build/pull/tag/`latest`；Evaluator 注入 `network=none`、`cap_drop=ALL`、`no-new-privileges` 和冻结资源/文件系统 profile，并拒绝未登记的 `cap_add`。
 
-首期固定 SWE-bench `v4.1.0` / commit `726c5461e2ef52d83cf1ea2107870a8bb3328d57`，并固定 upstream tree hash、security patch SHA-256、Python 依赖锁、DatasetLock/OfficialImageSourceLock、source repository digest、worker/evaluator local image ID、platform 和 harness 参数。数据集 `SWE-bench/SWE-bench_Multilingual` 固定 revision `2b7aced941b4873e9cad3e76abbae93f481d1beb`，物化为 evaluator-only JSONL 并记录 SHA-256。M0 对 Axios 的 base/no-op/malformed/gold、M3 对 43 任务的 base/gold同时运行 pristine 与 sanitized/adapted harness，要求官方判定、测试集合和 parser 输出一致。官方原始 report 永久保留；若内部指标与 official report 不一致，实验直接失败。
+首期固定 SWE-bench `v4.1.0` / commit `726c5461e2ef52d83cf1ea2107870a8bb3328d57`，并固定 upstream tree hash、security patch SHA-256、Python 依赖锁、DatasetLock/OfficialImageSourceLock、source repository digest、worker/evaluator local image ID、platform 和 harness 参数。数据集 `SWE-bench/SWE-bench_Multilingual` 固定 revision `2b7aced941b4873e9cad3e76abbae93f481d1beb`，物化为 evaluator-only JSONL 并记录 SHA-256。M0 对 Axios 的 base/no-op/malformed/gold、M3 对 43 个候选任务的 base/gold 同时运行 pristine 与 sanitized/adapted harness；只有 26 个通过官方判定、测试集合和 parser 输出一致性门禁的任务进入冻结清单。官方原始 report 永久保留；若内部指标与 official report 不一致，实验直接失败。
 
 依赖只能在受信镜像预构建阶段联网获取。若任务在正式禁网参数下需要临时下载依赖，预检必须失败并按协议升级处理，不能为单次正式运行临时放网。
 
@@ -408,24 +408,24 @@ RepoFixLab 不在 TypeScript 中重新实现 SWE-bench 的通过判定。Node Or
 
 | 配置 ID | 说明 | 正式任务数 |
 | --- | --- | ---: |
-| `pi-general` | 通用 Pi 工作流基线 | 30 |
-| `repofix-full` | 完整结构化 RepoFix 工作流 | 30 |
-| `repofix-no-localize` | 移除显式仓库定位门控和定位产物；仍允许使用相同搜索工具自由探索 | 分层抽取 15 |
-| `repofix-no-verify-feedback` | 执行计划中的一次定向测试但不把结果返回给 Agent；保留一次不含测试反馈的自审/修订机会；独立 Evaluator 保留 | 同一组 15 |
+| `pi-general` | 通用 Pi 工作流基线 | 17 |
+| `repofix-full` | 完整结构化 RepoFix 工作流 | 17 |
+| `repofix-no-localize` | 移除显式仓库定位门控和定位产物；仍允许使用相同搜索工具自由探索 | 分层抽取 8 |
+| `repofix-no-verify-feedback` | 执行计划中的一次定向测试但不把结果返回给 Agent；保留一次不含测试反馈的自审/修订机会；独立 Evaluator 保留 | 同一组 8 |
 
-两组消融必须使用相同的 15 个 Test 任务，并与完整配置、基线在这些任务上的结果做配对比较。该子集按仓库和预先定义的任务元数据分层，在读取 Test 结果前冻结。外部 Agent 对照仅列入后续实验。
+两组消融必须使用相同的 8 个 Test 任务，并与完整配置、基线在这些任务上的结果做配对比较。该子集按仓库和预先定义的任务元数据分层，在读取 Test 结果前冻结。外部 Agent 对照仅列入后续实验。
 
 ### 10.2 稳定性实验
 
-从 Test 中按仓库、规范化 issue UTF-8 bytes tertile 和 gold changed-line tertile 分层选择 10 个任务，对 `pi-general` 和 `repofix-full` 分别运行 3 次。选择规则和任务 ID 在读取主实验结果前冻结，gold patch 派生统计不会暴露给 Agent。主实验中两个配置各自的一次可以复用，因此新增 40 次运行；首期正式实验恰好预注册 130 个逻辑 `run_id`：
+从 Test 中按仓库、规范化 issue UTF-8 bytes tertile 和 gold changed-line tertile 分层选择 6 个任务，对 `pi-general` 和 `repofix-full` 分别运行 3 次。选择规则和任务 ID 在读取主实验结果前冻结，gold patch 派生统计不会暴露给 Agent。主实验中两个配置各自的一次可以复用，因此新增 24 次运行；首期正式实验恰好预注册 74 个逻辑 `run_id`：
 
-- 主对照：60 次；
-- 两组消融：30 次；
-- 稳定性追加：40 次。
+- 主对照：34 次；
+- 两组消融：16 次；
+- 稳定性追加：24 次。
 
 模型 API 即使支持 seed 也可能非完全确定。所有支持的采样参数与 seed 均记录，但稳定性指标以实际重复结果为准。
 
-H1 的 30 任务主结果只使用实验计划中预先指定的第一次运行；稳定性追加运行不能替换失败的主结果，也不与其平均后回填主指标。
+H1 的 17 任务主结果只使用实验计划中预先指定的第一次运行；稳定性追加运行不能替换失败的主结果，也不与其平均后回填主指标。
 
 ### 10.3 公平性控制
 
@@ -453,11 +453,11 @@ H1 的 30 任务主结果只使用实验计划中预先指定的第一次运行�
 
 ### 10.5 容量、Token 与费用
 
-正式实验为 130 个逻辑 `run_id`，每个 run 在所有 attempt 间共享 200k `accounted_tokens` 准入上限，正式池共 26M。usage 完整时 accounted_tokens 等于 provider 的 prompt+completion actual；usage 不完整时按完整 reservation 计入，并在报告中单列 imputed 数量与 completeness。Dev 6M、Validation 3M、事故诊断储备 5M，计划准入总池共 40M；项目控制流量的 provider actual 硬保护线为 50M，剩余 10M 只作结算安全缓冲。200k/26M/40M 不宣称为缺少官方 tokenizer/framing 契约时的 actual 数学上界。未使用的正式任务额度不转移。费用按冻结的智谱 CNY 阶梯计价表观测，不设美元硬上限。
+正式实验为 74 个逻辑 `run_id`，每个 run 在所有 attempt 间共享 200k `accounted_tokens` 准入上限，正式池共 14.8M。usage 完整时 accounted_tokens 等于 provider 的 prompt+completion actual；usage 不完整时按完整 reservation 计入，并在报告中单列 imputed 数量与 completeness。Dev 6M、Validation 3M、事故诊断储备 5M，计划准入总池共 28.8M；项目控制流量的 provider actual 硬保护线仍为 50M，剩余 21.2M 只作结算安全缓冲。200k/14.8M/28.8M 不宣称为缺少官方 tokenizer/framing 契约时的 actual 数学上界。未使用的正式任务额度不转移。费用按冻结的智谱 CNY 阶梯计价表观测，不设美元硬上限。
 
-所有 experiment 共用追加式 GlobalBudgetLedger；新 `experiment_id` 不重置 40M/50M 总账。Dev 中预留 3.2M 用于 16-run 预冻结校准批次，至少 2 个 budget_exhausted 或任一 estimator 低估即冻结失败。事故诊断储备只用于与正式结果隔离的 Dev clone、无模型复现或经批准诊断，不得替换正式失败、补样或选择性重跑；配置级事故或完整 26M 正式批次重跑必须停止并重新授权。项目保护线要求 provider 并发 1、独占 key、40M 停止准入、unknown usage 立即暂停对账，并冻结 `max_single_request_actual_tokens <= 147456`；10M 缓冲远大于一个在途请求。存在外部消费者时必须先导入 provider 账单差额；无法验证单请求上界时 M6 No-Go。
+所有 experiment 共用追加式 GlobalBudgetLedger；新 `experiment_id` 不重置 28.8M/50M 总账。Dev 中预留 3.2M 用于 16-run 预冻结校准批次：5 个冻结 Dev 任务以两主配置各运行一次（10 个 run），再按公开固定 seed 从 Dev 的三个仓库各选一个任务并以两主配置各追加一次（6 个 run）。追加项是预注册的第二次校准运行，不触碰 Validation/Test，也不改变正式 74-run 矩阵。至少 2 个 budget_exhausted 或任一 estimator 低估即冻结失败。事故诊断储备只用于与正式结果隔离的 Dev clone、无模型复现或经批准诊断，不得替换正式失败、补样或选择性重跑；配置级事故或完整 14.8M 正式批次重跑必须停止并重新授权。项目保护线要求 provider 并发 1、独占 key、28.8M 停止准入、unknown usage 立即暂停对账，并冻结 `max_single_request_actual_tokens <= 147456`；21.2M 缓冲远大于一个在途请求。存在外部消费者时必须先导入 provider 账单差额；无法验证单请求上界时 M6 No-Go。
 
-`run --dry-run` 必须输出逻辑运行数、各池 accounted admission cap、50M hard line、预计 CNY、容器时长、磁盘和并发资源。按每次 Agent 最长 30 分钟计算，正式实验最多占用 65 个 Agent 容器小时，另加 Evaluator；默认全局并发 1，正式运行不得静默改变。并发、缓存状态和实际总时长必须进入报告。
+`run --dry-run` 必须输出逻辑运行数、各池 accounted admission cap、50M hard line、预计 CNY、容器时长、磁盘和并发资源。按每次 Agent 最长 30 分钟计算，正式实验最多占用 37 个 Agent 容器小时，另加 Evaluator；默认全局并发 1，正式运行不得静默改变。并发、缓存状态和实际总时长必须进入报告。
 
 ### 10.6 模型与 Provider
 
@@ -550,7 +550,7 @@ policy_violation
 - 固定报告配对四格表和 exact McNemar 检验，不以分歧样本多少决定是否展示；
 - 报告逐仓库结果和 leave-one-repository-out 敏感性分析，检查结论是否由单一仓库驱动；
 - 对成本和耗时报告中位数、P90 与配对差值，不只报告均值；
-- 两组 15 任务消融明确标记为探索性证据，不做过强显著性结论；
+- 两组 8 任务消融明确标记为探索性证据，不做过强显著性结论；
 - 不根据显著性结果决定是否展示实验。
 
 ### 11.7 多轴采用判定
@@ -682,7 +682,7 @@ repofixlab report --experiment <experiment-id>
 - [ ] 一次性 Dataset Preparer 是 generation-scoped private volume 的唯一 writer；READY/SEAL/hash 验证前不发布，封存后无 RW mount，运行期 Controller 只读，Orchestrator/Agent 无法挂载。
 - [ ] SamplingMetadata 原始整数由 Preparer 派生到 control volume，抽样器不读取 private spec并按冻结算法生成桶；原始值与桶均不进入 PublicTaskManifest/Agent prompt。
 - [ ] OfficialImageSourceLock 在准备期记录 source repository@digest/local image ID/platform；TaskEnvironmentLock 绑定精确 sanitized evaluator local image ID 与 sanitizer/profile，formal 只按该 ID 启动，缺失时不回退或 pull。
-- [ ] 能生成 8/5/30 的版本化、可校验划分清单。
+- [ ] 能从 43 个候选任务的完整预检证据生成 26 项资格清单和 5/4/17 的版本化、可校验划分清单。
 - [ ] `doctor` 能验证 Docker Desktop、镜像、资源和全部安全门禁。
 - [ ] bootstrap 不依赖数据且只验证 Controller/Orchestrator；Dataset Preparer 在 prepare 生命周期验证，Worker/Evaluator 在 smoke/formal 中以锁定真实任务镜像和 Controller 工厂证据验证；各阶段证据互不冒充。
 - [ ] Node Orchestrator 无 Docker socket，Trusted Harness Controller 是唯一 Docker owner 且不持有模型 key。
@@ -698,7 +698,7 @@ repofixlab report --experiment <experiment-id>
 - [ ] Sanitized Worker 只有一个 baseline commit，且无 remote、tag、reflog 和不可达未来对象。
 - [ ] Sanitized Evaluator 保留原 base commit ID，但无未来 refs/tag/reflog/unreachable objects。
 - [ ] Candidate/test patch 冲突、test patch 应用失败、测试未收集或全跳过均不能判为 resolved。
-- [ ] 固定官方判分逻辑配合带 SHA-256 的 Harness Security Adapter 启动独立 Evaluator；Axios 四探针与 43-task base/gold 均和 pristine harness 对账。
+- [ ] 固定官方判分逻辑配合带 SHA-256 的 Harness Security Adapter 启动独立 Evaluator；Axios 四探针与 43 个候选任务的 base/gold 均和 pristine harness 对账，只有 26 项合格任务可评测。
 - [ ] 批量运行支持预算准入、统一重试、experiment owner/capacity lease、heartbeat、严格 checkpoint 恢复和幂等制品。
 - [ ] TokenAdmissionEstimator 版本/multiplier/margin 可追溯；校准 actual≤reservation，不变量违例、unknown usage 和 pre-stream reject 均 fail closed。
 - [ ] Controller 重启可从 controller-work reconcile；official raw report 在 ArtifactIndex ACK 前不清理。
@@ -707,13 +707,13 @@ repofixlab report --experiment <experiment-id>
 
 ### 14.2 实验验收
 
-- [ ] 基线和完整 RepoFix 均完成 30 个冻结 Test 任务。
-- [ ] 两组消融均完成同一组 15 个分层任务。
-- [ ] 同一组 10 个任务完成 `pi-general` 和 `repofix-full` 各三次重复运行。
+- [ ] 基线和完整 RepoFix 均完成 17 个冻结 Test 任务。
+- [ ] 两组消融均完成同一组 8 个分层任务。
+- [ ] 同一组 6 个任务完成 `pi-general` 和 `repofix-full` 各三次重复运行。
 - [ ] 正式结果包含全部成功、失败、超时和基础设施错误，不筛除不利样本。
 - [ ] 主指标使用固定分母并报告绝对计数。
 - [ ] 模型版本、预算、工具、镜像和代码 revision 均可追溯。
-- [ ] 130 个正式 run 的累计 accounted_tokens 不超过 26M admission cap，重试不重置 run 级预算；actual、imputed 与 completeness 分列。
+- [ ] 74 个正式 run 的累计 accounted_tokens 不超过 14.8M admission cap，重试不重置 run 级预算；actual、imputed 与 completeness 分列。
 - [ ] 至少对三类典型失败做轨迹级根因分析。
 - [ ] 报告明确区分 Agent 失败、Evaluator/环境失败和平台安全事件。
 
@@ -722,7 +722,7 @@ repofixlab report --experiment <experiment-id>
 满足以下条件后才能在简历中描述为完整项目：
 
 - 真实、多仓库、冻结的正式任务，而非自造 happy path；
-- 恰好 130 个预注册逻辑运行及其全部 attempt/失败数据；
+- 恰好 74 个预注册逻辑运行及其全部 attempt/失败数据；
 - 独立隐藏判定，Agent 自报成功不计分；
 - 同模型公平基线、两组消融和重复运行稳定性；
 - Docker 隔离、资源限制、安全门禁与操作审计；
@@ -739,11 +739,11 @@ repofixlab report --experiment <experiment-id>
 | M0 环境与契约 | bootstrap/smoke doctor、Dataset Preparer、source/digest/adapter lock、Axios 双 harness 探针 | sealed DatasetLock、OfficialImageSourceLock、pristine/adapted 四探针等价 |
 | M1 纵向切片 | pi-general → patch → fresh Evaluator → result/report | 一条 Compose 命令端到端，模型失败也有完整制品 |
 | M2 安全与工具 | Sanitized Worker/Evaluator、工具契约、角色化安全门禁 | 泄露、socket、host mount、网络、路径、资源和残留门禁全过 |
-| M3 数据与 Evaluator | 43 任务预检、8/5/30 清单、pristine/adapted/official 对账 | 无静默删样本，43-task base/gold 与 official 100% 一致 |
+| M3 数据与 Evaluator | 43 个候选任务预检、26 项资格清单、5/4/17 清单、pristine/adapted/official 对账 | 拒绝项与候选池完整保留，26 个冻结任务的 base/gold 与 official 100% 一致 |
 | M4 Agent 与消融 | RepoFix FSM、P0/P1、四配置、Token supervisor | Agent loop 无修改，配置差异仅限预注册变量 |
 | M5 Runner 与报告 | 批处理、恢复、capacity/owner locks、指标、离线静态报告 | 严格 checkpoint 恢复，ACK 前不丢 raw report，完成制品不可覆盖 |
-| M6 Dev/Validation/冻结 | formal doctor、experiment.lock、正式 Go/No-Go | 130 run、26M accounted cap、50M hard line、全部 hash 和门禁锁定 |
-| M7 正式实验 | 130 个不可变逻辑结果 | 固定顺序、无人工干预、全部失败保留 |
+| M6 Dev/Validation/冻结 | formal doctor、experiment.lock、正式 Go/No-Go | 74 run、14.8M accounted cap、50M hard line、全部 hash 和门禁锁定 |
+| M7 正式实验 | 74 个不可变逻辑结果 | 固定顺序、无人工干预、全部失败保留 |
 | M8 分析与交付 | 统计、失败根因、复现、演示、简历材料 | 报告可离线重建，结论不越界 |
 
 单人预计 8—10 周，正式计算时间另计。M0、M1 串行；M1 后 sandbox、dataset/evaluator、agent、runner/report 可以按目录并行。
@@ -781,7 +781,7 @@ repofixlab report --experiment <experiment-id>
 - 通过隐藏测试的补丁必然满足全部语义需求；
 - Docker 能抵御所有恶意代码；
 - 公开数据不存在训练污染；
-- 30 个任务上的小幅提升必然推广到其他语言和仓库。
+- 17 个任务上的小幅提升必然推广到其他语言和仓库。
 
 ## 18. 后续实验
 
@@ -806,7 +806,7 @@ repofixlab report --experiment <experiment-id>
 最终数字必须在正式实验完成后回填，禁止预写提升百分比：
 
 - 设计并实现 RepoFixLab，将模型控制面与无凭据 Docker 任务容器分离，通过独立 Evaluator 和运行时隐藏测试判定真实 GitHub Issue 补丁。
-- 建立覆盖 43 个 JS/TS 任务、恰好 130 个预注册逻辑运行的可复现实验协议，另行报告实际 attempt 数，统一记录修复率、F2P/P2P、成本、延迟、稳定性和失败轨迹。
+- 建立覆盖 43 个候选 JS/TS 任务、其中 26 项通过官方预检并冻结为 5/4/17 评测池、恰好 74 个预注册逻辑运行的可复现实验协议，另行报告实际 attempt 数，统一记录修复率、F2P/P2P、成本、延迟、稳定性和失败轨迹。
 - 在同模型、同预算下完成通用 Pi 基线与两组工作流消融，使用配对统计和失败根因分析量化定位阶段与验证闭环的实际贡献。
 - 实现资源限制、安全门禁、批量调度、断点续跑和静态可追溯报告，使成功与失败结果均可复核。
 

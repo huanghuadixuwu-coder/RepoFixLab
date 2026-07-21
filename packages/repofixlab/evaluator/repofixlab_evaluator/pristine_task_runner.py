@@ -12,10 +12,9 @@ from pathlib import Path
 from .canonical import canonical_json, sha256_bytes
 from .errors import EvaluationError, PatchPolicyError
 from .patches import reject_path_conflict, validate_patch
-from .private_spec import MAX_PATCH_BYTES, PrivateEvaluationSpec, load_private_spec
+from .private_spec import MAX_PATCH_BYTES, PrivateEvaluationSpec, TaskIdentity, load_private_spec
 
 WORKSPACE = Path("/testbed")
-BASE_COMMIT = "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b"
 MAX_LOG_BYTES = 32 * 1024 * 1024
 OFFICIAL_APPLY_COMMANDS = (
     ("git", "apply", "--verbose"),
@@ -72,15 +71,15 @@ def _git(*arguments: str, input_bytes: bytes | None = None) -> subprocess.Comple
     )
 
 
-def _reset() -> None:
-    reset = _git("reset", "--hard", BASE_COMMIT)
+def _reset(base_commit: str) -> None:
+    reset = _git("reset", "--hard", base_commit)
     clean = _git("clean", "-fd")
     head = _git("rev-parse", "HEAD")
     status = _git("status", "--porcelain=v1")
     if (
         reset.returncode != 0
         or clean.returncode != 0
-        or head.stdout.strip() != BASE_COMMIT.encode("ascii")
+        or head.stdout.strip() != base_commit.encode("ascii")
         or status.stdout.strip()
     ):
         raise EvaluationError("pristine task workspace could not be reset to the frozen base")
@@ -188,7 +187,7 @@ def run_probe(
         "timed_out": False,
         "duration_ms": 0,
     }
-    _reset()
+    _reset(spec.base_commit)
     try:
         test_paths = validate_patch(spec.test_patch, WORKSPACE, test_patch=True)
         if candidate_patch:
@@ -219,7 +218,7 @@ def run_probe(
         _write_exclusive(metadata_output, evidence_root, canonical_json(metadata))
         return metadata
     finally:
-        _reset()
+        _reset(spec.base_commit)
 
 
 def main() -> int:
@@ -233,10 +232,25 @@ def main() -> int:
     parser.add_argument("--evidence-root", type=Path, required=True)
     parser.add_argument("--log-output", type=Path, required=True)
     parser.add_argument("--metadata-output", type=Path, required=True)
+    parser.add_argument("--expected-instance-id")
+    parser.add_argument("--expected-base-commit")
     parser.add_argument("--timeout-seconds", type=int, choices=range(1, 301), default=300)
     arguments = parser.parse_args()
     try:
-        spec = load_private_spec(arguments.private_spec, arguments.private_root)
+        expected_instance_id = arguments.expected_instance_id
+        expected_base_commit = arguments.expected_base_commit
+        if (expected_instance_id is None) != (expected_base_commit is None):
+            raise EvaluationError("task identity options must be supplied together")
+        expected_identity = (
+            TaskIdentity(expected_instance_id, expected_base_commit)
+            if expected_instance_id is not None and expected_base_commit is not None
+            else None
+        )
+        spec = (
+            load_private_spec(arguments.private_spec, arguments.private_root)
+            if expected_identity is None
+            else load_private_spec(arguments.private_spec, arguments.private_root, expected_identity)
+        )
         metadata = run_probe(
             probe_kind=arguments.probe_kind,
             spec=spec,

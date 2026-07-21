@@ -917,6 +917,33 @@ class RuntimeServiceTest(unittest.TestCase):
             self.assertTrue(timeout.timed_out)
             self.assertIsNone(timeout.exit_code)
 
+    def test_repo_exec_runtime_home_does_not_pollute_candidate_snapshot(self) -> None:
+        with TemporaryDirectory() as temporary:
+            repository = _repository(Path(temporary).resolve())
+            executor = RepositoryToolExecutor(repository)
+            executor.execute(
+                "repo_edit",
+                {"path": "README.md", "old_text": "base\n", "new_text": "candidate\n"},
+            )
+            result = executor.execute(
+                "repo_exec",
+                {
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "import os; from pathlib import Path; path = Path(os.environ['HOME']) / '.cache' / 'runtime'; path.mkdir(parents=True, exist_ok=True); (path / 'state').write_text('ok', encoding='utf-8')",
+                    ],
+                },
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertFalse((repository / ".cache").exists())
+            snapshot = executor.snapshot_evidence()
+            self.assertEqual(snapshot.policy_status, "pass")
+            self.assertEqual(
+                snapshot.files,
+                (RuntimeSnapshotFile(path="README.md", status="M"),),
+            )
+
     def test_http_contract_hashes_path_context_and_forbids_docker_controls(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

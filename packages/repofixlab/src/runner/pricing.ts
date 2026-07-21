@@ -46,6 +46,31 @@ export const FROZEN_GLM_45_AIR_PRICING_SPEC = {
 
 export const FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256 = canonicalContractSha256(FROZEN_GLM_45_AIR_PRICING_SPEC);
 
+export const FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC = {
+	schema_version: "v1",
+	spec_type: "model_pricing",
+	provider: "deepseek",
+	model_id: "deepseek-v4-flash",
+	currency: "CNY",
+	prices_per_million_tokens: true,
+	snapshot_at: "2026-07-21",
+	source: "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+	tiers: [
+		{
+			id: "standard",
+			input_cny: 1,
+			output_cny: 2,
+			cache_read_cny: 0.02,
+			cache_write_cny: 0,
+		},
+	],
+	cache_write_note: "DeepSeek V4 Flash publishes cache-hit and cache-miss input prices; Pi records no cache-write usage for this provider.",
+} as const;
+
+export const FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256 = canonicalContractSha256(
+	FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC,
+);
+
 export interface PriceableUsage {
 	readonly input: number;
 	readonly output: number;
@@ -83,6 +108,18 @@ export function estimateGlm45AirCost(usage: PriceableUsage): EstimatedModelCost 
 			: usage.output >= FROZEN_GLM_45_AIR_PRICING_SPEC.tier_selection.short_output_upper_exclusive
 				? FROZEN_GLM_45_AIR_PRICING_SPEC.tiers[1]
 				: FROZEN_GLM_45_AIR_PRICING_SPEC.tiers[0];
+	const estimatedCostCnyNano =
+		usage.input * nanoPerToken(tier.input_cny) +
+		usage.output * nanoPerToken(tier.output_cny) +
+		usage.cacheRead * nanoPerToken(tier.cache_read_cny) +
+		usage.cacheWrite * nanoPerToken(tier.cache_write_cny);
+	if (!Number.isSafeInteger(estimatedCostCnyNano)) return { complete: false, estimatedCostCnyNano: null };
+	return { complete: true, estimatedCostCnyNano };
+}
+
+export function estimateDeepSeekV4FlashCost(usage: PriceableUsage): EstimatedModelCost {
+	if (!isCompleteUsage(usage)) return { complete: false, estimatedCostCnyNano: null };
+	const tier = FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC.tiers[0];
 	const estimatedCostCnyNano =
 		usage.input * nanoPerToken(tier.input_cny) +
 		usage.output * nanoPerToken(tier.output_cny) +

@@ -99,6 +99,83 @@ describe("parseCliArgs", () => {
 		});
 	});
 
+	it("parses the M3 split creation command", () => {
+		expect(
+			parseCliArgs([
+				"m3-split-create",
+				"--input",
+				"dataset/dataset-lock.json",
+				"--eligibility",
+				"m3/preflight-eligibility.json",
+				"--output",
+				"m3/split-manifest.json",
+			]),
+		).toEqual({
+			ok: true,
+			command: {
+				kind: "m3-split-create",
+				input: "dataset/dataset-lock.json",
+				eligibility: "m3/preflight-eligibility.json",
+				output: "m3/split-manifest.json",
+			},
+		});
+	});
+
+	it("parses M3 official-image resolution", () => {
+		expect(
+			parseCliArgs([
+				"m3-image-resolve",
+				"--input",
+				"m3/split-manifest.json",
+				"--eligibility",
+				"m3/preflight-eligibility.json",
+				"--operation-id",
+				"m3:official-images:20260719",
+				"--output",
+				"m3/official-image-source-lock.json",
+			]),
+		).toEqual({
+			ok: true,
+			command: {
+				kind: "m3-image-resolve",
+				input: "m3/split-manifest.json",
+				eligibility: "m3/preflight-eligibility.json",
+				operationId: "m3:official-images:20260719",
+				output: "m3/official-image-source-lock.json",
+			},
+		});
+	});
+
+	it("parses M6 batch creation and a bounded resume path", () => {
+		expect(parseCliArgs(["m6-batch-create", "--input", "m3/split-manifest.json", "--output", "m6/batch.json"])).toEqual({
+			ok: true,
+			command: { kind: "m6-batch-create", input: "m3/split-manifest.json", output: "m6/batch.json" },
+		});
+		expect(parseCliArgs(["m6-run", "--input", "m6/batch.json", "--resume", "m6/runs/.staging-run"])).toEqual({
+			ok: true,
+			command: { kind: "m6-run", input: "m6/batch.json", resume: "m6/runs/.staging-run" },
+		});
+	});
+
+	it("parses a sealed M6 continuation source with an optional staging resume", () => {
+		expect(
+			parseCliArgs([
+				"m6-continue",
+				"--source-report",
+				"m6-deepseek-flash-calibration/runs/m6-calibration-run-source/calibration-report.json",
+				"--resume",
+				"m6-deepseek-flash-continuation/runs/.staging-m6-continuation-run-source",
+			]),
+		).toEqual({
+			ok: true,
+			command: {
+				kind: "m6-continue",
+				sourceReport: "m6-deepseek-flash-calibration/runs/m6-calibration-run-source/calibration-report.json",
+				resume: "m6-deepseek-flash-continuation/runs/.staging-m6-continuation-run-source",
+			},
+		});
+	});
+
 	it("parses a minimal factory probe command", () => {
 		expect(
 			parseCliArgs([
@@ -223,6 +300,41 @@ describe("parseCliArgs", () => {
 		[["environment-lock-create", "--output", "lock.json"], "invalid_input"],
 		[["environment-lock-create", "--input", "manifest.json"], "invalid_output"],
 	] as const)("rejects invalid environment-lock-create args %j", (args, errorCode) => {
+		const result = parseCliArgs(args);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.code).toBe(errorCode);
+	});
+
+	it.each([
+		[["m3-split-create", "--output", "split.json"], "invalid_input"],
+		[["m3-split-create", "--input", "dataset-lock.json", "--output", "split.json"], "invalid_eligibility"],
+		[["m3-split-create", "--input", "dataset-lock.json", "--eligibility", "eligible.json"], "invalid_output"],
+		[
+			[
+				"m3-split-create",
+				"--input",
+				"dataset-lock.json",
+				"--eligibility",
+				"eligible.json",
+				"--output",
+				"split.json",
+				"--candidate",
+				"forbidden.json",
+			],
+			"conflicting_action",
+		],
+	] as const)("rejects invalid m3-split-create args %j", (args, errorCode) => {
+		const result = parseCliArgs(args);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.code).toBe(errorCode);
+	});
+
+	it.each([
+		[["m3-image-resolve", "--input", "split.json", "--output", "lock.json"], "invalid_eligibility"],
+		[["m3-image-resolve", "--input", "split.json", "--eligibility", "eligible.json", "--output", "lock.json"], "invalid_operation_id"],
+		[["m3-image-resolve", "--operation-id", "m3:lock", "--output", "lock.json"], "invalid_input"],
+		[["m3-image-resolve", "--input", "split.json", "--eligibility", "eligible.json", "--operation-id", "m3:lock"], "invalid_output"],
+	] as const)("rejects invalid m3-image-resolve args %j", (args, errorCode) => {
 		const result = parseCliArgs(args);
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error.code).toBe(errorCode);

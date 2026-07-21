@@ -33,6 +33,8 @@ function Show-Usage {
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 images lock-input")
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 images prepare-axios")
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m1 [--config configs/experiments/m1-axios.yaml]")
+	[Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m6 [--resume <m6 staging run>] [--secret-file <path>]")
+	[Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m6 continue --source-report <sealed calibration report> [--resume <continuation staging run>] [--secret-file <path>]")
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 --help")
 }
 
@@ -3812,6 +3814,44 @@ if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "run" -an
     $exitCode = Invoke-M1Run $repositoryRoot
     exit $exitCode
 }
+if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "run" -and $script:CliArguments[1] -ceq "m6") {
+	$m6Script = Join-Path $PSScriptRoot "repofixlab-m6.ps1"
+	$m6Arguments = @($script:CliArguments | Select-Object -Skip 2)
+	if ($m6Arguments.Count -ge 1 -and $m6Arguments[0] -ceq "continue") {
+		$continuationArguments = @($m6Arguments | Select-Object -Skip 1)
+		if ($continuationArguments.Count -eq 2 -and $continuationArguments[0] -ceq "--source-report") {
+			& $m6Script -ContinuationSourceReport $continuationArguments[1]
+		}
+		elseif ($continuationArguments.Count -eq 4 -and $continuationArguments[0] -ceq "--source-report" -and $continuationArguments[2] -ceq "--resume") {
+			& $m6Script -ContinuationSourceReport $continuationArguments[1] -ResumeRun $continuationArguments[3]
+		}
+		elseif ($continuationArguments.Count -eq 4 -and $continuationArguments[0] -ceq "--source-report" -and $continuationArguments[2] -ceq "--secret-file") {
+			& $m6Script -ContinuationSourceReport $continuationArguments[1] -SecretFile $continuationArguments[3]
+		}
+		elseif ($continuationArguments.Count -eq 6 -and $continuationArguments[0] -ceq "--source-report" -and $continuationArguments[2] -ceq "--resume" -and $continuationArguments[4] -ceq "--secret-file") {
+			& $m6Script -ContinuationSourceReport $continuationArguments[1] -ResumeRun $continuationArguments[3] -SecretFile $continuationArguments[5]
+		}
+		else {
+			Stop-ForUsage "run m6 continue requires --source-report <sealed calibration report>, with optional --resume and --secret-file"
+		}
+	}
+	elseif ($m6Arguments.Count -eq 0) {
+		& $m6Script
+	}
+	elseif ($m6Arguments.Count -eq 2 -and $m6Arguments[0] -ceq "--resume") {
+		& $m6Script -ResumeRun $m6Arguments[1]
+	}
+	elseif ($m6Arguments.Count -eq 2 -and $m6Arguments[0] -ceq "--secret-file") {
+		& $m6Script -SecretFile $m6Arguments[1]
+	}
+	elseif ($m6Arguments.Count -eq 4 -and $m6Arguments[0] -ceq "--resume" -and $m6Arguments[2] -ceq "--secret-file") {
+		& $m6Script -ResumeRun $m6Arguments[1] -SecretFile $m6Arguments[3]
+	}
+	else {
+		Stop-ForUsage "run m6 accepts --resume <m6 staging run>, --secret-file <path>, or continue --source-report <sealed calibration report>"
+	}
+	exit $LASTEXITCODE
+}
 if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "images" -and $script:CliArguments[1] -ceq "lock-input") {
     if ($script:CliArguments.Count -ne 2) {
         Stop-ForUsage "images lock-input does not accept options"
@@ -3852,7 +3892,7 @@ if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "dataset"
     exit $selfCheckResult.ExitCode
 }
 if ($script:CliArguments.Count -lt 2 -or $script:CliArguments[0] -cne "dataset" -or $script:CliArguments[1] -cne "prepare") {
-    Stop-ForUsage "Expected command: run m1, dataset prepare, dataset self-check, images lock-input, or images prepare-axios"
+    Stop-ForUsage "Expected command: run m1, run m6, dataset prepare, dataset self-check, images lock-input, or images prepare-axios"
 }
 
 $configRequest = "configs/dataset/v1.yaml"

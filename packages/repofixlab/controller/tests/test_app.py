@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -17,7 +18,10 @@ os.environ["REPOFIXLAB_SCHEMA_PATH"] = str(
 sys.path.insert(0, str(PACKAGE_ROOT / "controller" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from repofixlab_controller.app import BOOTSTRAP_HEALTH_VALIDATOR  # noqa: E402
+from repofixlab_controller.app import (  # noqa: E402
+    BOOTSTRAP_HEALTH_VALIDATOR,
+    _runtime_enabled_from_environment,
+)
 from repofixlab_controller.collector import (  # noqa: E402
     collect_bootstrap_health,
     unreachable_bootstrap_health,
@@ -35,6 +39,15 @@ class AppValidatorTests(unittest.TestCase):
         payload = unreachable_bootstrap_health(RuntimeError("unreachable")).to_dict()
 
         BOOTSTRAP_HEALTH_VALIDATOR.validate(payload)
+
+    def test_runtime_enablement_is_explicit_and_fail_closed(self) -> None:
+        with patch.dict(os.environ, {"REPOFIXLAB_RUNTIME_ENABLED": "false"}):
+            self.assertFalse(_runtime_enabled_from_environment())
+        with patch.dict(os.environ, {"REPOFIXLAB_RUNTIME_ENABLED": "true"}):
+            self.assertTrue(_runtime_enabled_from_environment())
+        with patch.dict(os.environ, {"REPOFIXLAB_RUNTIME_ENABLED": "disabled"}):
+            with self.assertRaisesRegex(RuntimeError, "must be exactly true or false"):
+                _runtime_enabled_from_environment()
 
 
 if __name__ == "__main__":

@@ -4,11 +4,11 @@
 	"additionalProperties": false,
 	"properties": {
 		"adapter_sha256": {
-			"const": "a8aaaffee376dbbc91e48682d49b334fa617eb1dd38156637cda5809f1d24857",
+			"pattern": "^[a-f0-9]{64}$",
 			"type": "string"
 		},
 		"base_commit": {
-			"const": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+			"pattern": "^[a-f0-9]{40}$",
 			"type": "string"
 		},
 		"harness_revision": {
@@ -16,7 +16,8 @@
 			"type": "string"
 		},
 		"instance_id": {
-			"const": "axios__axios-5892",
+			"maxLength": 200,
+			"minLength": 1,
 			"type": "string"
 		},
 		"official_source_lock_sha256": {

@@ -9,6 +9,7 @@ RepoFixLab 关注的不是“Agent 能否生成一段看起来合理的代码”
 - [M0 状态与完整事实](docs/status/repofixlab-m0-status.md)
 - [M0 可移植证据包](docs/evidence/repofixlab-m0/)
 - [系统设计规格](docs/designs/repofixlab.md)
+- [M6 校准可靠性与 Token 成本复盘](docs/designs/repofixlab-m6-calibration-postmortem.md)
 
 ## 为什么做 RepoFixLab
 

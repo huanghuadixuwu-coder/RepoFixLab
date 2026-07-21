@@ -79,6 +79,16 @@ export class ArtifactStore {
 		return new ArtifactStore(resolvedRoot, await realpath(resolvedRoot));
 	}
 
+	/** Opens an interrupted staging directory without altering existing evidence. */
+	static async openExisting(root: string): Promise<ArtifactStore> {
+		const resolvedRoot = resolve(root);
+		const rootStats = await lstat(resolvedRoot);
+		if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+			throw new Error(`Run artifact root is not a regular directory: ${resolvedRoot}`);
+		}
+		return new ArtifactStore(resolvedRoot, await realpath(resolvedRoot));
+	}
+
 	get rootPath(): string {
 		return this.root;
 	}

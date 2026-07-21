@@ -9,7 +9,6 @@ import {
 	verifyTaskRoleFactoryProbeRequest,
 } from "./task-role-factory-probe.ts";
 import {
-	AXIOS_SMOKE_INSTANCE_ID,
 	DATASET_PREPARER_SELF_CHECK_CONSTANTS,
 	type DatasetLock,
 	DatasetLockSchema,
@@ -212,34 +211,37 @@ export function verifyDatasetLockForTaskEnvironment(value: unknown): DatasetLock
 	return value;
 }
 
-function verifyOfficialImageSourceLockForEnvironment(value: unknown): OfficialImageSourceLock {
+function verifyOfficialImageSourceLockForEnvironment(value: unknown, instanceId: string): OfficialImageSourceLock {
 	if (!officialImageSourceLockValidator.Check(value)) {
 		throw new Error("Official image source lock does not satisfy the strict v1 schema");
 	}
-	const image = value.images[0];
+	const image = value.images.find((candidate) => candidate.image_key === instanceId);
 	if (image === undefined) {
-		throw new Error("Official image source lock is missing the Axios image");
+		throw new Error("Official image source lock is missing the candidate task image");
 	}
 	return verifyOfficialImageSourceLock(value, {
 		datasetRevision: value.dataset_revision,
 		harnessRevision: value.harness_revision,
-		imageKey: AXIOS_SMOKE_INSTANCE_ID,
-		requestedReference: image.requested_reference,
-		repositoryDigest: image.repository_digest,
-		localImageId: image.local_image_id,
-		platform: image.platform,
-		registryResponseSha256: image.registry_response_sha256,
+		images: value.images.map((candidate) => ({
+			imageKey: candidate.image_key,
+			requestedReference: candidate.requested_reference,
+			repositoryDigest: candidate.repository_digest,
+			localImageId: candidate.local_image_id,
+			platform: candidate.platform,
+			registryResponseSha256: candidate.registry_response_sha256,
+		})),
 	});
 }
 
 function verifyEvidence(input: TaskEnvironmentEvidenceInput): VerifiedTaskEnvironmentEvidence {
 	const datasetLockFileSha256 = taskEnvironmentEvidenceFileHash(input.dataset_lock_json);
 	const datasetLock = verifyDatasetLockForTaskEnvironment(parseEvidenceJson(input.dataset_lock_json, "Dataset lock"));
+	const candidate = verifyTaskEnvironmentCandidate(input.candidate);
 	const officialImageSourceLockFileSha256 = taskEnvironmentEvidenceFileHash(input.official_image_source_lock_json);
 	const officialImageSourceLock = verifyOfficialImageSourceLockForEnvironment(
 		parseEvidenceJson(input.official_image_source_lock_json, "Official image source lock"),
+		candidate.instance_id,
 	);
-	const candidate = verifyTaskEnvironmentCandidate(input.candidate);
 	const factoryProbeRequest = verifyTaskRoleFactoryProbeRequest(input.factory_probe_request);
 	const factoryProbeReport = verifyTaskRoleFactoryProbeReport(
 		input.factory_probe_report,
@@ -254,9 +256,9 @@ function verifyEvidence(input: TaskEnvironmentEvidenceInput): VerifiedTaskEnviro
 	if (harnessEquivalenceReport.status !== "pass") {
 		throw new Error("Task environment lock requires passing harness equivalence");
 	}
-	const officialImage = officialImageSourceLock.images[0];
+	const officialImage = officialImageSourceLock.images.find((image) => image.image_key === candidate.instance_id);
 	if (officialImage === undefined) {
-		throw new Error("Official image source lock is missing the Axios image");
+		throw new Error("Official image source lock is missing the candidate task image");
 	}
 	if (
 		datasetLock.dataset.revision !== officialImageSourceLock.dataset_revision ||
@@ -366,8 +368,22 @@ export function taskEnvironmentLockSealHash(value: TaskEnvironmentLock): string 
 	return canonicalHash(lockSemanticSubset(value));
 }
 
-export function taskEnvironmentLockId(sealSha256: string): string {
-	return `task-environment-v1-axios-5892-${sealSha256.slice(0, 16)}`;
+export function taskEnvironmentLockInstancePrefix(instanceId: string): string {
+	if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(instanceId)) {
+		throw new Error("Task environment lock instance ID is invalid");
+	}
+	const separator = instanceId.indexOf("__");
+	if (separator < 1 || separator === instanceId.length - 2) {
+		throw new Error("Task environment lock instance ID is not repository-qualified");
+	}
+	const repository = instanceId.slice(0, separator);
+	const task = instanceId.slice(separator + 2);
+	return task.startsWith(`${repository}-`) ? task : `${repository}-${task}`;
+}
+
+export function taskEnvironmentLockId(instanceId: string, sealSha256: string): string {
+	if (!/^[a-f0-9]{64}$/.test(sealSha256)) throw new Error("Task environment lock seal is invalid");
+	return `task-environment-v1-${taskEnvironmentLockInstancePrefix(instanceId)}-${sealSha256.slice(0, 16)}`;
 }
 
 /** Hash the complete serialized contract, including publication timestamps. */
@@ -380,9 +396,9 @@ function buildLock(evidence: VerifiedTaskEnvironmentEvidence, createdAt: string)
 		throw new Error("Task environment lock created_at must be a valid timestamp");
 	}
 	const candidate = evidence.candidate;
-	const officialImage = evidence.officialImageSourceLock.images[0];
+	const officialImage = evidence.officialImageSourceLock.images.find((image) => image.image_key === candidate.instance_id);
 	if (officialImage === undefined) {
-		throw new Error("Official image source lock is missing the Axios image");
+		throw new Error("Official image source lock is missing the candidate task image");
 	}
 	const evidenceHash = canonicalHash(verificationEvidenceFromVerified(evidence));
 	const draft: TaskEnvironmentLock = {
@@ -425,7 +441,7 @@ function buildLock(evidence: VerifiedTaskEnvironmentEvidence, createdAt: string)
 	const sealSha256 = taskEnvironmentLockSealHash(draft);
 	return {
 		...draft,
-		lock_id: taskEnvironmentLockId(sealSha256),
+		lock_id: taskEnvironmentLockId(candidate.instance_id, sealSha256),
 		seal_sha256: sealSha256,
 	};
 }

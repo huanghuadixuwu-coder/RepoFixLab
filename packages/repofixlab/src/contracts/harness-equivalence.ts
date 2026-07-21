@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { Compile } from "typebox/compile";
 import { stableStringify } from "./schema-generator.ts";
 import {
-	AXIOS_HARNESS_ADAPTER_SHA256,
 	AXIOS_SMOKE_TEST_COMMAND,
 	type HarnessEquivalenceReport,
 	HarnessEquivalenceReportSchema,
@@ -135,11 +134,8 @@ export function verifyHarnessProbeReport(value: unknown): HarnessProbeReport {
 	if (value.harness_mode === "pristine" && (value.adapter_sha256 !== null || value.official_report_sha256 === null)) {
 		throw new Error("Pristine harness evidence must bind an official report and no adapter");
 	}
-	if (
-		value.harness_mode === "adapted" &&
-		(value.adapter_sha256 !== AXIOS_HARNESS_ADAPTER_SHA256 || value.official_report_sha256 !== null)
-	) {
-		throw new Error("Adapted harness evidence must bind only the frozen adapter");
+	if (value.harness_mode === "adapted" && (value.adapter_sha256 === null || value.official_report_sha256 !== null)) {
+		throw new Error("Adapted harness evidence must bind one adapter and no official report");
 	}
 	for (const values of [
 		value.collected_tests,
@@ -226,7 +222,12 @@ export function createHarnessEquivalenceReport(
 	if (pristine.size !== PROBE_ORDER.length || adapted.size !== PROBE_ORDER.length) {
 		throw new Error("Harness equivalence requires exactly one report for each of the four probes and modes");
 	}
-	const pristineRuntimeLockSha256 = pristine.get("base")!.pristine_runtime_lock_sha256;
+	const first = pristine.get("base")!;
+	const pristineRuntimeLockSha256 = first.pristine_runtime_lock_sha256;
+	const adapterSha256 = adapted.get("base")!.adapter_sha256;
+	if (adapterSha256 === null) {
+		throw new Error("Harness equivalence adapted evidence is missing its adapter binding");
+	}
 	const probes = PROBE_ORDER.map((probeKind) => {
 		const pristineReport = pristine.get(probeKind);
 		const adaptedReport = adapted.get(probeKind);
@@ -234,10 +235,15 @@ export function createHarnessEquivalenceReport(
 			throw new Error(`Harness equivalence is missing ${probeKind} evidence`);
 		}
 		if (
+			pristineReport.instance_id !== first.instance_id ||
+			adaptedReport.instance_id !== first.instance_id ||
+			pristineReport.base_commit !== first.base_commit ||
+			adaptedReport.base_commit !== first.base_commit ||
 			pristineReport.official_source_lock_sha256 !== adaptedReport.official_source_lock_sha256 ||
 			pristineReport.harness_revision !== adaptedReport.harness_revision ||
 			pristineReport.pristine_runtime_lock_sha256 !== pristineRuntimeLockSha256 ||
-			adaptedReport.pristine_runtime_lock_sha256 !== pristineRuntimeLockSha256
+			adaptedReport.pristine_runtime_lock_sha256 !== pristineRuntimeLockSha256 ||
+			adaptedReport.adapter_sha256 !== adapterSha256
 		) {
 			throw new Error(`Harness equivalence ${probeKind} evidence has mismatched runtime or upstream bindings`);
 		}
@@ -251,7 +257,6 @@ export function createHarnessEquivalenceReport(
 			mismatched_fields: mismatchedFields,
 		};
 	});
-	const first = pristine.get("base")!;
 	const unsignedReport = {
 		schema_version: "v1" as const,
 		report_type: "harness_equivalence" as const,
@@ -260,7 +265,7 @@ export function createHarnessEquivalenceReport(
 		harness_revision: first.harness_revision,
 		official_source_lock_sha256: first.official_source_lock_sha256,
 		pristine_runtime_lock_sha256: pristineRuntimeLockSha256,
-		adapter_sha256: AXIOS_HARNESS_ADAPTER_SHA256,
+		adapter_sha256: adapterSha256,
 		status: probes.every((probe) => probe.equivalent && probe.expected_outcome)
 			? ("pass" as const)
 			: ("fail" as const),

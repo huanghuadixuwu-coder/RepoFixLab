@@ -1,0 +1,45 @@
+{
+	"adapter_sha256": "fd09946d8995076ba05945492d6118d68a895927d7c68f1b60c4dcb58c227263",
+	"candidate_id": "task-environment-candidate-v1-preactjs-preact-3567-9011312e4e7f38e21e12a62a7ecf00bc7ddb9d3d38dc1820190c92b5c2f84a4b",
+	"candidate_sha256": "795ddd8fd6f256ed3773d3fcdafb53e44e3d5d5aa8d2375ba04f62c7e3af3ff3",
+	"created_at": "2026-07-20T00:52:26.581Z",
+	"dataset_lock_id": "dataset-v1-g-20260718-135934-066a8f5b6f6b-e451237925674fc6",
+	"evaluator_image": {
+		"local_image_id": "sha256:cd721c4a2920405a0ce2875e3a4cb311299bb7dda677cb38975a2f0dff6bf5e6",
+		"platform": "linux/amd64",
+		"provenance_sha256": "e8a80b38a4ebb27142ece357cf9454bb09c9cfb1ddd1d77299e514e39e933ade"
+	},
+	"filesystem_profile_sha256": "97cb39573a3b5efc89610224ebcc78029881bbaca1718c7e5c624d35678bc9c3",
+	"instance_id": "preactjs__preact-3567",
+	"lock_id": "task-environment-v1-preactjs-preact-3567-13da0ecac0eea0d0",
+	"lock_type": "task_environment",
+	"official_image_source_lock_id": "official-images-v1-set-26-140ebe01ca57c662",
+	"resource_profile": {
+		"cpu_count": 4,
+		"memory_bytes": 8589934592,
+		"network_mode": "none",
+		"pids_limit": 512,
+		"read_only_root_filesystem": true
+	},
+	"sanitizer_sha256": "3d1cbbea005c97f65b0abdedfc5d1fbb1fcd5386eff8270c5036626f56466695",
+	"schema_version": "v1",
+	"seal_sha256": "13da0ecac0eea0d072bb984757d7b8cde231547cc51da14a321f3464af1df4e9",
+	"source_image": {
+		"local_image_id": "sha256:a84c07985af6db1689d27b2f3e988a80121e8317aed6708a76644f6aeb4214b1",
+		"platform": "linux/amd64",
+		"repository_digest": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3567@sha256:a84c07985af6db1689d27b2f3e988a80121e8317aed6708a76644f6aeb4214b1"
+	},
+	"verification": {
+		"completed_at": "2026-07-20T00:52:26.581Z",
+		"equivalence_passed": true,
+		"evidence_sha256": "ee723730db16ade9d44af943b5974efc150df1afb0d2ea4abf702fa9012c207f",
+		"factory_probe_passed": true,
+		"factory_probe_report_sha256": "f1a0c7207ce2dd35d8dcf9b311e02c4809d68eeb72fd087e8f259d201f07a0e8",
+		"security_profile_passed": true
+	},
+	"worker_image": {
+		"local_image_id": "sha256:85d79081439708918d9c191ab710ddecb1fe16d521fc2c20bc4590ead4d67a2e",
+		"platform": "linux/amd64",
+		"provenance_sha256": "74d05b2cfe4dce4dd8b4862e67cc80d1188ecd5c51540450b1cf3cb643453464"
+	}
+}
