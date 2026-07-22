@@ -4,10 +4,14 @@ RepoFixLab is the containerized code-repair agent and evaluation platform descri
 [`docs/designs/repofixlab.md`](../../docs/designs/repofixlab.md). This private workspace package owns the Node
 orchestrator, versioned cross-language contracts, experiment state, metrics, and static reports.
 
-The current implementation milestone is the M1 vertical slice: one frozen Axios SWE-bench task runs through the
-Pi general-agent session, Controller-managed container lifecycle, immutable patch capture, independent evaluator,
-CNY cost accounting, and offline static report. The bootstrap and smoke doctors plus the sealed task-environment
-publication path remain admission prerequisites.
+The implementation now includes M0–M8: the M1 vertical slice, the RepoFix FSM and ablations, the frozen 26-task
+SWE-bench JS/TS evaluation pool, Docker-isolated formal execution, M7 immutable results, and M8 offline analysis.
+M7 retained every terminal observation: 74 frozen logical runs, 71 independent official evaluations, 48 official
+resolved results, and three Agent terminal failures without final snapshots. M8 treats all 74 runs as the primary
+denominator, preserves the 64-turn and 128-turn strata, and refuses to invent CNY when frozen pricing evidence is
+incomplete. See [`docs/designs/repofixlab-m8-analysis.md`](../../docs/designs/repofixlab-m8-analysis.md) for the
+analysis contract and [`docs/guides/repofixlab-m8-reproduction.md`](../../docs/guides/repofixlab-m8-reproduction.md)
+for the no-Provider reconstruction path.
 TypeBox definitions under `src/contracts` are the source of truth; generated JSON Schema documents under
 `schemas/v1` are enforced by both the Node orchestrator and the trusted Python Controller.
 
@@ -140,9 +144,21 @@ Immutable run evidence is written beneath `artifacts/m1-axios/runs/<run-id>/`; o
 `report.html` directly in a browser.
 
 M1 validates the vertical integration on one real Axios issue, `axios__axios-5892`, with one `pi-general`
-replicate. It does not establish comparative agent quality or statistical generalization. The complete RepoFix
-state machine, Pi baseline comparison and ablations, repeated trials, and formal evaluation over the frozen
-26-task preflight-eligible corpus remain later milestones. The original 43-task candidate pool and all rejected-task evidence remain sealed for audit.
+replicate. It does not establish comparative agent quality or statistical generalization. The original 43-task
+candidate pool and all rejected-task evidence remain sealed for audit.
+
+## M8 offline analysis
+
+M8 is a no-Provider, no-rerun analysis stage. It consumes only the frozen M7 continuation report, passing security
+audit, bound official evaluator outputs, and settled token ledgers for the three terminal Agent failures:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repofixlab-m8.ps1
+```
+
+It writes immutable JSON, Markdown, and HTML under `artifacts/m8/report/`. The result must report the full 74-run
+intention-to-treat denominator, separately show the evaluated-only rate, stratify all comparisons by max model turns,
+and preserve any unsupported performance hypothesis as a negative result rather than hiding it.
 
 ## Contract workflow
 

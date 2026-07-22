@@ -53,6 +53,8 @@ import {
 import { createM6DevCalibrationBatch, verifyM6DevCalibrationBatch } from "../m6/calibration-cohort.ts";
 import { createDefaultM6DevCalibrationDependencies, runM6DevCalibration } from "../m6/dev-calibration-runner.ts";
 import { runM6DevCalibrationContinuation } from "../m6/dev-calibration-continuation.ts";
+import { runM7Batch } from "../m7/batch-runner.ts";
+import type { BatchExecutionSummary } from "../runner/batch-runner.ts";
 
 const DEFAULT_ARTIFACTS_ROOT = "/artifacts";
 const DEFAULT_CONTROLLER_URL = "http://controller:8000";
@@ -165,7 +167,8 @@ const RUN_HELP = `Usage:
 The config may be beneath REPOFIX_ARTIFACTS_PATH or one of the versioned
 configs/experiments files in the RepoFixLab package. Dry-run validates the
 matrix and reports its exact run and admission-cap totals without execution.
-Non-dry-run executes the admitted M1 lifecycle and prints its terminal summary.
+Non-dry-run executes only a lifecycle explicitly marked available by its frozen
+protocol, then prints its terminal summary.
 `;
 
 export interface CliRuntime {
@@ -194,6 +197,7 @@ export interface CliRuntime {
 		artifactsRoot: string,
 		controllerUrl: string,
 	) => Promise<M1RunSummary>;
+	readonly runM7Experiment: (plan: ExperimentPlan, artifactsRoot: string, controllerUrl: string) => Promise<BatchExecutionSummary>;
 	readonly resolveInputPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
 	readonly resolveRunConfigPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
 	readonly resolveOutputPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
@@ -496,6 +500,13 @@ function defaultRuntime(): CliRuntime {
 				{ artifactsRoot: runArtifactsRoot },
 				createDefaultM1RunnerDependencies(runControllerUrl),
 			),
+		runM7Experiment: async (plan, runArtifactsRoot, runControllerUrl) => {
+			const cohortsPath = await resolveArtifactInputPath(
+				runArtifactsRoot,
+				"m6-freeze/20260720T220800Z-26-task-v1/cohorts.json",
+			);
+			return runM7Batch(plan, JSON.parse(await readFile(cohortsPath, "utf8")), runArtifactsRoot, runControllerUrl);
+		},
 		resolveInputPath: resolveArtifactInputPath,
 		resolveRunConfigPath,
 		resolveOutputPath: resolveArtifactOutputPath,
@@ -527,6 +538,11 @@ export async function runCli(args: readonly string[], runtime: CliRuntime = defa
 		if (parsed.command.dryRun) {
 			runtime.stdout(stableStringify(createExperimentDryRunSummary(plan)));
 			return 0;
+		}
+		if (plan.runtime_status === "m7_formal_available") {
+			const summary = await runtime.runM7Experiment(plan, runtime.artifactsRoot, runtime.controllerUrl);
+			runtime.stdout(stableStringify(summary));
+			return summary.failed_run_ids.length === 0 ? 0 : 1;
 		}
 		if (plan.runtime_status !== "m1_single_run_available") {
 			runtime.stderr(`Run lifecycle is unavailable for experiment ${plan.experiment_id}; refusing execution.\n`);

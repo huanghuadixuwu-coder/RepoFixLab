@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { type ExperimentPlan } from "../contracts/experiment-plan.ts";
 import { canonicalContractSha256, verifyRunResult, type RunResult } from "../contracts/run-contracts.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
+import type { RunMetricEvidence } from "../metrics/experiment-metrics.ts";
 import { publishExperimentReport } from "../report/experiment-report.ts";
 import {
 	BatchStateStore,
@@ -12,6 +13,7 @@ import {
 	type BatchRunState,
 } from "./batch-state.ts";
 import { GlobalBudgetLedger, GlobalBudgetWriterLease } from "./global-budget-ledger.ts";
+import { KnownProviderUsageBatchFailure, PreProviderBatchFailure } from "./pre-provider-failure.ts";
 
 export interface BatchRunExecutor {
 	execute(
@@ -32,6 +34,11 @@ export interface BatchBudgetAdmission {
 
 export interface BatchExecutionOptions {
 	readonly budget_admission?: BatchBudgetAdmission;
+	readonly report_evidence_loader?: (
+		root: string,
+		specs: readonly BatchRunSpec[],
+		results: Readonly<Record<string, RunResult>>,
+	) => Promise<Readonly<Record<string, RunMetricEvidence>>>;
 }
 
 export interface BatchRunAssignment {
@@ -282,7 +289,9 @@ export async function executeBatch(
 				completed.push(state.run_id);
 			} catch (error) {
 				if (ledger !== null && reservation !== null) {
-					await ledger.chargeUnverified(reservation);
+					if (error instanceof PreProviderBatchFailure) await ledger.settle(reservation, 0);
+					else if (error instanceof KnownProviderUsageBatchFailure) await ledger.settle(reservation, error.accountedTokens);
+					else await ledger.chargeUnverified(reservation);
 					reservation = null;
 				}
 				const live = store.values.find((value) => value.run_id === state.run_id);
@@ -297,7 +306,10 @@ export async function executeBatch(
 				failed.push(state.run_id);
 			}
 		}
-		const report = await publishExperimentReport(root, specs, resultByRun);
+		const reportEvidence: Readonly<Record<string, RunMetricEvidence>> = options.report_evidence_loader === undefined
+			? {}
+			: await options.report_evidence_loader(root, specs, resultByRun);
+		const report = await publishExperimentReport(root, specs, resultByRun, reportEvidence);
 		return {
 			schema_version: "v1",
 			summary_type: "m5_batch_execution",

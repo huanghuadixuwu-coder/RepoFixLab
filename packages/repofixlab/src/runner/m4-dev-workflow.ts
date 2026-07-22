@@ -88,6 +88,17 @@ export interface M4DevWorkflowOptions {
 	readonly configId: RepoFixConfigId;
 	readonly accountedAdmissionCapTokens?: number;
 	readonly tokenAdmissionEstimator?: TokenAdmissionEstimatorSpec;
+	/** Formal continuations may raise this uniformly for their own frozen cohort. */
+	readonly maxModelTurns?: number;
+	/** M7 supplies its immutable logical identities instead of allocating Dev-only IDs. */
+	readonly runId?: string;
+	readonly attemptId?: string;
+	/**
+	 * Retain a policy-passing final snapshot for the caller to evaluate in a
+	 * fresh Evaluator. This is deliberately opt-in: the Dev workflow continues
+	 * to abort its worker by default.
+	 */
+	readonly retainWorkerForFormalEvaluation?: boolean;
 }
 
 export interface M4DevWorkflowSummary {
@@ -101,6 +112,8 @@ export interface M4DevWorkflowSummary {
 	readonly run_directory: string;
 	readonly p0_patch_sha256: string | null;
 	readonly p1_patch_sha256: string | null;
+	readonly final_snapshot_id: string | null;
+	readonly worker_lease_id: string | null;
 	readonly controlled_verification_sha256: string | null;
 	/** Present only for the RepoFix configuration; pi-general has no RepoFix context controller. */
 	readonly repofix_context_budget?: RepoToolOutputBudgetSnapshot;
@@ -182,6 +195,10 @@ function assertCap(value: number): void {
 	}
 }
 
+function assertModelTurnLimit(value: number): void {
+	if (!Number.isSafeInteger(value) || value < 1) throw new Error("M4 Dev max model turns must be a positive safe integer");
+}
+
 async function writeStageEvidence(
 	store: ArtifactStore,
 	completion: StageCompletion,
@@ -218,9 +235,11 @@ export async function runM4DevWorkflow(
 ): Promise<M4DevWorkflowSummary> {
 	const admissionCap = options.accountedAdmissionCapTokens ?? DEFAULT_PER_RUN_ADMISSION_CAP;
 	assertCap(admissionCap);
+	const maxModelTurns = options.maxModelTurns ?? FROZEN_MAX_MODEL_TURNS;
+	assertModelTurnLimit(maxModelTurns);
 	getRepoFixWorkflowConfig(options.configId);
-	const runId = `m4-dev-${dependencies.randomId()}`;
-	const attemptId = `attempt-${dependencies.randomId()}`;
+	const runId = options.runId ?? `m4-dev-${dependencies.randomId()}`;
+	const attemptId = options.attemptId ?? `attempt-${dependencies.randomId()}`;
 	let environment: Awaited<ReturnType<TaskEnvironmentLockSource["load"]>>;
 	let publicTask: Awaited<ReturnType<PublicTaskSource["load"]>>;
 	try {
@@ -240,6 +259,7 @@ export async function runM4DevWorkflow(
 	let repoFixSession: RepoFixSessionResult | null = null;
 	let p0PatchSha256: string | null = null;
 	let p1PatchSha256: string | null = null;
+	let finalSnapshotId: string | null = null;
 	let controlledVerificationSha256: string | null = null;
 	let terminalStatus: "completed" | "failed" = "failed";
 	try {
@@ -319,7 +339,7 @@ export async function runM4DevWorkflow(
 				installSupervisor(piSession.session);
 				installRunAdmissionGate(piSession.session, {
 					accountedTokens: null,
-					modelTurns: FROZEN_MAX_MODEL_TURNS,
+					modelTurns: maxModelTurns,
 					toolCalls: FROZEN_MAX_TOOL_CALLS,
 				});
 				await piSession.session.prompt(publicTask.task.problem_statement);
@@ -347,7 +367,7 @@ export async function runM4DevWorkflow(
 				installSupervisor(repoFixSession.session);
 				installRunAdmissionGate(repoFixSession.session, {
 					accountedTokens: null,
-					modelTurns: FROZEN_MAX_MODEL_TURNS,
+					modelTurns: maxModelTurns,
 					toolCalls: FROZEN_MAX_TOOL_CALLS,
 				});
 				await runRepoFixWorkflow(repoFixSession, publicTask.task.problem_statement, {
@@ -371,7 +391,10 @@ export async function runM4DevWorkflow(
 							),
 						);
 						if (checkpoint === "P0") p0PatchSha256 = snapshot.patch_sha256;
-						else p1PatchSha256 = snapshot.patch_sha256;
+						else {
+							p1PatchSha256 = snapshot.patch_sha256;
+							finalSnapshotId = snapshot.snapshot_id;
+						}
 						return { patch_sha256: snapshot.patch_sha256 };
 					},
 					controlledVerify: async (plan) => {
@@ -399,6 +422,19 @@ export async function runM4DevWorkflow(
 						return feedback;
 					},
 				});
+			}
+			if (options.retainWorkerForFormalEvaluation && finalSnapshotId === null) {
+				const activeLeaseId = leaseId;
+				if (activeLeaseId === null) throw new Error("M4 Dev worker lease disappeared before final snapshot");
+				const snapshot = await persistSnapshot(
+					store,
+					runId,
+					attemptId,
+					"P1",
+					await dependencies.controller.snapshot(attemptId, `${attemptId}:final-snapshot`, activeLeaseId),
+				);
+				p1PatchSha256 = snapshot.patch_sha256;
+				finalSnapshotId = snapshot.snapshot_id;
 			}
 		} finally {
 			ledgerSink.close();
@@ -443,7 +479,12 @@ export async function runM4DevWorkflow(
 		piSession?.session.dispose();
 		repoFixSession?.session.dispose();
 		if (sessionDirectory !== null) await rm(sessionDirectory, { recursive: true, force: true }).catch(() => undefined);
-		if (leaseId !== null) {
+		const retainForFormalEvaluation =
+			options.retainWorkerForFormalEvaluation === true &&
+			terminalStatus === "completed" &&
+			leaseId !== null &&
+			finalSnapshotId !== null;
+		if (leaseId !== null && !retainForFormalEvaluation) {
 			// M4 is a Dev-only workflow: P0/P1 evidence is already persisted locally
 			// and no official evaluation follows. destroy() intentionally retains a
 			// policy-passing snapshot for M5 evaluation, so abort() is the correct
@@ -454,6 +495,7 @@ export async function runM4DevWorkflow(
 				workerReleased = false;
 			}
 		}
+		if (retainForFormalEvaluation) workerReleased = true;
 	}
 	if (!workerReleased) terminalStatus = "failed";
 	const summary: M4DevWorkflowSummary = {
@@ -467,6 +509,8 @@ export async function runM4DevWorkflow(
 		run_directory: runDirectory,
 		p0_patch_sha256: p0PatchSha256,
 		p1_patch_sha256: p1PatchSha256,
+		final_snapshot_id: finalSnapshotId,
+		worker_lease_id: options.retainWorkerForFormalEvaluation === true && finalSnapshotId !== null ? leaseId : null,
 		controlled_verification_sha256: controlledVerificationSha256,
 		...(repoFixSession === null ? {} : { repofix_context_budget: repoFixSession.repoToolOutputBudget.snapshot }),
 	};

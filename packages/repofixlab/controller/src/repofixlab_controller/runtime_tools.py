@@ -36,6 +36,9 @@ SNAPSHOT_LIMIT_BYTES = 2 * 1024 * 1024
 SNAPSHOT_FILE_LIMIT = 100
 SNAPSHOT_PATH_LIMIT_BYTES = 512
 _GIT_OBJECT_ID = re.compile(r"^[a-f0-9]{40}$")
+_SHELL_INTERPRETERS = frozenset(
+    {"sh", "bash", "dash", "zsh", "ksh", "fish", "cmd", "powershell", "pwsh"}
+)
 
 
 class RuntimeToolError(RuntimeError):
@@ -380,6 +383,8 @@ class RepositoryToolExecutor:
             or executable.startswith("-")
         ):
             raise RuntimeToolError("repo_exec executable must use PATH lookup")
+        if executable.casefold() in _SHELL_INTERPRETERS:
+            raise RuntimeToolError("repo_exec shell interpreters are prohibited")
         timeout_value = arguments.get("timeout_ms", TOOL_TIMEOUT_MILLISECONDS)
         if (
             isinstance(timeout_value, bool)

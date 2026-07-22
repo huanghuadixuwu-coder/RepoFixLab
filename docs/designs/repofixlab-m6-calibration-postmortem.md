@@ -252,3 +252,78 @@ P0–P3 不应消耗模型额度。P4 只能在用户确认后执行。P5 不能
 - [M6 校准 runner 测试](../../packages/repofixlab/test/m6-dev-calibration-runner.test.ts)
 
 原始运行证据位于本地 `artifacts/m6-calibration/`、嵌套的 `m4-dev/runs/` 和各运行目录的 `token-ledger.jsonl`、`trajectory.json` 或 `failed-trajectory.json`。这些证据不提交到 Git；正式报告必须以冻结的哈希和相对路径引用它们。
+
+## 9. M7–M9 追加发现：工作流质量、消融与安全边界
+
+本节记录 M7、M8、M9 冻结结果带来的后续问题和拟议修复。它不修改 M6 的历史口径，也不把未实施方案表述为已验证收益。
+
+### 9.1 当前结果的正确口径
+
+M9 的 26 任务汇总中，`pi-general` 首次解决 21/26，`repofix-full` 首次解决 16/26；一次受控恢复后 RepoFix 为 18/26。该汇总混入 Dev、Validation 和 Test，且复用结果包含 64 与 128 模型轮次，因此不能替代冻结 17 个 Test 任务上的固定预算主结论。
+
+按冻结 Test 清单重算，首次结果为 Pi 13/17、RepoFix 8/17；一次受控恢复后 RepoFix 为 10/17。五个 Pi-only 首次胜出任务中，`preactjs__preact-2757`、`preactjs__preact-2896`、`preactjs__preact-3739` 在 P0 后因受控验证的 Controller 请求被拒绝而没有最终快照。这是工作流和基础设施失败，不是补丁语义质量的测量结果。
+
+### 9.2 消融没有证明 LOCALIZE 或验证反馈有效
+
+两项消融各覆盖 8 个与主实验重叠的任务：
+
+| 对照 | 全部 8 个重叠任务 | 同任务且同模型轮次的可配对任务 | 当前解释 |
+| --- | --- | --- | --- |
+| `repofix-no-localize` 对 `repofix-full` | 两者均为 6/8 | 5 对中均为 4/5，零个不一致结果 | 未观察到 LOCALIZE 的收益，不能证明它无效 |
+| `repofix-no-verify-feedback` 对 `repofix-full` | 两者均为 6/8 | 5 对中均为 4/5，零个不一致结果 | 未观察到验证反馈的收益，不能证明它无效 |
+
+三个任务在消融和完整流程之间分别保留为 64 轮或继续为 128 轮，不能进入固定预算因果比较。样本也不足以检测小到中等的效果。当前实验只支持“这两个额外阶段尚未展示可测增益”，不支持“它们没有价值”。
+
+### 9.3 安全证据的准确解释
+
+M8 审计记录 148 次 Controller 拒绝、42 个审计定义的 sandbox-escape 输入、零个未拦截的 sandbox-escape 输入，以及零个补丁策略违反。这里的计数不是对模型意图的判断：
+
+- **148 次被拦截操作**是仓库工具返回 `runtime request was rejected` 或 Controller HTTP 400 的总数。当前制品没有按底层规则保存可加总的细分，因此不能宣称 148 次都属于同一种风险，或都属于恶意操作。
+- Controller 会拒绝非白名单工具、字段缺失/多余或类型错误、绝对路径、`..`、反斜杠、符号链接穿越、禁止修改 `test`/`tests`、绝对或带路径的可执行文件、shell 解释器，以及超出固定超时上限的执行请求。这些规则分别保护固定工作树、私有测试、无 shell 执行边界和资源上限；并不代表每一条规则都在本批 148 次中被触发。
+- **42 个 sandbox-escape 输入**是审计的静态分类：读取/编辑使用非法仓库路径，列举/搜索指定非法路径，或 `repo_exec` 使用绝对路径、带 `/` 或 `\\` 的可执行文件。它包括可能无恶意的错误用法，例如尝试直接执行 `./node_modules/.bin/karma`；其含义是“请求试图绕过固定工作树或 PATH-only 边界”，不是“42 次确认的攻击”。审计确认这些请求全部返回错误，未实际越界执行。
+
+结构化阶段产物与安全边界是不同层次的控制。`stage_complete`、阶段 schema 和工具白名单使流程可审计、可复现，并减少模型能够提出的操作集合；真正使安全边界可强制的是 Controller 的路径、编辑、命令、超时和快照策略，以及隔离的 Docker 挂载。即使状态机或提示词失效，Controller 仍必须拒绝越界请求。
+
+### 9.4 问题四：受控验证把可恢复错误升级为 attempt 终止
+
+当前流程在 IMPLEMENT 后捕获 P0，再由 Runner 直接执行 PLAN 的 `targeted_test_argv`。该 argv 仅被校验为非空字符串数组，没有在执行前验证可执行文件、仓库脚本、工作目录或写路径。Controller 抛出的 `RuntimeToolError` 会向上传播，阻止 REFINE、SELF_REVIEW、P1 快照和官方评测。
+
+这与受控验证的目的相反：验证本应产生“可用于下一次修改的证据”，现在却成为单点终止器。`karma` 不在 PATH、构建产物目录不可写等环境问题，被错误地计入 Agent 没有产出最终修复。
+
+#### 拟议修复：受控自适应验证循环
+
+```text
+UNDERSTAND -> LOCALIZE -> PLAN -> verification-plan preflight
+                                      |
+                                      v
+                         IMPLEMENT <-> targeted verification
+                                      |
+                                      v
+                           REVIEW -> P1 -> official evaluator
+```
+
+1. PLAN 选择版本化 `VerificationPlan`，而不是任意 argv。候选命令从实际 package scripts、已解析的本地二进制和任务环境生成，并记录命令 ID、argv、工作目录、可写缓存目录和超时。
+2. preflight 在 P0 前检查命令是否可启动、依赖是否存在、所需输出目录是否可写；这一步不消耗模型轮次。
+3. 验证始终返回结构化结果：`passed`、`test_failed`、`command_invalid`、`environment_failure` 或 `timed_out`。后四类是模型可见的反馈，不得因 Controller 400 直接终止 attempt。
+4. IMPLEMENT/REFINE 允许有限次数、仅限已批准 `VerificationPlan` 的目标验证；保留 PATH-only、无 shell、超时、网络和写路径限制。这样增加修复迭代能力，而不退回无限制的自由 Agent。
+5. 即使验证环境最终不可用，也必须保存 P0/P1 快照并进入官方评测；环境失败单列报告，不能以“无最终快照”覆盖候选补丁。
+
+### 9.5 问题五：阶段约束、提示词与消融设计混杂
+
+RepoFix 在 PLAN 和 IMPLEMENT 阶段禁止 `repo_exec`，只在 P0 后执行一次外部验证；Pi 可以在同一会话中持续“搜索、修改、测试、查看 diff、再修改”。同时，Pi 基线的系统提示词包含检查 package scripts、不要猜测命令、诊断失败和检查 diff 等工程指导，而 RepoFix 提示词主要强调协议约束。因此当前差距不能只归因于“自由工作流”和“结构化工作流”的差异。
+
+#### 拟议修复：公平工作流比较与可验证增益
+
+1. 把相同的工程修复指导放入 Pi 与 RepoFix 的共享提示词；唯一实验变量是工作流、工具阶段门和结构化产物。
+2. 在 Dev 上冻结 `VerificationPlan`、错误分类和单任务回归后，才重新运行 Test。
+3. 重新注册主对照：仅限冻结 17 个 Test、同一模型、同一 128 轮上限、同一任务环境和相同首次运行规则。
+4. 重新注册两项消融：每项与完整 RepoFix 使用相同任务、相同模型轮次、相同提示词和相同命令计划；报告配对四格、P0 到 P1 的变化、验证结果被采纳率、命令预检失败率和基础设施错误率。
+5. 保留原始官方 report 与 test log，而不只保留哈希和归一化摘要；规格、执行计划、协议和实际模型/预算必须收敛为一个版本化执行合同。
+
+### 9.6 追加验收标准
+
+- Controller 拒绝必须记录机器可聚合的 `reason_code`，例如 `invalid_path`、`test_edit_prohibited`、`shell_prohibited`、`argv_not_found` 或 `environment_not_writable`；报告不得只给一个总数。
+- 任何 `command_invalid` 或 `environment_failure` 都不丢弃 P0/P1 候选补丁，并在报告中与语义修复失败分开。
+- 受控验证的命令预检、结构化反馈和有限循环必须有无需真实 provider 的回归测试。
+- 主实验和消融只有在相同任务、模型、轮次、提示词和任务环境下才可作因果比较。
+- 安全审计持续要求零个未拦截 escape 输入、零个补丁策略违反；安全控制的成功不应被表述为修复质量提升的证据。

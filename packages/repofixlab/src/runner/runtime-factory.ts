@@ -31,7 +31,11 @@ export const FROZEN_MODEL_ID = "glm-4.5-air";
 export const FROZEN_MODEL_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
 export const FROZEN_TEMPERATURE = 0.2;
 export const FROZEN_PROVIDER_REQUEST_TIMEOUT_MS = 600_000;
-export const RUN_ADMISSION_BUDGET_ERROR = "repofixlab_accounted_admission_cap_reached";
+export const RUN_ADMISSION_TOKEN_BUDGET_ERROR = "repofixlab_accounted_admission_cap_reached";
+export const RUN_ADMISSION_MODEL_TURN_LIMIT_ERROR = "repofixlab_model_turn_limit_reached";
+export const RUN_ADMISSION_TOOL_CALL_LIMIT_ERROR = "repofixlab_tool_call_limit_reached";
+/** Legacy name retained for callers that specifically classify Token-cap rejections. */
+export const RUN_ADMISSION_BUDGET_ERROR = RUN_ADMISSION_TOKEN_BUDGET_ERROR;
 
 export const FROZEN_MODEL_SPEC = {
 	provider: FROZEN_MODEL_PROVIDER,
@@ -310,6 +314,12 @@ export function installRunAdmissionGate(
 		) {
 			return stream(model, context, streamOptions);
 		}
+		const errorMessage =
+			limits.accountedTokens !== null && accountedTokens >= limits.accountedTokens
+				? RUN_ADMISSION_TOKEN_BUDGET_ERROR
+				: modelTurns >= limits.modelTurns
+					? RUN_ADMISSION_MODEL_TURN_LIMIT_ERROR
+					: RUN_ADMISSION_TOOL_CALL_LIMIT_ERROR;
 		const error = {
 			role: "assistant",
 			content: [],
@@ -325,7 +335,7 @@ export function installRunAdmissionGate(
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "error",
-			errorMessage: RUN_ADMISSION_BUDGET_ERROR,
+			errorMessage,
 			timestamp: Date.now(),
 		} satisfies AssistantMessage;
 		const blocked = createAssistantMessageEventStream();

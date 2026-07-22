@@ -41,17 +41,30 @@ const RunBudgetSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const FrozenModelSchema = Type.Object(
-	{
-		provider: Type.Literal("zhipu-standard"),
-		model_id: Type.Literal("glm-4.5-air"),
-		model_spec_sha256: Sha256Schema,
-		pricing_spec_sha256: Sha256Schema,
-		system_prompt_sha256: Sha256Schema,
-		tool_schema_sha256: Sha256Schema,
-	},
-	{ additionalProperties: false },
-);
+const FrozenModelSchema = Type.Union([
+	Type.Object(
+		{
+			provider: Type.Literal("zhipu-standard"),
+			model_id: Type.Literal("glm-4.5-air"),
+			model_spec_sha256: Sha256Schema,
+			pricing_spec_sha256: Sha256Schema,
+			system_prompt_sha256: Sha256Schema,
+			tool_schema_sha256: Sha256Schema,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			provider: Type.Literal("deepseek"),
+			model_id: Type.Literal("deepseek-v4-flash"),
+			model_spec_sha256: Sha256Schema,
+			pricing_spec_sha256: Sha256Schema,
+			system_prompt_sha256: Sha256Schema,
+			tool_schema_sha256: Sha256Schema,
+		},
+		{ additionalProperties: false },
+	),
+]);
 
 export const RunManifestSchema = Type.Object(
 	{
