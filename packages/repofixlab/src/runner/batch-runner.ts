@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { type ExperimentPlan } from "../contracts/experiment-plan.ts";
@@ -34,6 +34,14 @@ export interface BatchBudgetAdmission {
 
 export interface BatchExecutionOptions {
 	readonly budget_admission?: BatchBudgetAdmission;
+	/**
+	 * Stable identity for one physical execution. It is persisted in the batch
+	 * root and incorporated into every Controller attempt ID, so a repaired
+	 * rerun cannot accidentally replay another execution's durable operations.
+	 */
+	readonly execution_namespace?: string;
+	/** Stop before executing another logical run when setup failed before any Provider request. */
+	readonly stop_on_pre_provider_failure?: boolean;
 	readonly report_evidence_loader?: (
 		root: string,
 		specs: readonly BatchRunSpec[],
@@ -59,8 +67,25 @@ export interface BatchExecutionSummary {
 	};
 }
 
-function attemptIdFor(spec: BatchRunSpec, sequence: number): string {
-	return `attempt-${spec.run_id}-${String(sequence).padStart(3, "0")}`;
+const EXECUTION_NAMESPACE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+
+export function executionNamespaceForRoot(root: string, requested?: string): string {
+	if (requested !== undefined) {
+		if (!EXECUTION_NAMESPACE.test(requested)) throw new Error("execution_namespace is invalid");
+		return requested;
+	}
+	return `execution-${createHash("sha256").update(resolve(root), "utf8").digest("hex").slice(0, 24)}`;
+}
+
+export function attemptIdFor(
+	spec: BatchRunSpec,
+	sequence: number,
+	executionNamespace: string,
+): string {
+	if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error("attempt sequence must be positive");
+	if (!EXECUTION_NAMESPACE.test(executionNamespace)) throw new Error("execution_namespace is invalid");
+	const logicalRunToken = createHash("sha256").update(spec.run_id, "utf8").digest("hex").slice(0, 32);
+	return `attempt-${executionNamespace}-run-${logicalRunToken}-${String(sequence).padStart(3, "0")}`;
 }
 
 function sameSpec(left: BatchRunSpec, right: BatchRunSpec): boolean {
@@ -101,6 +126,19 @@ async function writeImmutable(path: string, content: string): Promise<void> {
 	} finally {
 		await unlink(temporary).catch(() => undefined);
 	}
+}
+
+async function writeExecutionIdentity(root: string, executionNamespace: string): Promise<void> {
+	const resolvedRoot = resolve(root);
+	await writeImmutable(
+		join(resolvedRoot, "execution-identity.json"),
+		stableStringify({
+			schema_version: "v1",
+			record_type: "batch_execution_identity",
+			execution_namespace: executionNamespace,
+			execution_root_sha256: createHash("sha256").update(resolvedRoot, "utf8").digest("hex"),
+		}),
+	);
 }
 
 class BatchResultStore {
@@ -236,6 +274,8 @@ export async function executeBatch(
 	const lease = await ExperimentOwnerLease.acquire(root);
 	let budgetLease: GlobalBudgetWriterLease | null = null;
 	try {
+		const executionNamespace = executionNamespaceForRoot(root, options.execution_namespace);
+		await writeExecutionIdentity(root, executionNamespace);
 		const store = await BatchStateStore.open(root);
 		await reconcileSpecs(store, specs);
 		const results = new BatchResultStore(root);
@@ -267,7 +307,7 @@ export async function executeBatch(
 				failed.push(state.run_id);
 				continue;
 			}
-			const attemptId = attemptIdFor(state, 1);
+			const attemptId = attemptIdFor(state, 1, executionNamespace);
 			try {
 				await store.transition(state.run_id, "preparing", attemptId);
 				await store.transition(state.run_id, "running", attemptId);
@@ -304,6 +344,7 @@ export async function executeBatch(
 					);
 				}
 				failed.push(state.run_id);
+				if (options.stop_on_pre_provider_failure === true && error instanceof PreProviderBatchFailure) break;
 			}
 		}
 		const reportEvidence: Readonly<Record<string, RunMetricEvidence>> = options.report_evidence_loader === undefined

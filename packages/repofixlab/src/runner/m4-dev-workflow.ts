@@ -5,6 +5,7 @@ import type { PiGeneralSessionResult } from "../agent/pi-general.ts";
 import {
 	runRepoFixWorkflow,
 	type ControlledVerificationFeedback,
+	type RepoFixTrajectoryEvent,
 	type RepoFixSessionResult,
 	type StageRecovery,
 } from "../agent/repofix.ts";
@@ -19,7 +20,12 @@ import { stableStringify } from "../contracts/canonical-json.ts";
 import { createPatchSnapshot, type PatchSnapshot } from "../contracts/run-contracts.ts";
 import type { RepoToolTransport } from "../controller/client.ts";
 import { ArtifactStore } from "../storage/artifact-store.ts";
-import { HttpRuntimeController, type RuntimeController, type RuntimePatchSnapshot } from "./controller-runtime.ts";
+import {
+	HttpRuntimeController,
+	type RuntimeController,
+	type RuntimePatchSnapshot,
+	type RuntimeVerificationResult,
+} from "./controller-runtime.ts";
 import {
 	createFrozenModelRuntime,
 	createFrozenPiGeneralSession,
@@ -45,11 +51,9 @@ import {
 const LOGICAL_AGENT_CWD = "/testbed";
 const DEFAULT_PER_RUN_ADMISSION_CAP = 200_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_384;
-// RepoFix has six stages. A stage may use eight exploration turns and one
-// controller-forced completion turn, so the global safety limit must exceed
-// 6 × 9 = 54 to permit the registered workflow to reach SELF_REVIEW.
+// The model-turn ceiling is the run-level termination boundary. RepoFix stage
+// checkpoints remain observational so they cannot cut off repository work.
 const FROZEN_MAX_MODEL_TURNS = 64;
-const FROZEN_MAX_TOOL_CALLS = 100;
 export const M4_DEV_TOKEN_ESTIMATOR = {
 	version: "m4-dev-v1",
 	multiplier: 1.25,
@@ -111,10 +115,13 @@ export interface M4DevWorkflowSummary {
 	readonly terminal_status: "completed" | "failed";
 	readonly run_directory: string;
 	readonly p0_patch_sha256: string | null;
+	readonly v1_patch_sha256: string | null;
+	readonly v2_patch_sha256: string | null;
 	readonly p1_patch_sha256: string | null;
 	readonly final_snapshot_id: string | null;
 	readonly worker_lease_id: string | null;
 	readonly controlled_verification_sha256: string | null;
+	readonly controlled_verification_sha256s: readonly string[];
 	/** Present only for the RepoFix configuration; pi-general has no RepoFix context controller. */
 	readonly repofix_context_budget?: RepoToolOutputBudgetSnapshot;
 }
@@ -135,15 +142,15 @@ function jsonSerializable(value: unknown): unknown {
 	return JSON.parse(JSON.stringify(value));
 }
 
-function snapshotArtifactPath(label: "P0" | "P1"): string {
-	return label === "P0" ? "p0.patch" : "p1.patch";
+function snapshotArtifactPath(label: "P0" | "V1" | "V2" | "P1"): string {
+	return `${label.toLowerCase()}.patch`;
 }
 
 async function persistSnapshot(
 	store: ArtifactStore,
 	runId: string,
 	attemptId: string,
-	label: "P0" | "P1",
+	label: "P0" | "V1" | "V2" | "P1",
 	raw: RuntimePatchSnapshot,
 ): Promise<PatchSnapshot> {
 	const patch = await store.writeNew(snapshotArtifactPath(label), raw.patch, {
@@ -176,16 +183,20 @@ async function persistSnapshot(
 	return snapshot;
 }
 
-function toControlledFeedback(
-	commandArgv: readonly string[],
-	response: Awaited<ReturnType<RepoToolTransport["execute"]>>,
-): ControlledVerificationFeedback {
-	if (response.tool !== "repo_exec") throw new Error("Controller returned a non-exec result for controlled verification");
+function toControlledFeedback(response: RuntimeVerificationResult): ControlledVerificationFeedback {
+	const rawOutput = ["stdout:", response.stdout, "stderr:", response.stderr].join("\n");
 	return {
-		command_argv: [...commandArgv],
-		exit_code: response.result.exit_code,
-		timed_out: response.result.timed_out,
-		output: ["stdout:", response.result.stdout, "stderr:", response.result.stderr].join("\n"),
+		catalog_id: response.catalogId,
+		candidate_id: response.candidateId,
+		status: response.status,
+		reason_code: response.reasonCode,
+		safe_hint: response.safeHint,
+		exit_code: response.exitCode,
+		timed_out: response.timedOut,
+		baseline_status: response.baseline.status,
+		baseline_exit_code: response.baseline.exitCode,
+		baseline_timed_out: response.baseline.timedOut,
+		output: rawOutput.length <= 8 * 1_024 ? rawOutput : rawOutput.slice(-8 * 1_024),
 	};
 }
 
@@ -258,10 +269,31 @@ export async function runM4DevWorkflow(
 	let piSession: PiGeneralSessionResult | null = null;
 	let repoFixSession: RepoFixSessionResult | null = null;
 	let p0PatchSha256: string | null = null;
+	let v1PatchSha256: string | null = null;
+	let v2PatchSha256: string | null = null;
 	let p1PatchSha256: string | null = null;
 	let finalSnapshotId: string | null = null;
 	let controlledVerificationSha256: string | null = null;
+	const controlledVerificationSha256s: string[] = [];
+	const repofixTrajectoryEvents: RepoFixTrajectoryEvent[] = [];
+	let repofixTrajectoryPersisted = false;
 	let terminalStatus: "completed" | "failed" = "failed";
+	const persistRepoFixTrajectory = async (): Promise<void> => {
+		if (repofixTrajectoryPersisted || repofixTrajectoryEvents.length === 0) return;
+		await store.writeNew(
+			"repofix-control-trajectory.json",
+			stableStringify({
+				schema_version: "v1" as const,
+				trajectory_type: "repofix_control",
+				run_id: runId,
+				attempt_id: attemptId,
+				instance_id: options.instanceId,
+				events: repofixTrajectoryEvents.map((event, index) => ({ sequence: index + 1, ...event })),
+			}),
+			{ mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" },
+		);
+		repofixTrajectoryPersisted = true;
+	};
 	try {
 		await store.writeNew("public-task.json", stableStringify(publicTask.manifest), {
 			mediaType: "application/json",
@@ -306,6 +338,29 @@ export async function runM4DevWorkflow(
 			)
 		).leaseId;
 		const transport = dependencies.controller.toolTransport(attemptId);
+		try {
+			const probe = await transport.execute({
+				leaseId,
+				operationId: `${attemptId}:worker-probe`,
+				tool: "repo_list",
+				input: {},
+			});
+			if (probe.tool !== "repo_list") throw new Error("Controller worker probe returned the wrong tool result");
+			await store.writeNew("controller-worker-probe.json", stableStringify({
+				schema_version: "v1",
+				evidence_type: "controller_worker_probe",
+				attempt_id: attemptId,
+				lease_id: leaseId,
+				tool: probe.tool,
+				status: "ready",
+			}), {
+				mediaType: "application/json",
+				sensitivity: "internal",
+				generatedBy: "controller",
+			});
+		} catch (error) {
+			throw new M4PreProviderInputError(`Controller worker probe failed: ${safeMessage(error)}`);
+		}
 		sessionDirectory = await mkdtemp(join(tmpdir(), "repofixlab-m4-dev-"));
 		const ledgerPath = store.resolvePath("token-ledger.jsonl");
 		const ledgerSink = new FsyncTokenLedgerSink(ledgerPath);
@@ -340,11 +395,35 @@ export async function runM4DevWorkflow(
 				installRunAdmissionGate(piSession.session, {
 					accountedTokens: null,
 					modelTurns: maxModelTurns,
-					toolCalls: FROZEN_MAX_TOOL_CALLS,
+					toolCalls: null,
 				});
 				await piSession.session.prompt(publicTask.task.problem_statement);
 			} else {
 				const repoFixConfigId = options.configId;
+				const loadVerificationCatalog = dependencies.controller.verificationCatalog?.bind(dependencies.controller);
+				const runCatalogVerification = dependencies.controller.verifyCatalogEntry?.bind(dependencies.controller);
+				if (loadVerificationCatalog === undefined || runCatalogVerification === undefined) {
+					throw new Error("Controller does not implement the R2 verification catalog contract");
+				}
+				const verificationCatalog = await loadVerificationCatalog(
+					attemptId,
+					`${attemptId}:verification-catalog`,
+					leaseId,
+				);
+				await store.writeNew("verification-catalog.json", stableStringify({
+					schema_version: "v2" as const,
+					evidence_type: "verification_catalog",
+					catalog_id: verificationCatalog.catalogId,
+					source_sha256: verificationCatalog.sourceSha256,
+					entries: verificationCatalog.entries.map((entry) => ({
+						candidate_id: entry.candidateId,
+						description: entry.description,
+					})),
+				}), {
+					mediaType: "application/json",
+					sensitivity: "internal",
+					generatedBy: "controller",
+				});
 				repoFixSession = await dependencies.createRepoFixSession({
 					leaseId,
 					attemptDirectory: join(sessionDirectory, "session"),
@@ -368,14 +447,24 @@ export async function runM4DevWorkflow(
 				installRunAdmissionGate(repoFixSession.session, {
 					accountedTokens: null,
 					modelTurns: maxModelTurns,
-					toolCalls: FROZEN_MAX_TOOL_CALLS,
+					toolCalls: null,
 				});
 				await runRepoFixWorkflow(repoFixSession, publicTask.task.problem_statement, {
+					verificationCatalog: {
+						catalog_id: verificationCatalog.catalogId,
+						candidates: verificationCatalog.entries.map((entry) => ({
+							candidate_id: entry.candidateId,
+							description: entry.description,
+						})),
+					},
 					onStageComplete: (completion) => {
 						if (repoFixSession === null) throw new Error("RepoFix session is unavailable while recording stage evidence");
 						return writeStageEvidence(store, completion, repoFixSession.repoToolOutputBudget.snapshot);
 					},
 					onStageRecovery: (recovery) => writeStageRecoveryEvidence(store, recovery),
+					onTrajectoryEvent: async (event) => {
+						repofixTrajectoryEvents.push(event);
+					},
 					capturePatch: async (checkpoint) => {
 						const activeLeaseId = leaseId;
 						if (activeLeaseId === null) throw new Error("M4 Dev worker lease disappeared before snapshot");
@@ -391,37 +480,67 @@ export async function runM4DevWorkflow(
 							),
 						);
 						if (checkpoint === "P0") p0PatchSha256 = snapshot.patch_sha256;
+						else if (checkpoint === "V1") v1PatchSha256 = snapshot.patch_sha256;
+						else if (checkpoint === "V2") v2PatchSha256 = snapshot.patch_sha256;
 						else {
 							p1PatchSha256 = snapshot.patch_sha256;
 							finalSnapshotId = snapshot.snapshot_id;
 						}
 						return { patch_sha256: snapshot.patch_sha256 };
 					},
-					controlledVerify: async (plan) => {
+					controlledVerify: async (plan, checkpoint) => {
 						const activeLeaseId = leaseId;
 						if (activeLeaseId === null) throw new Error("M4 Dev worker lease disappeared before controlled verification");
-						const response = await transport.execute({
-							leaseId: activeLeaseId,
-							operationId: `${attemptId}:controlled-verify`,
-							tool: "repo_exec",
-							input: { argv: [...plan.targeted_test_argv], timeout_ms: 120_000 },
-						});
-						const feedback = toControlledFeedback(plan.targeted_test_argv, response);
+						const response = await runCatalogVerification(
+							attemptId,
+							`${attemptId}:controlled-verify-${checkpoint.toLowerCase()}`,
+							activeLeaseId,
+							verificationCatalog.catalogId,
+							plan.verification_candidate_id,
+						);
+						const feedback = toControlledFeedback(response);
 						const evidence = {
-							schema_version: "v1" as const,
+							schema_version: "v2" as const,
 							evidence_type: "controlled_verification",
-							command_argv: [...plan.targeted_test_argv],
-							result: response.result,
+							checkpoint,
+							catalog_id: verificationCatalog.catalogId,
+							candidate_id: plan.verification_candidate_id,
+							result: {
+								catalog_id: response.catalogId,
+								candidate_id: response.candidateId,
+								status: response.status,
+								reason_code: response.reasonCode,
+								safe_hint: response.safeHint,
+								exit_code: response.exitCode,
+								stdout: response.stdout,
+								stderr: response.stderr,
+								truncated: response.truncated,
+								timed_out: response.timedOut,
+								duration_ms: response.durationMs,
+								baseline: {
+									status: response.baseline.status,
+									reason_code: response.baseline.reasonCode,
+									safe_hint: response.baseline.safeHint,
+									exit_code: response.baseline.exitCode,
+									stdout: response.baseline.stdout,
+									stderr: response.baseline.stderr,
+									truncated: response.baseline.truncated,
+									timed_out: response.baseline.timedOut,
+									duration_ms: response.baseline.durationMs,
+								},
+							},
 						};
-						const artifact = await store.writeNew("controlled-verify.json", stableStringify(evidence), {
+						const artifact = await store.writeNew(`controlled-verify-${checkpoint.toLowerCase()}.json`, stableStringify(evidence), {
 							mediaType: "application/json",
 							sensitivity: "internal",
 							generatedBy: "controller",
 						});
-						controlledVerificationSha256 = artifact.sha256;
+						if (checkpoint === "V0") controlledVerificationSha256 = artifact.sha256;
+						controlledVerificationSha256s.push(artifact.sha256);
 						return feedback;
 					},
 				});
+				await persistRepoFixTrajectory();
 			}
 			if (options.retainWorkerForFormalEvaluation && finalSnapshotId === null) {
 				const activeLeaseId = leaseId;
@@ -453,6 +572,7 @@ export async function runM4DevWorkflow(
 		});
 		terminalStatus = "completed";
 	} catch (error) {
+		await persistRepoFixTrajectory().catch(() => undefined);
 		const failedSession = repoFixSession?.session ?? piSession?.session;
 		if (failedSession !== undefined) {
 			await store
@@ -508,10 +628,13 @@ export async function runM4DevWorkflow(
 		terminal_status: terminalStatus,
 		run_directory: runDirectory,
 		p0_patch_sha256: p0PatchSha256,
+		v1_patch_sha256: v1PatchSha256,
+		v2_patch_sha256: v2PatchSha256,
 		p1_patch_sha256: p1PatchSha256,
 		final_snapshot_id: finalSnapshotId,
 		worker_lease_id: options.retainWorkerForFormalEvaluation === true && finalSnapshotId !== null ? leaseId : null,
 		controlled_verification_sha256: controlledVerificationSha256,
+		controlled_verification_sha256s: controlledVerificationSha256s,
 		...(repoFixSession === null ? {} : { repofix_context_budget: repoFixSession.repoToolOutputBudget.snapshot }),
 	};
 	await store.writeNew("m4-dev-summary.json", stableStringify(summary), {

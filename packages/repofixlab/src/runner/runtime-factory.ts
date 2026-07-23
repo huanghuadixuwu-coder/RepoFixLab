@@ -278,7 +278,7 @@ export function frozenProviderStreamOptions(streamOptions?: SimpleStreamOptions)
 }
 
 export function runtimeIdentityFromSession(
-	session: PiGeneralSessionResult["session"],
+	session: PiGeneralSessionResult["session"] | RepoFixSessionResult["session"],
 	modelSpecSha256: string,
 ): { modelSpecSha256: string; systemPromptSha256: string; toolSchemaSha256: string } {
 	const toolDefinitions = session
@@ -294,7 +294,7 @@ export function runtimeIdentityFromSession(
 
 export function installRunAdmissionGate(
 	session: AdmissionGatedSession,
-	limits: { readonly accountedTokens: number | null; readonly modelTurns: number; readonly toolCalls: number },
+	limits: { readonly accountedTokens: number | null; readonly modelTurns: number; readonly toolCalls: number | null },
 ): void {
 	const stream = session.agent.streamFn;
 	session.agent.streamFn = (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) => {
@@ -310,7 +310,7 @@ export function installRunAdmissionGate(
 		if (
 			(limits.accountedTokens === null || accountedTokens < limits.accountedTokens) &&
 			modelTurns < limits.modelTurns &&
-			toolCalls < limits.toolCalls
+			(limits.toolCalls === null || toolCalls < limits.toolCalls)
 		) {
 			return stream(model, context, streamOptions);
 		}

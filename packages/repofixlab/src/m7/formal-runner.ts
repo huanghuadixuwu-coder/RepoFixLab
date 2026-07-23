@@ -116,12 +116,21 @@ export async function runM7FormalRun(options: M7FormalRunOptions, dependencies: 
 		environment = await dependencies.environmentLockSource.load(options.instanceId);
 		publicTask = await dependencies.publicTaskSource.load(options.instanceId, environment);
 		runtime = createDeepSeekV4FlashRuntime();
-		const manifestSession = await dependencies.createPiGeneralSession({
-			leaseId: "lease-manifest",
-			attemptDirectory: "/tmp/m7-manifest",
-			cwd: "/testbed",
-			transport: dependencies.controller.toolTransport(options.attemptId),
-		});
+		const manifestSession =
+			options.configId === "pi-general"
+				? await dependencies.createPiGeneralSession({
+					leaseId: "lease-manifest",
+					attemptDirectory: "/tmp/m7-manifest",
+					cwd: "/testbed",
+					transport: dependencies.controller.toolTransport(options.attemptId),
+				})
+				: await dependencies.createRepoFixSession({
+					leaseId: "lease-manifest",
+					attemptDirectory: "/tmp/m7-manifest",
+					cwd: "/testbed",
+					transport: dependencies.controller.toolTransport(options.attemptId),
+					configId: options.configId,
+				});
 		try {
 			identity = runtimeIdentityFromSession(manifestSession.session, runtime.modelSpecSha256);
 		} finally {
@@ -138,7 +147,7 @@ export async function runM7FormalRun(options: M7FormalRunOptions, dependencies: 
 		public_task_manifest_id: publicTask.manifest.manifest_id, public_task_manifest_sha256: publicTask.manifest.manifest_sha256,
 		task_environment_lock_id: environment.lockId, task_environment_lock_sha256: environment.lockSha256,
 		model: { provider: "deepseek", model_id: "deepseek-v4-flash", model_spec_sha256: runtime.modelSpecSha256, pricing_spec_sha256: runtime.pricingSpecSha256, system_prompt_sha256: identity.systemPromptSha256, tool_schema_sha256: identity.toolSchemaSha256 },
-		budget: { accounted_admission_cap_tokens: M7_PER_RUN_CAP, max_model_turns: options.maxModelTurns, max_tool_calls: 100, max_wall_time_ms: 1_800_000 }, created_at: startedAt,
+		budget: { accounted_admission_cap_tokens: M7_PER_RUN_CAP, max_model_turns: options.maxModelTurns, max_tool_calls: null, max_wall_time_ms: 1_800_000 }, created_at: startedAt,
 	});
 	const root = resolve(options.formalRunsRoot, options.runId);
 	const store = await ArtifactStore.createNew(`${root}.staging`);

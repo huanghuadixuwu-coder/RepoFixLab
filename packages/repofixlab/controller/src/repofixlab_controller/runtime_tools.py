@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 from time import monotonic_ns
@@ -43,6 +46,98 @@ _SHELL_INTERPRETERS = frozenset(
 
 class RuntimeToolError(RuntimeError):
     """A repository tool request violates the fixed worker policy."""
+
+
+VerificationStatus = Literal[
+    "passed",
+    "test_failed",
+    "command_invalid",
+    "environment_failure",
+    "timed_out",
+]
+
+
+@dataclass(frozen=True)
+class RuntimeVerificationCatalogEntry:
+    candidate_id: str
+    description: str
+    argv: tuple[str, ...]
+    preparation_argv: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeVerificationCatalog:
+    catalog_id: str
+    source_sha256: str
+    entries: tuple[RuntimeVerificationCatalogEntry, ...]
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "catalog_id": self.catalog_id,
+            "source_sha256": self.source_sha256,
+            "entries": [
+                {"candidate_id": entry.candidate_id, "description": entry.description}
+                for entry in self.entries
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeVerificationObservation:
+    status: VerificationStatus
+    reason_code: str | None
+    safe_hint: str | None
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    truncated: bool
+    timed_out: bool
+    duration_ms: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "safe_hint": self.safe_hint,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "truncated": self.truncated,
+            "timed_out": self.timed_out,
+            "duration_ms": self.duration_ms,
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeVerificationResult:
+    catalog_id: str
+    candidate_id: str
+    status: VerificationStatus
+    reason_code: str | None
+    safe_hint: str | None
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    truncated: bool
+    timed_out: bool
+    duration_ms: int
+    baseline: RuntimeVerificationObservation
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "catalog_id": self.catalog_id,
+            "candidate_id": self.candidate_id,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "safe_hint": self.safe_hint,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "truncated": self.truncated,
+            "timed_out": self.timed_out,
+            "duration_ms": self.duration_ms,
+            "baseline": self.baseline.to_dict(),
+        }
 
 
 @dataclass(frozen=True)
@@ -131,6 +226,318 @@ class RepositoryToolExecutor:
             patch = self.snapshot_patch()
             return self._bytes_result(tool, 0, patch, b"", False, started_ms)
         return self._repo_exec(arguments, started_ms)
+
+    def verification_catalog(self) -> RuntimeVerificationCatalog:
+        """Build a Controller-owned test command catalog from package metadata.
+
+        The worker never accepts an Agent-provided argv for controlled
+        verification. A catalog may be empty when the candidate has no usable
+        npm test script; that is a normal diagnostic outcome, not a policy
+        bypass.
+        """
+        package_path = self.repository_root / "package.json"
+        if not package_path.is_file() or package_path.is_symlink():
+            return _verification_catalog((), b"missing-package-json")
+        try:
+            package_bytes = package_path.read_bytes()
+            package = json.loads(package_bytes.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return _verification_catalog((), b"invalid-package-json")
+        scripts = package.get("scripts") if isinstance(package, dict) else None
+        if not isinstance(scripts, dict):
+            return _verification_catalog((), package_bytes)
+
+        # This checks that npm is available and that package metadata is
+        # readable without executing a test. It deliberately happens before
+        # any model edit and does not make test success part of catalog
+        # construction.
+        try:
+            preflight = subprocess.run(
+                ["npm", "run"],
+                cwd=self.repository_root,
+                env=self._verification_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=TOOL_TIMEOUT_MILLISECONDS / 1000,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return _verification_catalog((), package_bytes)
+        if preflight.returncode != 0:
+            return _verification_catalog((), package_bytes)
+
+        script_names = [
+            name
+            for name, value in scripts.items()
+            if _verification_script_is_terminating(name, value)
+        ]
+        ordered_names = sorted(set(script_names), key=lambda value: (value != "test", value))[:16]
+        preparation_argv = _verification_preparation_argv(
+            self.repository_root, package, scripts
+        )
+        entries = tuple(
+            RuntimeVerificationCatalogEntry(
+                candidate_id=(
+                    "npm-script-"
+                    + hashlib.sha256(name.encode("utf-8")).hexdigest()[:24]
+                ),
+                description=(
+                    f'package.json script "{name}"'
+                    if preparation_argv is None
+                    else f'package.json script "{name}" after its required build preparation'
+                ),
+                argv=("npm", "run", name),
+                preparation_argv=preparation_argv,
+            )
+            for name in ordered_names
+        )
+        return _verification_catalog(entries, package_bytes)
+
+    def verify_catalog_entry(
+        self,
+        catalog: RuntimeVerificationCatalog,
+        candidate_id: str,
+        patch: bytes,
+    ) -> RuntimeVerificationResult:
+        entry = next(
+            (value for value in catalog.entries if value.candidate_id == candidate_id),
+            None,
+        )
+        if entry is None:
+            return _verification_result(
+                catalog.catalog_id,
+                candidate_id,
+                "command_invalid",
+                "catalog_candidate_unknown",
+                "Select one of the Controller-provided verification candidates.",
+            )
+
+        baseline = self._run_verification_entry(entry, None)
+        candidate = self._run_verification_entry(entry, patch)
+        return _verification_result_from_observations(
+            catalog.catalog_id,
+            candidate_id,
+            baseline,
+            candidate,
+        )
+
+    def _run_verification_entry(
+        self,
+        entry: RuntimeVerificationCatalogEntry,
+        patch: bytes | None,
+    ) -> RuntimeVerificationObservation:
+        started_ms = monotonic_ns() // 1_000_000
+        with TemporaryDirectory(prefix="repofixlab-verify-") as temporary:
+            worktree = Path(temporary) / "worktree"
+            git_config = Path(temporary) / "gitconfig"
+            try:
+                config_environment = self._verification_environment()
+                configured = subprocess.run(
+                    [
+                        "git",
+                        "config",
+                        "--file",
+                        str(git_config),
+                        "--add",
+                        "safe.directory",
+                        str(self.repository_root / ".git"),
+                    ],
+                    cwd=temporary,
+                    env=config_environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=TOOL_TIMEOUT_MILLISECONDS / 1000,
+                    check=False,
+                    shell=False,
+                )
+                if configured.returncode != 0:
+                    return _verification_observation(
+                        "environment_failure",
+                        "verification_git_config_unavailable",
+                        "The isolated verification Git configuration could not be prepared.",
+                        stdout=configured.stdout,
+                        stderr=configured.stderr,
+                        started_ms=started_ms,
+                    )
+                verification_environment = dict(config_environment)
+                verification_environment["GIT_CONFIG_GLOBAL"] = str(git_config)
+                cache_directory = Path(temporary) / "cache"
+                cache_directory.mkdir(mode=0o700)
+                verification_environment["BABEL_CACHE_PATH"] = str(
+                    cache_directory / "babel-register.json"
+                )
+                cloned = subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--shared",
+                        "--no-checkout",
+                        "--",
+                        str(self.repository_root / ".git"),
+                        str(worktree),
+                    ],
+                    cwd=temporary,
+                    env=verification_environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=TOOL_TIMEOUT_MILLISECONDS / 1000,
+                    check=False,
+                    shell=False,
+                )
+                if cloned.returncode != 0:
+                    return _verification_observation(
+                        "environment_failure",
+                        "verification_worktree_unavailable",
+                        "The isolated verification workspace could not be prepared.",
+                        stderr=cloned.stderr,
+                        started_ms=started_ms,
+                    )
+                checked_out = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        f"safe.directory={worktree.as_posix()}",
+                        "checkout",
+                        "--detach",
+                        "HEAD",
+                    ],
+                    cwd=worktree,
+                    env=verification_environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=TOOL_TIMEOUT_MILLISECONDS / 1000,
+                    check=False,
+                    shell=False,
+                )
+                if checked_out.returncode != 0:
+                    return _verification_observation(
+                        "environment_failure",
+                        "verification_worktree_unavailable",
+                        "The isolated verification workspace could not be prepared.",
+                        stdout=checked_out.stdout,
+                        stderr=checked_out.stderr,
+                        started_ms=started_ms,
+                    )
+                source_modules = self.repository_root / "node_modules"
+                if source_modules.is_dir() and not source_modules.is_symlink():
+                    try:
+                        os.symlink(source_modules, worktree / "node_modules", target_is_directory=True)
+                    except OSError:
+                        pass
+                if patch:
+                    apply_patch = subprocess.run(
+                        [
+                            "git",
+                            "-c",
+                            f"safe.directory={worktree.as_posix()}",
+                            "apply",
+                            "--binary",
+                            "--whitespace=nowarn",
+                            "-",
+                        ],
+                        cwd=worktree,
+                        env=verification_environment,
+                        input=patch,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=TOOL_TIMEOUT_MILLISECONDS / 1000,
+                        check=False,
+                        shell=False,
+                    )
+                    if apply_patch.returncode != 0:
+                        return _verification_observation(
+                            "environment_failure",
+                            "verification_snapshot_apply_failed",
+                            "The current patch could not be applied to the isolated verification workspace.",
+                            stdout=apply_patch.stdout,
+                            stderr=apply_patch.stderr,
+                            started_ms=started_ms,
+                        )
+                if entry.preparation_argv is not None:
+                    try:
+                        preparation = subprocess.run(
+                            list(entry.preparation_argv),
+                            cwd=worktree,
+                            env=verification_environment,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=TOOL_TIMEOUT_MAX_MILLISECONDS / 1000,
+                            check=False,
+                            shell=False,
+                        )
+                    except subprocess.TimeoutExpired as error:
+                        stdout = error.stdout if isinstance(error.stdout, bytes) else b""
+                        stderr = error.stderr if isinstance(error.stderr, bytes) else b""
+                        return _verification_observation(
+                            "timed_out",
+                            "verification_preparation_timeout",
+                            "The Controller-owned build preparation exceeded the fixed verification timeout.",
+                            stdout=stdout,
+                            stderr=stderr,
+                            timed_out=True,
+                            started_ms=started_ms,
+                        )
+                    except OSError:
+                        return _verification_observation(
+                            "environment_failure",
+                            "verification_preparation_unavailable",
+                            "The Controller-owned build preparation could not start in the isolated workspace.",
+                            started_ms=started_ms,
+                        )
+                    if preparation.returncode != 0:
+                        return _verification_observation_from_command(
+                            preparation,
+                            "verification_preparation_failed",
+                            "The Controller-owned build preparation failed before the selected test command could run.",
+                            started_ms,
+                        )
+                try:
+                    command = subprocess.run(
+                        list(entry.argv),
+                        cwd=worktree,
+                        env=verification_environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=TOOL_TIMEOUT_MAX_MILLISECONDS / 1000,
+                        check=False,
+                        shell=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    stdout = error.stdout if isinstance(error.stdout, bytes) else b""
+                    stderr = error.stderr if isinstance(error.stderr, bytes) else b""
+                    return _verification_observation(
+                        "timed_out",
+                        "verification_timeout",
+                        "The selected test command exceeded the fixed verification timeout.",
+                        stdout=stdout,
+                        stderr=stderr,
+                        timed_out=True,
+                        started_ms=started_ms,
+                    )
+                except OSError:
+                    return _verification_observation(
+                        "environment_failure",
+                        "catalog_entry_stale",
+                        "The preflighted command is no longer executable in the verification workspace.",
+                        started_ms=started_ms,
+                    )
+                return _verification_observation_from_command(command, None, None, started_ms)
+            except (OSError, subprocess.TimeoutExpired):
+                return _verification_observation(
+                    "environment_failure",
+                    "verification_workspace_error",
+                    "The isolated verification workspace failed before the test command could run.",
+                    started_ms=started_ms,
+                )
+            finally:
+                shutil.rmtree(worktree, ignore_errors=True)
 
     def snapshot_patch(self) -> bytes:
         return self.snapshot_evidence().patch
@@ -394,17 +801,7 @@ class RepositoryToolExecutor:
         ):
             raise RuntimeToolError("repo_exec timeout is outside the fixed policy")
         try:
-            environment = self._git_environment()
-            # Commands used for controlled verification may create browser, font, or
-            # language-tool caches. They must live on the worker tmpfs rather than in
-            # the candidate worktree, otherwise a later P1 snapshot can mistake them
-            # for a model-authored patch.
-            environment["HOME"] = "/tmp"
-            environment["XDG_CACHE_HOME"] = "/tmp/repofixlab-xdg-cache"
-            environment["XDG_CONFIG_HOME"] = "/tmp/repofixlab-xdg-config"
-            environment["XDG_DATA_HOME"] = "/tmp/repofixlab-xdg-data"
-            environment["NPM_CONFIG_CACHE"] = "/tmp/repofixlab-npm-cache"
-            environment["npm_config_update_notifier"] = "false"
+            environment = self._verification_environment()
             result = subprocess.run(
                 list(argv_value),
                 cwd=self.repository_root,
@@ -547,6 +944,296 @@ class RepositoryToolExecutor:
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
         }
+
+    def _verification_environment(self) -> dict[str, str]:
+        environment = self._git_environment()
+        # Verification caches are always placed on tmpfs. Neither the agent
+        # worktree nor its snapshot may acquire test-run side effects.
+        environment["HOME"] = "/tmp"
+        environment["XDG_CACHE_HOME"] = "/tmp/repofixlab-xdg-cache"
+        environment["XDG_CONFIG_HOME"] = "/tmp/repofixlab-xdg-config"
+        environment["XDG_DATA_HOME"] = "/tmp/repofixlab-xdg-data"
+        environment["NPM_CONFIG_CACHE"] = "/tmp/repofixlab-npm-cache"
+        environment["npm_config_update_notifier"] = "false"
+        return environment
+
+
+def _verification_preparation_argv(
+    repository_root: Path,
+    package: object,
+    scripts: Mapping[object, object],
+) -> tuple[str, ...] | None:
+    """Return the fixed build prerequisite for a missing package entrypoint.
+
+    The Controller derives this only from the immutable package metadata. The
+    Agent still selects only a catalogued test script and never supplies an
+    argv or an install/build instruction.
+    """
+    if not isinstance(package, dict) or not isinstance(scripts.get("build"), str):
+        return None
+    main = package.get("main")
+    if not isinstance(main, str) or not main or "\\" in main:
+        return None
+    path = PurePosixPath(main)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    entrypoint = repository_root.joinpath(*path.parts)
+    if entrypoint.is_symlink() or entrypoint.is_file():
+        return None
+    return ("npm", "run", "build")
+
+
+def _verification_script_is_terminating(name: object, value: object) -> bool:
+    """Accept only a bounded Controller-owned npm verification candidate.
+
+    A successful test report is not verification evidence when the command
+    intentionally leaves a watch server running. Likewise a broad top-level
+    test script that starts a parallel build is not a useful candidate in the
+    fixed-process worker: it can fail before reaching the selected tests.
+    """
+    if (
+        not isinstance(name, str)
+        or not isinstance(value, str)
+        or not (0 < len(name) <= 128)
+        or not (name == "test" or name.startswith("test:") or "unit" in name or "spec" in name)
+    ):
+        return False
+    command = value.casefold()
+    if "--no-single-run" in command or "--watch" in command or " watch " in f" {command} ":
+        return False
+    return not (name == "test" and "npm-run-all" in command and "build" in command)
+
+
+def _verification_environment_failure(
+    stdout: bytes,
+    stderr: bytes,
+) -> tuple[str, str] | None:
+    output = (stdout + b"\n" + stderr).decode("utf-8", errors="replace").casefold()
+    if (
+        "failed to create new os thread" in output
+        or "runtime: may need to increase max user processes" in output
+        or "pthread_create" in output
+        or "resource temporarily unavailable" in output
+        or "spawn /usr/bin/node eagain" in output
+    ):
+        return (
+            "verification_resource_exhausted",
+            "The isolated verification worker exhausted its fixed process or thread resources.",
+        )
+    if "babel could not write cache" in output:
+        return (
+            "verification_cache_unwritable",
+            "The selected test command could not write its verification cache.",
+        )
+    if "cannot find module" in output and "/dist/" in output:
+        return (
+            "verification_missing_build_artifact",
+            "The selected test command requires a build artifact that is absent from the isolated workspace.",
+        )
+    return None
+
+
+def _verification_observation_from_command(
+    command: subprocess.CompletedProcess[bytes],
+    failure_reason_code: str | None,
+    failure_safe_hint: str | None,
+    started_ms: int,
+) -> RuntimeVerificationObservation:
+    if command.returncode == 0:
+        return _verification_observation(
+            "passed",
+            None,
+            None,
+            exit_code=command.returncode,
+            stdout=command.stdout,
+            stderr=command.stderr,
+            started_ms=started_ms,
+        )
+    environment_failure = _verification_environment_failure(command.stdout, command.stderr)
+    if environment_failure is not None:
+        reason_code, safe_hint = environment_failure
+        return _verification_observation(
+            "environment_failure",
+            reason_code,
+            safe_hint,
+            exit_code=command.returncode,
+            stdout=command.stdout,
+            stderr=command.stderr,
+            started_ms=started_ms,
+        )
+    return _verification_observation(
+        "test_failed",
+        failure_reason_code,
+        failure_safe_hint,
+        exit_code=command.returncode,
+        stdout=command.stdout,
+        stderr=command.stderr,
+        started_ms=started_ms,
+    )
+
+
+def _canonical_verification_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _verification_catalog(
+    entries: tuple[RuntimeVerificationCatalogEntry, ...],
+    source: bytes,
+) -> RuntimeVerificationCatalog:
+    source_sha256 = hashlib.sha256(source).hexdigest()
+    identity = {
+        "source_sha256": source_sha256,
+        "entries": [
+            {
+                "candidate_id": entry.candidate_id,
+                "description": entry.description,
+                "argv": list(entry.argv),
+                "preparation_argv": (
+                    None if entry.preparation_argv is None else list(entry.preparation_argv)
+                ),
+            }
+            for entry in entries
+        ],
+    }
+    return RuntimeVerificationCatalog(
+        catalog_id="verification-catalog-"
+        + hashlib.sha256(_canonical_verification_bytes(identity)).hexdigest()[:32],
+        source_sha256=source_sha256,
+        entries=entries,
+    )
+
+
+def _verification_result(
+    catalog_id: str,
+    candidate_id: str,
+    status: VerificationStatus,
+    reason_code: str | None,
+    safe_hint: str | None,
+    *,
+    exit_code: int | None = None,
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+    timed_out: bool = False,
+    started_ms: int | None = None,
+) -> RuntimeVerificationResult:
+    observation = _verification_observation(
+        status,
+        reason_code,
+        safe_hint,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+        started_ms=started_ms,
+    )
+    return _verification_result_from_observations(
+        catalog_id,
+        candidate_id,
+        observation,
+        observation,
+    )
+
+
+def _verification_observation(
+    status: VerificationStatus,
+    reason_code: str | None,
+    safe_hint: str | None,
+    *,
+    exit_code: int | None = None,
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+    timed_out: bool = False,
+    started_ms: int | None = None,
+) -> RuntimeVerificationObservation:
+    bounded_stdout, bounded_stderr, truncated = _bound_output(stdout, stderr)
+    return RuntimeVerificationObservation(
+        status=status,
+        reason_code=reason_code,
+        safe_hint=safe_hint,
+        exit_code=exit_code,
+        stdout=bounded_stdout.decode("utf-8", errors="replace"),
+        stderr=bounded_stderr.decode("utf-8", errors="replace"),
+        truncated=truncated,
+        timed_out=timed_out,
+        duration_ms=(
+            0
+            if started_ms is None
+            else max(monotonic_ns() // 1_000_000 - started_ms, 0)
+        ),
+    )
+
+
+def _verification_result_from_observations(
+    catalog_id: str,
+    candidate_id: str,
+    baseline: RuntimeVerificationObservation,
+    candidate: RuntimeVerificationObservation,
+) -> RuntimeVerificationResult:
+    # A shared resolver failure in two freshly-cloned worktrees is a harness
+    # failure, not evidence that the candidate patch preserved behavior.
+    if (
+        baseline.status == "test_failed"
+        and candidate.status == "test_failed"
+        and baseline.stdout == candidate.stdout
+        and baseline.stderr == candidate.stderr
+        and 'could not resolve "../../"' in (baseline.stdout + "\n" + baseline.stderr).casefold()
+    ):
+        baseline = replace(
+            baseline,
+            status="environment_failure",
+            reason_code="verification_workspace_resolution_failed",
+            safe_hint="The isolated verification workspace cannot resolve the repository package entrypoint.",
+        )
+        candidate = replace(
+            candidate,
+            status="environment_failure",
+            reason_code="verification_workspace_resolution_failed",
+            safe_hint="The isolated verification workspace cannot resolve the repository package entrypoint.",
+        )
+    return RuntimeVerificationResult(
+        catalog_id=catalog_id,
+        candidate_id=candidate_id,
+        status=candidate.status,
+        reason_code=candidate.reason_code,
+        safe_hint=candidate.safe_hint,
+        exit_code=candidate.exit_code,
+        stdout=candidate.stdout,
+        stderr=candidate.stderr,
+        truncated=candidate.truncated,
+        timed_out=candidate.timed_out,
+        duration_ms=candidate.duration_ms,
+        baseline=baseline,
+    )
+
+
+def tool_rejection_reason_code(error: RuntimeToolError) -> str:
+    message = str(error)
+    if "shell interpreters" in message:
+        return "shell_prohibited"
+    if "must use PATH lookup" in message:
+        return "executable_path_prohibited"
+    if "test paths are prohibited" in message:
+        return "test_edit_prohibited"
+    if "symbolic link" in message or "escapes the fixed worktree" in message:
+        return "path_escape_prohibited"
+    if "timeout" in message:
+        return "timeout_policy_violation"
+    if "process could not be started" in message:
+        return "argv_not_found"
+    if "path" in message:
+        return "invalid_repository_path"
+    if "arguments" in message or "argument" in message or "argv" in message:
+        return "invalid_tool_input"
+    return "tool_policy_rejected"
 
 
 def _bound_output(stdout: bytes, stderr: bytes) -> tuple[bytes, bytes, bool]:

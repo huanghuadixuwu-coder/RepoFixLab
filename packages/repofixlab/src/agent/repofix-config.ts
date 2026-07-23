@@ -15,7 +15,8 @@ export const REPOFIX_STAGES = [
 	"LOCALIZE",
 	"PLAN",
 	"IMPLEMENT",
-	"REFINE",
+	"REFINE_1",
+	"REFINE_2",
 	"SELF_REVIEW",
 ] as const;
 
@@ -46,7 +47,7 @@ export const REPOFIX_WORKFLOW_CONFIGS: Readonly<Record<RepoFixConfigId, RepoFixW
 		workflow_kind: "repofix",
 		include_localize_stage: true,
 		deliver_verification_feedback: true,
-		allow_refine_repo_exec: true,
+		allow_refine_repo_exec: false,
 		stages: FULL_STAGES,
 	},
 	"repofix-no-localize": {
@@ -54,7 +55,7 @@ export const REPOFIX_WORKFLOW_CONFIGS: Readonly<Record<RepoFixConfigId, RepoFixW
 		workflow_kind: "repofix",
 		include_localize_stage: false,
 		deliver_verification_feedback: true,
-		allow_refine_repo_exec: true,
+		allow_refine_repo_exec: false,
 		stages: FULL_STAGES.filter((stage) => stage !== "LOCALIZE"),
 	},
 	"repofix-no-verify-feedback": {

@@ -23,6 +23,7 @@ import type {
 	BeforeToolCallResult,
 	PrepareNextTurnContext,
 	QueueMode,
+	ShouldStopAfterTurnContext,
 	StreamFn,
 	ToolExecutionMode,
 } from "./types.ts";
@@ -111,6 +112,10 @@ export interface AgentOptions {
 		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	shouldStopAfterTurn?: (
+		context: ShouldStopAfterTurnContext,
+		signal?: AbortSignal,
+	) => Promise<boolean> | boolean;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
@@ -195,6 +200,10 @@ export class Agent {
 		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	public shouldStopAfterTurn?: (
+		context: ShouldStopAfterTurnContext,
+		signal?: AbortSignal,
+	) => Promise<boolean> | boolean;
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
@@ -219,6 +228,7 @@ export class Agent {
 		this.afterToolCall = options.afterToolCall;
 		this.prepareNextTurn = options.prepareNextTurn;
 		this.prepareNextTurnWithContext = options.prepareNextTurnWithContext;
+		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
 		this.sessionId = options.sessionId;
@@ -431,6 +441,7 @@ export class Agent {
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+		const shouldStopAfterTurn = this.shouldStopAfterTurn;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -452,6 +463,9 @@ export class Agent {
 							return await this.prepareNextTurn?.(this.signal);
 						}
 					: undefined,
+			shouldStopAfterTurn: shouldStopAfterTurn
+				? async (context) => await shouldStopAfterTurn(context, this.signal)
+				: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,

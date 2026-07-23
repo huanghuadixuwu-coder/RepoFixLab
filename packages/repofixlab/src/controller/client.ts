@@ -46,6 +46,21 @@ function toRepoToolResponse(response: RepoToolHttpResponse): RepoToolResponse {
 	return { tool: response.tool, result: response.result };
 }
 
+/**
+ * Controller operation IDs are durable and globally keyed. A model tool-call
+ * ID is only unique inside an Agent attempt, so bind it to that attempt before
+ * it crosses the Controller boundary while preserving retry determinism.
+ */
+export function controllerToolOperationId(attemptId: string, toolCallOperationId: string): string {
+	const scopedAttemptId = requireIdentifier(attemptId, "attemptId");
+	const scopedToolCallOperationId = requireIdentifier(toolCallOperationId, "operationId");
+	return `tool-${createHash("sha256")
+		.update(scopedAttemptId, "utf8")
+		.update("\0", "utf8")
+		.update(scopedToolCallOperationId, "utf8")
+		.digest("hex")}`;
+}
+
 export class HttpRepoToolTransport implements RepoToolTransport {
 	private readonly controllerUrl: string;
 	private readonly attemptId: string;
@@ -69,7 +84,7 @@ export class HttpRepoToolTransport implements RepoToolTransport {
 
 	async execute(request: RepoToolRequest, signal?: AbortSignal): Promise<RepoToolResponse> {
 		const leaseId = requireIdentifier(request.leaseId, "leaseId");
-		const operationId = requireIdentifier(request.operationId, "operationId");
+		const operationId = controllerToolOperationId(this.attemptId, request.operationId);
 		const unsignedRequest = {
 			schema_version: "v1" as const,
 			request_type: "runtime_execute_tool" as const,

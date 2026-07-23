@@ -35,6 +35,10 @@ from .runtime_tools import (
     RuntimeToolError,
     RuntimeToolName,
     RuntimeToolResult,
+    RuntimeVerificationCatalog,
+    RuntimeVerificationCatalogEntry,
+    RuntimeVerificationObservation,
+    RuntimeVerificationResult,
 )
 
 
@@ -833,13 +837,21 @@ class DockerRuntimeBackend:
                 or output.get("aggregate_sha256") != self._worker_aggregate
             ):
                 raise RuntimeDockerError("worker helper self-check drifted")
-            return DockerRuntimeWorker(
+            worker = DockerRuntimeWorker(
                 attempt_id=attempt_id,
                 candidate=candidate,
                 container=container,
                 volumes=tuple(volumes),
                 labels=labels,
             )
+            readiness = self.execute_tool(worker, "repo_list", {"path": "."})
+            if (
+                readiness.tool != "repo_list"
+                or readiness.exit_code != 0
+                or readiness.timed_out
+            ):
+                raise RuntimeDockerError("worker repository tool readiness probe failed")
+            return worker
         except Exception:
             self._remove_resources(container, tuple(volumes), attempt_id)
             raise
@@ -870,6 +882,97 @@ class DockerRuntimeBackend:
         if not isinstance(result, Mapping):
             raise RuntimeDockerError("worker tool result is malformed")
         return _runtime_tool_result(result, tool)
+
+    def verification_catalog(self, worker: object) -> RuntimeVerificationCatalog:
+        handle = _worker_handle(worker)
+        output = self._exec_json(
+            handle.container,
+            ["python3", _WORKER_ENTRY, "verification-catalog"],
+            user=handle.candidate.definition.worker.user,
+        )
+        if (
+            set(output) != {"schema_version", "response_type", "catalog"}
+            or output.get("schema_version") != "v1"
+            or output.get("response_type") != "runtime_worker_verification_catalog"
+        ):
+            raise RuntimeDockerError("worker verification catalog envelope drifted")
+        catalog = output.get("catalog")
+        if not isinstance(catalog, Mapping) or set(catalog) != {"catalog_id", "source_sha256", "entries"}:
+            raise RuntimeDockerError("worker verification catalog is malformed")
+        catalog_id = catalog.get("catalog_id")
+        source_sha256 = catalog.get("source_sha256")
+        entries = catalog.get("entries")
+        if (
+            not isinstance(catalog_id, str)
+            or _IDENTIFIER.fullmatch(catalog_id) is None
+            or not isinstance(source_sha256, str)
+            or _SHA256.fullmatch(source_sha256) is None
+            or not isinstance(entries, list)
+            or len(entries) > 16
+        ):
+            raise RuntimeDockerError("worker verification catalog identity is malformed")
+        parsed_entries: list[RuntimeVerificationCatalogEntry] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) != {"candidate_id", "description"}:
+                raise RuntimeDockerError("worker verification catalog entry is malformed")
+            candidate_id = entry.get("candidate_id")
+            description = entry.get("description")
+            if (
+                not isinstance(candidate_id, str)
+                or _IDENTIFIER.fullmatch(candidate_id) is None
+                or not isinstance(description, str)
+                or not description
+                or len(description) > 512
+            ):
+                raise RuntimeDockerError("worker verification catalog entry identity is malformed")
+            parsed_entries.append(
+                RuntimeVerificationCatalogEntry(
+                    candidate_id=candidate_id,
+                    description=description,
+                    argv=(),
+                )
+            )
+        if len({entry.candidate_id for entry in parsed_entries}) != len(parsed_entries):
+            raise RuntimeDockerError("worker verification catalog contains duplicate candidates")
+        return RuntimeVerificationCatalog(
+            catalog_id=catalog_id,
+            source_sha256=source_sha256,
+            entries=tuple(parsed_entries),
+        )
+
+    def verify_catalog_entry(
+        self,
+        worker: object,
+        catalog: RuntimeVerificationCatalog,
+        candidate_id: str,
+        patch: bytes,
+    ) -> RuntimeVerificationResult:
+        handle = _worker_handle(worker)
+        encoded = base64.b64encode(
+            _canonical_bytes(
+                {
+                    "catalog_id": catalog.catalog_id,
+                    "candidate_id": candidate_id,
+                    "patch_base64": base64.b64encode(patch).decode("ascii"),
+                }
+            )
+        ).decode("ascii")
+        output = self._exec_json(
+            handle.container,
+            ["python3", _WORKER_ENTRY, "verify", encoded],
+            user=handle.candidate.definition.worker.user,
+            tool_error=True,
+        )
+        if (
+            set(output) != {"schema_version", "response_type", "result"}
+            or output.get("schema_version") != "v1"
+            or output.get("response_type") != "runtime_worker_verification_result"
+        ):
+            raise RuntimeDockerError("worker verification result envelope drifted")
+        result = output.get("result")
+        if not isinstance(result, Mapping):
+            raise RuntimeDockerError("worker verification result is malformed")
+        return _runtime_verification_result(result, catalog.catalog_id, candidate_id)
 
     def snapshot_patch(self, worker: object) -> RuntimeSnapshotEvidence:
         handle = _worker_handle(worker)
@@ -1896,6 +1999,130 @@ def _runtime_tool_result(
         raise RuntimeDockerError("worker tool result drifted")
     return RuntimeToolResult(
         tool=expected_tool,
+        exit_code=exit_code,
+        stdout=str(value["stdout"]),
+        stderr=str(value["stderr"]),
+        truncated=bool(value["truncated"]),
+        timed_out=bool(value["timed_out"]),
+        duration_ms=duration_ms,
+    )
+
+
+def _runtime_verification_result(
+    value: Mapping[str, object],
+    expected_catalog_id: str,
+    expected_candidate_id: str,
+) -> RuntimeVerificationResult:
+    expected_keys = {
+        "catalog_id",
+        "candidate_id",
+        "status",
+        "reason_code",
+        "safe_hint",
+        "exit_code",
+        "stdout",
+        "stderr",
+        "truncated",
+        "timed_out",
+        "duration_ms",
+        "baseline",
+    }
+    status = value.get("status")
+    exit_code = value.get("exit_code")
+    duration_ms = value.get("duration_ms")
+    reason_code = value.get("reason_code")
+    safe_hint = value.get("safe_hint")
+    baseline_value = value.get("baseline")
+    if (
+        set(value) != expected_keys
+        or value.get("catalog_id") != expected_catalog_id
+        or value.get("candidate_id") != expected_candidate_id
+        or status
+        not in {
+            "passed",
+            "test_failed",
+            "command_invalid",
+            "environment_failure",
+            "timed_out",
+        }
+        or (reason_code is not None and not isinstance(reason_code, str))
+        or (safe_hint is not None and not isinstance(safe_hint, str))
+        or (
+            exit_code is not None
+            and (isinstance(exit_code, bool) or not isinstance(exit_code, int))
+        )
+        or not isinstance(value.get("stdout"), str)
+        or not isinstance(value.get("stderr"), str)
+        or not isinstance(value.get("truncated"), bool)
+        or not isinstance(value.get("timed_out"), bool)
+        or isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 0
+        or not isinstance(baseline_value, Mapping)
+    ):
+        raise RuntimeDockerError("worker verification result drifted")
+    baseline = _runtime_verification_observation(baseline_value)
+    return RuntimeVerificationResult(
+        catalog_id=expected_catalog_id,
+        candidate_id=expected_candidate_id,
+        status=status,
+        reason_code=reason_code,
+        safe_hint=safe_hint,
+        exit_code=exit_code,
+        stdout=str(value["stdout"]),
+        stderr=str(value["stderr"]),
+        truncated=bool(value["truncated"]),
+        timed_out=bool(value["timed_out"]),
+        duration_ms=duration_ms,
+        baseline=baseline,
+    )
+
+
+def _runtime_verification_observation(
+    value: Mapping[str, object],
+) -> RuntimeVerificationObservation:
+    expected_keys = {
+        "status",
+        "reason_code",
+        "safe_hint",
+        "exit_code",
+        "stdout",
+        "stderr",
+        "truncated",
+        "timed_out",
+        "duration_ms",
+    }
+    status = value.get("status")
+    exit_code = value.get("exit_code")
+    duration_ms = value.get("duration_ms")
+    reason_code = value.get("reason_code")
+    safe_hint = value.get("safe_hint")
+    if (
+        set(value) != expected_keys
+        or status
+        not in {
+            "passed",
+            "test_failed",
+            "command_invalid",
+            "environment_failure",
+            "timed_out",
+        }
+        or (reason_code is not None and not isinstance(reason_code, str))
+        or (safe_hint is not None and not isinstance(safe_hint, str))
+        or (exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)))
+        or not isinstance(value.get("stdout"), str)
+        or not isinstance(value.get("stderr"), str)
+        or not isinstance(value.get("truncated"), bool)
+        or not isinstance(value.get("timed_out"), bool)
+        or isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 0
+    ):
+        raise RuntimeDockerError("worker verification baseline drifted")
+    return RuntimeVerificationObservation(
+        status=status,
+        reason_code=reason_code,
+        safe_hint=safe_hint,
         exit_code=exit_code,
         stdout=str(value["stdout"]),
         stderr=str(value["stderr"]),

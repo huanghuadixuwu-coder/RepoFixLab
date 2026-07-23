@@ -9,6 +9,7 @@ import { verifyM6EvaluationCohorts, type M6EvaluationCohorts } from "../m6/cohor
 import { createDefaultM7FormalRunDependencies, runM7FormalRun } from "./formal-runner.ts";
 import { loadM7FormalMetricEvidence } from "./formal-metric-evidence.ts";
 import { createM7SecurityAuditReport } from "./security-audit.ts";
+import { R2_PROTOCOL_REVISION, runR2Batch } from "../r2/batch-runner.ts";
 
 export const M7_PER_RUN_ADMISSION_CAP_TOKENS = 5_000_000;
 export const M7_MAX_MODEL_TURNS = 128;
@@ -116,6 +117,9 @@ export async function runM7Batch(
 	artifactsRoot: string,
 	controllerUrl: string,
 ): Promise<BatchExecutionSummary> {
+	if (plan.experiment_id === R2_PROTOCOL_REVISION) {
+		return runR2Batch(plan, artifactsRoot, controllerUrl);
+	}
 	assertM7Plan(plan);
 	const cohorts: M6EvaluationCohorts = verifyM6EvaluationCohorts(cohortsValue);
 	const specs = createBatchRunSpecs(plan, [

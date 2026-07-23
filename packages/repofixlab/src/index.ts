@@ -18,5 +18,6 @@ export * from "./m7/batch-runner.ts";
 export * from "./m9/batch-runner.ts";
 export * from "./m9/analysis.ts";
 export * from "./m8/analysis.ts";
+export * from "./r2/batch-runner.ts";
 export * from "./contracts/m6-task-environment-lock.ts";
 export * from "./metrics/index.ts";

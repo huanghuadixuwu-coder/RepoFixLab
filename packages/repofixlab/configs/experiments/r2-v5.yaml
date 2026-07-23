@@ -1,0 +1,45 @@
+schema_version: v1
+plan_type: experiment_capacity
+experiment_id: repofixlab-r2-v5
+task_selection:
+  status: frozen
+  declared_task_count: 26
+  instance_ids:
+    - axios__axios-4731
+    - axios__axios-4738
+    - axios__axios-5892
+    - axios__axios-6539
+    - immutable-js__immutable-js-2005
+    - immutable-js__immutable-js-2006
+    - mrdoob__three.js-25687
+    - mrdoob__three.js-26589
+    - mrdoob__three.js-27395
+    - preactjs__preact-2757
+    - preactjs__preact-2896
+    - preactjs__preact-2927
+    - preactjs__preact-3010
+    - preactjs__preact-3062
+    - preactjs__preact-3345
+    - preactjs__preact-3454
+    - preactjs__preact-3562
+    - preactjs__preact-3567
+    - preactjs__preact-3689
+    - preactjs__preact-3739
+    - preactjs__preact-3763
+    - preactjs__preact-4152
+    - preactjs__preact-4182
+    - preactjs__preact-4245
+    - preactjs__preact-4316
+    - preactjs__preact-4436
+matrix:
+  - group_id: posthoc-diagnostic
+    task_count: 26
+    config_ids:
+      - repofix-full
+      - repofix-no-localize
+      - repofix-no-verify-feedback
+    replicates: 1
+budget:
+  per_run_accounted_admission_cap_tokens: 5000000
+  total_accounted_admission_cap_tokens: 390000000
+runtime_status: m7_formal_available

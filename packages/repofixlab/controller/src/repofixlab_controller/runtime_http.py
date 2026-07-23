@@ -60,6 +60,16 @@ class RuntimeExecuteToolRequest(_RuntimeWriteRequest):
     input: dict[str, object]
 
 
+class RuntimeVerificationCatalogRequest(_RuntimeWriteRequest):
+    request_type: Literal["runtime_verification_catalog"]
+
+
+class RuntimeVerifyCatalogRequest(_RuntimeWriteRequest):
+    request_type: Literal["runtime_verify_catalog"]
+    catalog_id: str = Field(min_length=1, max_length=160, pattern=_IDENTIFIER_PATTERN)
+    candidate_id: str = Field(min_length=1, max_length=160, pattern=_IDENTIFIER_PATTERN)
+
+
 class RuntimeSnapshotPatchRequest(_RuntimeWriteRequest):
     request_type: Literal["runtime_snapshot_patch"]
 
@@ -111,6 +121,30 @@ def install_runtime_routes(application: FastAPI) -> None:
         return _write_call(
             application,
             lambda service: service.execute_tool(
+                {**_body(request), "lease_id": lease_id}
+            ),
+        )
+
+    @application.post("/internal/v1/runtime/workers/{lease_id}/verification-catalog")
+    def runtime_verification_catalog(
+        request: RuntimeVerificationCatalogRequest,
+        lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
+    ) -> JSONResponse:
+        return _write_call(
+            application,
+            lambda service: service.verification_catalog(
+                {**_body(request), "lease_id": lease_id}
+            ),
+        )
+
+    @application.post("/internal/v1/runtime/workers/{lease_id}/verify")
+    def runtime_verify_catalog(
+        request: RuntimeVerifyCatalogRequest,
+        lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
+    ) -> JSONResponse:
+        return _write_call(
+            application,
+            lambda service: service.verify_catalog_entry(
                 {**_body(request), "lease_id": lease_id}
             ),
         )

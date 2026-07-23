@@ -35,7 +35,7 @@ const RunBudgetSchema = Type.Object(
 	{
 		accounted_admission_cap_tokens: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
 		max_model_turns: Type.Integer({ minimum: 1 }),
-		max_tool_calls: Type.Integer({ minimum: 1 }),
+		max_tool_calls: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
 		max_wall_time_ms: Type.Integer({ minimum: 1 }),
 	},
 	{ additionalProperties: false },
@@ -216,7 +216,13 @@ export const PatchSnapshotSchema = Type.Object(
 		snapshot_id: IdentifierSchema,
 		run_id: IdentifierSchema,
 		attempt_id: IdentifierSchema,
-		label: Type.Union([Type.Literal("candidate"), Type.Literal("P0"), Type.Literal("P1")]),
+		label: Type.Union([
+			Type.Literal("candidate"),
+			Type.Literal("P0"),
+			Type.Literal("V1"),
+			Type.Literal("V2"),
+			Type.Literal("P1"),
+		]),
 		base_commit: Type.String({ pattern: GIT_SHA1_PATTERN }),
 		base_tree: GitTreeSchema,
 		candidate_tree: GitTreeSchema,

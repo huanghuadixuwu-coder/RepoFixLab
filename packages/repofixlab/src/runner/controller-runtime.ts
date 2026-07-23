@@ -19,6 +19,52 @@ export interface RuntimePreparedWorker {
 	readonly leaseId: string;
 }
 
+export interface RuntimeVerificationCandidate {
+	readonly candidateId: string;
+	readonly description: string;
+}
+
+export interface RuntimeVerificationCatalog {
+	readonly catalogId: string;
+	readonly sourceSha256: string;
+	readonly entries: readonly RuntimeVerificationCandidate[];
+}
+
+export type RuntimeVerificationStatus =
+	| "passed"
+	| "test_failed"
+	| "command_invalid"
+	| "environment_failure"
+	| "timed_out";
+
+export interface RuntimeVerificationObservation {
+	readonly status: RuntimeVerificationStatus;
+	readonly reasonCode: string | null;
+	readonly safeHint: string | null;
+	readonly exitCode: number | null;
+	readonly stdout: string;
+	readonly stderr: string;
+	readonly truncated: boolean;
+	readonly timedOut: boolean;
+	readonly durationMs: number;
+}
+
+export interface RuntimeVerificationResult {
+	readonly catalogId: string;
+	readonly candidateId: string;
+	readonly status: RuntimeVerificationStatus;
+	readonly reasonCode: string | null;
+	readonly safeHint: string | null;
+	readonly exitCode: number | null;
+	readonly stdout: string;
+	readonly stderr: string;
+	readonly truncated: boolean;
+	readonly timedOut: boolean;
+	readonly durationMs: number;
+	/** Test result on the unmodified base commit, run in a separate isolated clone. */
+	readonly baseline: RuntimeVerificationObservation;
+}
+
 export interface RuntimePatchFile {
 	readonly path: string;
 	readonly status: "added" | "modified" | "deleted" | "renamed";
@@ -75,6 +121,18 @@ export interface RuntimeController {
 		instanceId: string,
 	): Promise<RuntimePreparedWorker>;
 	toolTransport(attemptId: string): RepoToolTransport;
+	verificationCatalog?(
+		attemptId: string,
+		operationId: string,
+		leaseId: string,
+	): Promise<RuntimeVerificationCatalog>;
+	verifyCatalogEntry?(
+		attemptId: string,
+		operationId: string,
+		leaseId: string,
+		catalogId: string,
+		candidateId: string,
+	): Promise<RuntimeVerificationResult>;
 	snapshot(attemptId: string, operationId: string, leaseId: string): Promise<RuntimePatchSnapshot>;
 	destroy(attemptId: string, operationId: string, leaseId: string): Promise<RuntimeCleanup>;
 	startEvaluation(
@@ -141,6 +199,33 @@ function nullableString(value: JsonRecord, key: string): string | null {
 	const field = value[key];
 	if (field !== null && typeof field !== "string") throw new Error(`Controller field ${key} is invalid`);
 	return field;
+}
+
+function verificationObservation(value: JsonRecord, label: string): RuntimeVerificationObservation {
+	exactKeys(
+		value,
+		["status", "reason_code", "safe_hint", "exit_code", "stdout", "stderr", "truncated", "timed_out", "duration_ms"],
+		label,
+	);
+	const status = stringField(value, "status");
+	if (!(["passed", "test_failed", "command_invalid", "environment_failure", "timed_out"] as const).includes(status as RuntimeVerificationStatus))
+		throw new Error("Controller verification status is invalid");
+	const exitCode = value.exit_code;
+	if (exitCode !== null && (typeof exitCode !== "number" || !Number.isSafeInteger(exitCode)))
+		throw new Error("Controller verification exit code is invalid");
+	if (typeof value.duration_ms !== "number" || !Number.isSafeInteger(value.duration_ms) || value.duration_ms < 0)
+		throw new Error("Controller verification duration is invalid");
+	return {
+		status: status as RuntimeVerificationStatus,
+		reasonCode: nullableString(value, "reason_code"),
+		safeHint: nullableString(value, "safe_hint"),
+		exitCode,
+		stdout: stringField(value, "stdout"),
+		stderr: stringField(value, "stderr"),
+		truncated: boolField(value, "truncated"),
+		timedOut: boolField(value, "timed_out"),
+		durationMs: value.duration_ms,
+	};
 }
 
 function strictBase64(value: string): Uint8Array {
@@ -238,6 +323,103 @@ export class HttpRuntimeController implements RuntimeController {
 
 	toolTransport(attemptId: string): RepoToolTransport {
 		return new HttpRepoToolTransport({ controllerUrl: this.controllerUrl, attemptId, fetchFn: this.fetchFn });
+	}
+
+	async verificationCatalog(
+		attemptId: string,
+		operationId: string,
+		leaseId: string,
+	): Promise<RuntimeVerificationCatalog> {
+		const body = await this.write(
+			`/internal/v1/runtime/workers/${encodeURIComponent(leaseId)}/verification-catalog`,
+			attemptId,
+			operationId,
+			{ request_type: "runtime_verification_catalog" },
+			{ lease_id: leaseId },
+		);
+		this.verifyWriteResponse(body, "runtime_verification_catalog", "ready");
+		if (stringField(body, "lease_id", IDENTIFIER) !== leaseId) throw new Error("Controller verification catalog lease drifted");
+		const catalog = record(body.catalog, "Verification catalog");
+		exactKeys(catalog, ["catalog_id", "source_sha256", "entries"], "Verification catalog");
+		const entriesValue = catalog.entries;
+		if (!Array.isArray(entriesValue) || entriesValue.length > 16) throw new Error("Controller verification catalog entries are invalid");
+		const entries = entriesValue.map((value) => {
+			const entry = record(value, "Verification catalog entry");
+			exactKeys(entry, ["candidate_id", "description"], "Verification catalog entry");
+			return {
+				candidateId: stringField(entry, "candidate_id", IDENTIFIER),
+				description: stringField(entry, "description"),
+			} satisfies RuntimeVerificationCandidate;
+		});
+		if (new Set(entries.map((entry) => entry.candidateId)).size !== entries.length)
+			throw new Error("Controller verification catalog contains duplicate candidates");
+		return {
+			catalogId: stringField(catalog, "catalog_id", IDENTIFIER),
+			sourceSha256: stringField(catalog, "source_sha256", SHA256),
+			entries,
+		};
+	}
+
+	async verifyCatalogEntry(
+		attemptId: string,
+		operationId: string,
+		leaseId: string,
+		catalogId: string,
+		candidateId: string,
+	): Promise<RuntimeVerificationResult> {
+		const body = await this.write(
+			`/internal/v1/runtime/workers/${encodeURIComponent(leaseId)}/verify`,
+			attemptId,
+			operationId,
+			{
+				request_type: "runtime_verify_catalog",
+				catalog_id: catalogId,
+				candidate_id: candidateId,
+			},
+			{ lease_id: leaseId, catalog_id: catalogId, candidate_id: candidateId },
+		);
+		this.verifyWriteResponse(body, "runtime_verification_result", "completed");
+		if (stringField(body, "lease_id", IDENTIFIER) !== leaseId) throw new Error("Controller verification result lease drifted");
+		const result = record(body.result, "Verification result");
+		exactKeys(
+			result,
+			[
+				"catalog_id",
+				"candidate_id",
+				"status",
+				"reason_code",
+				"safe_hint",
+				"exit_code",
+				"stdout",
+				"stderr",
+				"truncated",
+				"timed_out",
+				"duration_ms",
+				"baseline",
+			],
+			"Verification result",
+		);
+		if (stringField(result, "catalog_id", IDENTIFIER) !== catalogId || stringField(result, "candidate_id", IDENTIFIER) !== candidateId)
+			throw new Error("Controller verification result identity drifted");
+		const candidate = verificationObservation(
+			{
+				status: result.status,
+				reason_code: result.reason_code,
+				safe_hint: result.safe_hint,
+				exit_code: result.exit_code,
+				stdout: result.stdout,
+				stderr: result.stderr,
+				truncated: result.truncated,
+				timed_out: result.timed_out,
+				duration_ms: result.duration_ms,
+			},
+			"Verification candidate result",
+		);
+		const baseline = verificationObservation(
+			record(result.baseline, "Verification baseline result"),
+			"Verification baseline result",
+		);
+		return { catalogId, candidateId, ...candidate, baseline };
 	}
 
 	async snapshot(attemptId: string, operationId: string, leaseId: string): Promise<RuntimePatchSnapshot> {
@@ -464,7 +646,24 @@ export class HttpRuntimeController implements RuntimeController {
 			...init,
 			signal: AbortSignal.timeout(this.timeoutMs),
 		});
-		if (!response.ok) throw new Error(`Controller runtime returned HTTP ${response.status}`);
+		if (!response.ok) {
+			const text = (await response.text()).slice(0, 4_096);
+			let detail = text;
+			try {
+				const parsed: unknown = JSON.parse(text);
+				if (
+					typeof parsed === "object" &&
+					parsed !== null &&
+					"detail" in parsed &&
+					typeof (parsed as { detail: unknown }).detail === "string"
+				) {
+					detail = (parsed as { detail: string }).detail;
+				}
+			} catch {
+				// A non-JSON Controller error is still useful diagnostic evidence.
+			}
+			throw new Error(`Controller runtime returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+		}
 		if (!response.headers.get("content-type")?.toLowerCase().includes("application/json"))
 			throw new Error("Controller runtime returned non-JSON content");
 		const contentLength = response.headers.get("content-length");

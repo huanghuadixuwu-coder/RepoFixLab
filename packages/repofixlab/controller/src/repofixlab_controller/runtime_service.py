@@ -23,8 +23,12 @@ from .runtime_tools import (
     RuntimeToolError,
     RuntimeToolName,
     RuntimeToolResult,
+    RuntimeVerificationCatalog,
+    RuntimeVerificationObservation,
+    RuntimeVerificationResult,
     RuntimeSnapshotEvidence,
     SNAPSHOT_LIMIT_BYTES,
+    tool_rejection_reason_code,
 )
 
 
@@ -122,6 +126,16 @@ class RuntimeBackendProtocol(Protocol):
         arguments: Mapping[str, object],
     ) -> RuntimeToolResult: ...
 
+    def verification_catalog(self, worker: object) -> RuntimeVerificationCatalog: ...
+
+    def verify_catalog_entry(
+        self,
+        worker: object,
+        catalog: RuntimeVerificationCatalog,
+        candidate_id: str,
+        patch: bytes,
+    ) -> RuntimeVerificationResult: ...
+
     def snapshot_patch(self, worker: object) -> RuntimeSnapshotEvidence: ...
 
     def destroy_worker(self, worker: object) -> RuntimeCleanupResult: ...
@@ -181,6 +195,7 @@ class _AttemptState:
     snapshot_policy_passed: bool = False
     run_id: str | None = None
     evaluation_id: str | None = None
+    verification_catalog: RuntimeVerificationCatalog | None = None
 
 
 class RuntimeOperationService:
@@ -334,6 +349,81 @@ class RuntimeOperationService:
                 lease_id=_request_string(canonical, "lease_id"),
                 tool=tool,
                 input=dict(tool_input),
+                result=result.to_dict(),
+            )
+
+        return self._execute_write(canonical, precheck, perform)
+
+    def verification_catalog(self, request: Mapping[str, object]) -> RuntimeOperationResult:
+        canonical = _validate_write_request(
+            request,
+            "runtime_verification_catalog",
+            frozenset({"lease_id"}),
+        )
+
+        def precheck() -> None:
+            attempt = self._require_worker_attempt(canonical)
+            if attempt.phase not in {"worker_active", "snapshotted"}:
+                raise RuntimeInvalidState("verification catalog requires an active worker")
+
+        def perform() -> dict[str, object]:
+            attempt = self._require_worker_attempt(canonical)
+            catalog = self._backend.verification_catalog(
+                _required_handle(attempt.worker, "worker")
+            )
+            _validate_verification_catalog(catalog)
+            attempt.verification_catalog = catalog
+            return _write_response(
+                canonical,
+                "runtime_verification_catalog",
+                "ready",
+                lease_id=_request_string(canonical, "lease_id"),
+                catalog=catalog.public_dict(),
+            )
+
+        return self._execute_write(canonical, precheck, perform)
+
+    def verify_catalog_entry(self, request: Mapping[str, object]) -> RuntimeOperationResult:
+        canonical = _validate_write_request(
+            request,
+            "runtime_verify_catalog",
+            frozenset({"lease_id", "catalog_id", "candidate_id"}),
+        )
+
+        def precheck() -> None:
+            attempt = self._require_worker_attempt(canonical)
+            if (
+                attempt.phase != "snapshotted"
+                or attempt.patch is None
+                or attempt.verification_catalog is None
+            ):
+                raise RuntimeInvalidState(
+                    "catalog verification requires a current snapshot and catalog"
+                )
+            if canonical.get("catalog_id") != attempt.verification_catalog.catalog_id:
+                raise RuntimeRequestRejected("verification catalog does not belong to the active worker")
+
+        def perform() -> dict[str, object]:
+            attempt = self._require_worker_attempt(canonical)
+            catalog = attempt.verification_catalog
+            if catalog is None:
+                raise RuntimeServiceUnavailable("verification catalog disappeared")
+            result = self._backend.verify_catalog_entry(
+                _required_handle(attempt.worker, "worker"),
+                catalog,
+                _request_string(canonical, "candidate_id"),
+                _required_patch(attempt.patch),
+            )
+            _validate_verification_result(
+                result,
+                catalog.catalog_id,
+                _request_string(canonical, "candidate_id"),
+            )
+            return _write_response(
+                canonical,
+                "runtime_verification_result",
+                "completed",
+                lease_id=_request_string(canonical, "lease_id"),
                 result=result.to_dict(),
             )
 
@@ -677,12 +767,13 @@ class RuntimeOperationService:
                 self._journal.begin(body, request_hash)
                 try:
                     response = perform()
-                except RuntimeToolError:
+                except RuntimeToolError as error:
                     response = _write_response(
                         request,
                         "runtime_operation_rejected",
                         "rejected",
                         error_class="tool_request_rejected",
+                        reason_code=tool_rejection_reason_code(error),
                     )
                     self._journal.finish(body, request_hash, response)
                     with self._lock:
@@ -1058,6 +1149,90 @@ def _validate_manifest(
         or manifest.tools != RUNTIME_TOOL_NAMES
     ):
         raise RuntimeServiceUnavailable("runtime preflight manifest drifted")
+
+
+def _validate_verification_catalog(catalog: RuntimeVerificationCatalog) -> None:
+    if (
+        not isinstance(catalog, RuntimeVerificationCatalog)
+        or _IDENTIFIER.fullmatch(catalog.catalog_id) is None
+        or _SHA256.fullmatch(catalog.source_sha256) is None
+        or not isinstance(catalog.entries, tuple)
+        or len(catalog.entries) > 16
+    ):
+        raise RuntimeServiceUnavailable("runtime verification catalog drifted")
+    candidate_ids: set[str] = set()
+    for entry in catalog.entries:
+        if (
+            _IDENTIFIER.fullmatch(entry.candidate_id) is None
+            or not entry.description
+            or len(entry.description) > 512
+            or entry.candidate_id in candidate_ids
+        ):
+            raise RuntimeServiceUnavailable("runtime verification catalog entry drifted")
+        candidate_ids.add(entry.candidate_id)
+
+
+def _validate_verification_result(
+    result: RuntimeVerificationResult,
+    expected_catalog_id: str,
+    expected_candidate_id: str,
+) -> None:
+    if (
+        not isinstance(result, RuntimeVerificationResult)
+        or result.catalog_id != expected_catalog_id
+        or result.candidate_id != expected_candidate_id
+        or result.status
+        not in {
+            "passed",
+            "test_failed",
+            "command_invalid",
+            "environment_failure",
+            "timed_out",
+        }
+        or (result.reason_code is not None and not result.reason_code)
+        or (result.safe_hint is not None and not result.safe_hint)
+        or (
+            result.exit_code is not None
+            and (isinstance(result.exit_code, bool) or not isinstance(result.exit_code, int))
+        )
+        or not isinstance(result.stdout, str)
+        or not isinstance(result.stderr, str)
+        or not isinstance(result.truncated, bool)
+        or not isinstance(result.timed_out, bool)
+        or isinstance(result.duration_ms, bool)
+        or not isinstance(result.duration_ms, int)
+        or result.duration_ms < 0
+        or not _valid_verification_observation(result.baseline)
+    ):
+        raise RuntimeServiceUnavailable("runtime verification result drifted")
+
+
+def _valid_verification_observation(value: object) -> bool:
+    if not isinstance(value, RuntimeVerificationObservation):
+        return False
+    return (
+        value.status
+        in {
+            "passed",
+            "test_failed",
+            "command_invalid",
+            "environment_failure",
+            "timed_out",
+        }
+        and (value.reason_code is None or bool(value.reason_code))
+        and (value.safe_hint is None or bool(value.safe_hint))
+        and (
+            value.exit_code is None
+            or (not isinstance(value.exit_code, bool) and isinstance(value.exit_code, int))
+        )
+        and isinstance(value.stdout, str)
+        and isinstance(value.stderr, str)
+        and isinstance(value.truncated, bool)
+        and isinstance(value.timed_out, bool)
+        and not isinstance(value.duration_ms, bool)
+        and isinstance(value.duration_ms, int)
+        and value.duration_ms >= 0
+    )
 
 
 def _validate_snapshot(

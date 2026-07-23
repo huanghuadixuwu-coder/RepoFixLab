@@ -35,6 +35,7 @@ function Show-Usage {
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m1 [--config configs/experiments/m1-axios.yaml]")
 	[Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m6 [--resume <m6 staging run>] [--secret-file <path>]")
 	[Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m6 continue --source-report <sealed calibration report> [--resume <continuation staging run>] [--secret-file <path>]")
+	[Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 run m7 [--secret-file <path>]")
     [Console]::Out.WriteLine("  .\scripts\repofixlab.ps1 --help")
 }
 
@@ -3852,6 +3853,14 @@ if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "run" -an
 	}
 	exit $LASTEXITCODE
 }
+if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "run" -and $script:CliArguments[1] -ceq "m7") {
+	$m7Script = Join-Path $PSScriptRoot "repofixlab-m7.ps1"
+	$m7Arguments = @($script:CliArguments | Select-Object -Skip 2)
+	if ($m7Arguments.Count -eq 0) { & $m7Script }
+	elseif ($m7Arguments.Count -eq 2 -and $m7Arguments[0] -ceq "--secret-file") { & $m7Script -SecretFile $m7Arguments[1] }
+	else { Stop-ForUsage "run m7 accepts only an optional --secret-file <path>" }
+	exit $LASTEXITCODE
+}
 if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "images" -and $script:CliArguments[1] -ceq "lock-input") {
     if ($script:CliArguments.Count -ne 2) {
         Stop-ForUsage "images lock-input does not accept options"
@@ -3892,7 +3901,7 @@ if ($script:CliArguments.Count -ge 2 -and $script:CliArguments[0] -ceq "dataset"
     exit $selfCheckResult.ExitCode
 }
 if ($script:CliArguments.Count -lt 2 -or $script:CliArguments[0] -cne "dataset" -or $script:CliArguments[1] -cne "prepare") {
-    Stop-ForUsage "Expected command: run m1, run m6, dataset prepare, dataset self-check, images lock-input, or images prepare-axios"
+    Stop-ForUsage "Expected command: run m1, run m6, run m7, dataset prepare, dataset self-check, images lock-input, or images prepare-axios"
 }
 
 $configRequest = "configs/dataset/v1.yaml"
