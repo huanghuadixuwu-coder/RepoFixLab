@@ -2,172 +2,140 @@
 
 基于真实 GitHub Issue 的容器化代码修复智能体与可信评测平台。
 
-RepoFixLab 关注的不是“Agent 能否生成一段看起来合理的代码”，而是一个可复核的工程问题：在相同模型、任务环境和预算约束下，结构化代码修复流程能否稳定解决真实软件问题，并同时证明结果的正确性、安全性、成本和可复现性。
+RepoFixLab 建立在 [Pi](https://github.com/earendil-works/pi) 的公开 session API 之上：Pi 提供通用 Agent 运行时，RepoFixLab 负责将真实代码修复任务组织为受控工作流，并将修复结果交给独立、全新的官方评测环境裁决。项目关注的不是“能否生成一段看起来合理的补丁”，而是能否在冻结的任务、环境、模型和预算条件下，留下可复核的修复、回归、安全和资源证据。
 
-当前仓库已经完成 M0 环境与评测基座，状态为 **GO**。RepoFix Agent、M1 纵向切片和大规模 SWE-bench 实验仍在后续范围内。
-
-- [M0 状态与完整事实](docs/status/repofixlab-m0-status.md)
-- [M0 可移植证据包](docs/evidence/repofixlab-m0/)
-- [系统设计规格](docs/designs/repofixlab.md)
-- [M6 校准可靠性与 Token 成本复盘](docs/designs/repofixlab-m6-calibration-postmortem.md)
-
-## 为什么做 RepoFixLab
-
-真实代码修复评测容易受到四类问题影响：
-
-1. **择优展示与信息泄露**：只展示成功样本、让 Agent 接触评测实现或在同一环境中反复试探，会放大表面通过率。
-2. **指标单一**：只统计补丁是否通过，无法描述耗时、资源消耗、失败轨迹、安全事件和重复运行稳定性。
-3. **环境不可控**：Agent 直接操作宿主机时，文件、进程、网络、凭据和依赖状态难以隔离，也难以复位。
-4. **效果无法归因**：没有固定数据、镜像、Harness 和公平基线时，无法判断改进来自工作流、上下文、工具还是模型本身。
-
-RepoFixLab 以冻结输入、容器化角色、只写一次的锁、官方 Harness 等价性验证、逐项证据绑定和失败样本保留来建立可信评测边界。M0 先证明“环境和裁判可信”；Agent 能力与对照/消融实验在后续阶段进入同一基座。
-
-## 与 Pi 的关系
-
-RepoFixLab 是对 [Pi](https://github.com/earendil-works/pi) 的工程扩展，不是另写一套 Agent runtime，也不修改 Pi 的核心 agent loop。
-
-后续 RepoFix Agent 将通过 `@earendil-works/pi-coding-agent` 的公开 session API 组织上下文、工具和模型调用。Pi 继续负责通用 Agent 循环与会话能力；RepoFixLab 负责代码修复工作流、Docker 控制面、任务环境、官方评测、指标和证据发布。两者的边界可独立测试，也便于与原始 Pi 流程进行公平对照和消融。
+当前实现覆盖冻结任务准备、Docker 隔离执行、RepoFix 阶段化工作流、官方 Evaluator、实验账本和离线分析。任务接入目前是受控的实验清单/命令行入口；尚未提供把任意 GitHub URL 直接提交给平台执行的公网触发层。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    issue["真实 Issue / SWE-bench 任务"] --> locks["冻结数据、镜像与 Harness 锁"]
-    pi["Pi 公开 Session API"] --> agent["Agent 工作流<br/>M1：pi-general / M4：RepoFix Agent"]
-    agent --> orchestrator["RepoFixLab Orchestrator"]
-    locks --> orchestrator
-    orchestrator --> controller["受信 Controller"]
-    controller --> worker["Worker：非特权修复环境"]
-    controller --> evaluator["Evaluator：官方评测环境"]
-    worker --> evidence["轨迹、补丁与资源证据"]
-    evaluator --> evidence
+    issue["真实 GitHub Issue\nSWE-bench 任务"] --> locks["冻结输入\nDataset / Environment / Model / Harness Locks"]
+    locks --> orchestrator["Node Orchestrator\n实验计划、账本与制品发布"]
+    pi["Pi Session API"] --> fsm["RepoFix FSM\nUNDERSTAND → LOCALIZE → PLAN → PATCH → VERIFY → REFINE → REVIEW"]
+    fsm --> orchestrator
+    orchestrator --> controller["受信 Python Controller\n唯一 Docker socket 持有者"]
+    controller --> worker["Worker\n无特权、隔离的修复工作树"]
+    worker --> snapshot["候选补丁快照"]
+    snapshot --> evaluator["Fresh Evaluator\n固定官方 Harness"]
     locks --> evaluator
-    evidence --> doctor["TaskEnvironmentLock / Smoke Doctor"]
-    doctor --> report["不可变报告与评测数据"]
+    evaluator --> artifacts["不可变制品\nResult / Evaluation / Ledger / Report"]
+    controller --> artifacts
 ```
 
-只有 Controller 持有 Docker socket。Worker 与 Evaluator 均由 Controller 根据受信候选目录中的固定策略创建，调用方不能提交镜像、命令、挂载、网络或 capability 参数。
+职责边界如下：
 
-## M0 GO
+- **Orchestrator**：固定运行身份、预算、实验矩阵和证据发布，不直接给予 Agent Docker 权限。
+- **RepoFix Agent**：以 Pi session 为运行底座，按阶段产出定位、计划、补丁、自审和修订决策。
+- **Controller**：唯一可访问 Docker daemon 的受信控制面；调用方不能自定义镜像、命令、挂载、网络或 capability。
+- **Worker**：仅用于仓库探索和候选补丁，使用受限文件系统、网络和资源配额。
+- **Evaluator**：在 Worker 销毁后重新创建；只接收最终补丁快照，以固定官方 Harness 执行 F2P/P2P。
 
-M0 使用冻结的 `SWE-bench/SWE-bench_Multilingual` 数据修订和 Axios `axios__axios-5892` 纵向切片，完成了从输入锁到最终 Smoke Doctor 的正式证据链。
-
-| 项目 | 已验证结果 |
-| --- | --- |
-| 数据集 | 43 个真实任务，覆盖 7 个仓库；M0 当前只执行 Axios 单任务切片 |
-| Harness 等价性 | pristine/adapted × base/no-op/malformed/gold，8/8 PASS |
-| Worker/Evaluator 工厂探针 | 真实容器主动探测 PASS，严格执行 `worker → evaluator`，清理残留为 0 |
-| TaskEnvironmentLock | 固定数据、镜像、资源、安全策略、Factory 与 Harness 证据，原子发布 PASS |
-| Smoke Doctor | 全部检查组 PASS，20 个输入文件及真实路径互不重复 |
-| TypeScript/Vitest | 12 个显式测试文件，150/150 PASS |
-| Python Controller | 27/27 PASS |
-| 根工程检查 | `npm run check` PASS，Biome 检查 802 个文件且未产生修改 |
-| Docker 残留 | 临时、Factory、Bootstrap、CI 容器与卷均为 0；仅保留健康 Controller |
-
-精确镜像 ID、报告路径、语义 hash、文件 hash、失败尝试和发布权限见 [M0 状态文档](docs/status/repofixlab-m0-status.md)。可移植副本与校验清单见 [M0 证据包](docs/evidence/repofixlab-m0/)。
-
-## M0 的安全与可信边界
-
-- Controller 使用只读根文件系统、`cap_drop=ALL`、`no-new-privileges`、internal control network，并且不发布宿主机端口。
-- Docker Desktop socket 来源只接受 `/var/run/docker.sock` 或 `/run/host-services/docker.proxy.sock` 两个精确值之一；目标固定为 `/var/run/docker.sock` 且必须为读写挂载。
-- Worker 与 Evaluator 使用 `network=none`、只读根文件系统、固定 CPU/内存/PID 限制、独立任务卷，并且没有 Docker socket 或敏感环境变量。
-- 原始 `0600` 证据不会为了方便评测而放宽权限；受限身份创建逐字节 `0444` 副本，并复核大小和 SHA-256。
-- TaskEnvironmentLock 与 Smoke 采用 `0707` 唯一空目录、root 原子发布、owner 封存为 `0555`、root 只读复核的协议。
-- 失败 provenance、失败发布和失败 Smoke 全部保留，不能被改写或升级为最终通过结果。
-
-Docker socket 等价于 Docker daemon root 权限，因此 Controller 是受信控制面。`read_only`、capability 限制和 `no-new-privileges` 不被表述为对该 daemon 权限的隔离。
-
-## M0 没有证明什么
-
-M0 没有声称 RepoFix Agent 已实现，也没有给出代码修复成功率、Token 成本、时延或稳定性结论。以下内容尚未完成：
-
-- RepoFix Agent 的定位、规划、补丁生成、受控验证与迭代逻辑；
-- 原始 Pi 对照与工作流消融实验；
-- 多任务、多仓库和重复运行的统计评测；
-- 预算控制、失败分类、成本分析和最终可视化报告；
-- M1 纵向切片及后续 `formal` 生命周期。
-
-## M1 纵向切片
-
-M1 不实现完整 RepoFix 状态机，而是先完成第一条可展示、可验收的端到端链路：
+## 工作流
 
 ```text
-pi-general → candidate.patch → fresh Evaluator → result.json / events.jsonl / report.html
+冻结任务清单
+  → 预检并绑定 DatasetLock / TaskEnvironmentLock / 模型与预算
+  → Pi Session 启动 RepoFix FSM
+  → UNDERSTAND / LOCALIZE / PLAN
+  → PATCH_P0 → Controller-owned controlled verification (V0)
+  → REFINE_1 → PATCH_V1 → verification (V1)
+  → REFINE_2 → PATCH_V2 → verification (V2)
+  → SELF_REVIEW → PATCH_P1
+  → 销毁 Worker，创建新的官方 Evaluator
+  → F2P、P2P、Token、耗时、安全事件写入不可变报告
 ```
 
-M1 的强制退出门是：一条 Compose 命令贯通 manifest、Agent、补丁、全新 Evaluator 和报告；无论模型成功修复还是失败，都必须产生包含官方结果、Token、耗时和失败原因的完整终态制品。
+受控验证不是让模型执行任意 shell 命令：Controller 从冻结 `package.json` 预检得到候选测试目录，模型只选择候选 ID。私有 F2P/P2P 定义、官方日志和 Harness 不暴露给 Agent；通用回归通过也不能替代官方验收。
 
-## 总体目标工作流（M4）
+## 输入与输出示例
 
-完整 RepoFix Agent 状态机属于 M4 目标。它将在 Pi 公开 API 上实现，不创建另一套 agent loop：
+下面是一次正式任务的简化输入。真实运行还会绑定哈希、镜像、Harness 和预算账本；这些字段由实验计划生成，而不是由外部调用者自由传入。
 
-```text
-UNDERSTAND
-  → LOCALIZE
-  → PLAN
-  → PATCH_P0
-  → CONTROLLED_VERIFY
-  → REFINE
-  → PATCH_P1
-  → OFFICIAL_EVALUATE
-  → REPORT
+```json
+{
+  "instance_id": "preactjs__preact-3454",
+  "source": "SWE-bench Multilingual / GitHub Issue",
+  "base_commit": "<frozen commit>",
+  "configuration": "repofix-full",
+  "max_model_turns": 128,
+  "task_environment_lock": "<sha256-bound lock>"
+}
 ```
 
-`CONTROLLED_VERIFY` 为 Agent 可见的受控反馈；`OFFICIAL_EVALUATE` 使用隔离的官方评测边界。后续实验首先进行原始 Pi 对照与工作流消融，再决定是否扩展到更大的 SWE-bench 任务集合。
+一次完成的输出不是只有 `patch.diff`，而是一组可追溯制品：
 
-## Docker 快速开始
+```json
+{
+  "run_id": "run-...",
+  "terminal_status": "completed",
+  "resolved": true,
+  "candidate_patch": "patch snapshot sha256",
+  "official_evaluation": {
+    "fail_to_pass": "passed/total",
+    "pass_to_pass": "passed/total"
+  },
+  "usage": {
+    "accounted_tokens": 0,
+    "model_turns": 0,
+    "wall_time_ms": 0
+  },
+  "evidence": ["trajectory", "verification records", "evaluator result", "token ledger"]
+}
+```
 
-### 前置条件
+其中 `resolved` 仅在全部 F2P 通过且没有 P2P 回归时成立。数值 `0` 仅表示示意；正式结果使用实际 Provider 账本和官方 Evaluator 制品。
 
-- Docker Desktop 使用 Linux containers；
-- `linux/amd64`；
-- 至少 8 CPU、16 GiB Docker VM 内存，并为 artifacts 与 Docker managed volumes 各保留约 120 GB 可用空间；
-- Node.js 与 npm；Windows 主机执行正式包装器时需要 PowerShell。
+## 已完成实验与报告
 
-先检查 Docker 资源并安装依赖：
+完整结果与口径见 [实验结果摘要](docs/reports/repofixlab-experiment-summary.md)。核心结论分为两类，不能混为单一的同质对照：
+
+| 视图 | 任务成功率 | F2P | P2P | 说明 |
+| --- | ---: | ---: | ---: | --- |
+| Pi-general，M9 26 任务首次结果 | 21/26（80.77%） | 29/32（90.63%） | 587/592（99.16%） | 每个冻结任务仅选择一条 Pi 官方结果；64-turn 结果保留原轮次标签。 |
+| RepoFix，R2 最新替换视图 | 24/26（92.31%） | 30/32（93.75%） | 592/592（100%） | R3、恢复批次、R9/R12 和携带制品组成的 provenance-labelled composite，不是重新执行的单一同质批次。 |
+
+因此，R2 的 24/26 说明阶段化工作流经定向修复后的当前官方结果；它不能被表述为对 Pi 21/26 的一次固定预算、同批次显著性胜出。冻结 M7/M8 的 74 条逻辑运行仍按 64/128 turns 分层分析，且保留失败与无最终快照样本。
+
+- [M7 continuation 协议](docs/designs/repofixlab-m7-protocol-1.7.md)
+- [M8 离线分析契约](docs/designs/repofixlab-m8-analysis.md)
+- [M9 26 任务复用与完成协议](docs/designs/repofixlab-m9-reuse-protocol.md)
+- [R2 阶段化修复复盘](docs/designs/repofixlab-r2-remediation-postmortem.md)
+- [R2 执行契约](docs/designs/repofixlab-r2-execution-contract.md)
+
+## 本地运行
+
+前提：Docker Desktop 使用 Linux containers，已准备冻结数据/环境制品，并按实验计划配置模型凭据。不要将凭据写入制品或传给 Controller、Worker、Evaluator。
 
 ```powershell
-docker info --format "Memory={{.MemTotal}} CPUs={{.NCPU}} OS={{.OSType}} Arch={{.Architecture}}"
 npm ci --ignore-scripts
 npm run check
-```
 
-收集固定构建输入并构建 Controller/Orchestrator 镜像：
-
-```powershell
+# 构建并执行受控的锁定输入流程
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repofixlab.ps1 images lock-input
-```
 
-该命令只生成唯一的、未批准的 provenance candidate，不会静默替换 active lock。审计 candidate 并按 [RepoFixLab 包说明](packages/repofixlab/README.md)完成只写一次的 provenance 发布后，启动已构建且已锁定的控制面：
-
-```powershell
+# 启动受信 Controller 并运行 Bootstrap Doctor
 docker compose up -d --force-recreate --no-build controller
-docker compose ps
 docker compose run --rm --no-deps --pull never orchestrator doctor --profile bootstrap --output m0/bootstrap-doctor-<unique-id>.json
 ```
 
-不要复用已有输出路径。正式 TaskEnvironmentLock 和 Smoke 还要求已封存的数据、任务镜像、Harness 探针及唯一发布目录；完整的已验证输入和结果可从 [M0 证据包](docs/evidence/repofixlab-m0/)核对。
+正式实验必须使用已冻结的计划和唯一输出目录；失败运行同样需要保留终态证据，不能通过覆盖、静默重试或替换任务改善结果。
 
-## 目录结构
+## 项目结构
 
 ```text
-compose.yaml                         Docker 服务、网络与卷边界
-scripts/repofixlab.ps1              主机侧受控构建与数据生命周期入口
 packages/repofixlab/
-  controller/                       受信 Docker 控制面（Python）
-  src/                              Orchestrator、Doctor、锁与 TypeScript 合约
-  schemas/v1/                       跨语言 JSON Schema
-  task-images/                      Axios 固定任务镜像、审计与探针
-  test/                             RepoFixLab TypeScript 回归测试
-docs/designs/repofixlab.md          系统设计规格
-docs/status/repofixlab-m0-status.md M0 当前事实与边界
-docs/evidence/repofixlab-m0/        可移植 M0 证据索引与校验清单
-artifacts/                          运行生成的锁、报告、失败记录与证据
-packages/agent, ai, coding-agent    上游 Pi runtime 与公开 API
+  src/                 Node Orchestrator、RepoFix FSM、契约与报告
+  controller/          受信 Python Controller
+  evaluator/           官方评测适配与规范化
+  configs/             冻结实验计划
+  test/                工作流、评测、账本与安全回归测试
+docs/designs/          设计、协议、复盘与实验边界
+docs/reports/          面向阅读者的实验结果摘要
+artifacts/             本地不可变运行制品（通常不提交 Git）
+.pi/skills/            项目内 Pi 技能
 ```
 
-## 上游与许可证
+## 许可与上游
 
-RepoFixLab 基于 [earendil-works/pi](https://github.com/earendil-works/pi) 的 MIT 开源代码构建，并保留 Pi 原有包、历史和贡献者归属。Pi 提供通用 Agent runtime、模型接口、coding-agent session API 与终端能力；RepoFixLab 的新增部分聚焦真实代码修复工作流和可信评测基础设施。
-
-本仓库按 [MIT License](LICENSE) 发布。上游 Pi 的商标、项目名称和贡献归其各自权利人与贡献者所有。
+RepoFixLab 基于 [earendil-works/pi](https://github.com/earendil-works/pi) 的 MIT 代码和公开 API 扩展而来，不修改 Pi 的核心 agent loop。Pi 提供通用 Agent runtime；RepoFixLab 新增的是修复工作流、容器控制面、可信评测和实验报告能力。仓库按 [MIT License](LICENSE) 发布。

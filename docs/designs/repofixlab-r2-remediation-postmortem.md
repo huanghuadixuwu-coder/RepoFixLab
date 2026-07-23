@@ -9,15 +9,18 @@
 
 ## 1. 结论与统计口径
 
-RepoFix 的阶段性成功率从 **20/26（76.9%）**、**22/26（84.6%）** 到 **23/26（88.5%）**。三项结果不是可直接并列的三次独立 Full 批次，必须按下表标注：
+RepoFix 的阶段性成功率从 **20/26（76.9%）**、**22/26（84.6%）**、**23/26（88.5%）** 到 **24/26（92.3%）**。这些结果不是可直接并列的独立 Full 批次，必须按下表标注：
 
 | 阶段 | 任务成功率 | 结果口径 | 结论 |
 | --- | ---: | --- | --- |
 | 阶段 1：R2 Full 初始结果 | 20/26（76.9%） | 19 个直接 Full 已解决任务，加 1 个携带的 `immutable-js__immutable-js-2005` 定向结果 | 另有 3 个官方未解决和 3 个 Controller 身份基础设施失败；基础设施失败不属于修复质量失败。 |
 | 阶段 2：Controller 身份恢复后的修正 Full | 22/26（84.6%） | 仅以三任务恢复结果替换阶段 1 的 3 个基础设施失败 | 2 个恢复任务已解决，1 个仍未解决；历史上标注为 “corrected R2 Full”。 |
 | 阶段 3：语义工作流定向修复 | 23/26（88.5%） | 仅以 `semantic-workflow-4` 中已解决任务替换相应历史未解决结果 | 4 个有效未解决任务中解决 1 个，保留 3 个未解决；这是“假设替换后的 23/3”，不是原始 R2 Full 的重写。 |
+| 阶段 4：R9 follow-up 与 R12 3345 恢复后的替换口径 | 24/26（92.3%） | 以 R9 的 `4316`/`3567` 官方结果及 R12 的 `3345` 官方结果替换阶段 3 对应结果 | `4316` 由未解决变为已解决；`3345` 在 R9 因 SELF_REVIEW 覆盖检查失败而未评测，R12 恢复后确认其为语义未解决；剩余 `3345`、`3567` 两项语义未解决。 |
 
-原始 R2 Full 必须继续报告为阶段 1 的 20/26；修正后的 R2 Full 为 22/26；定向语义修复后的替换口径为 23/26。各阶段均须保留 P0、V0/V1/V2、P1、官方评估、轨迹和账本证据。
+原始 R2 Full 必须继续报告为阶段 1 的 20/26；修正后的 R2 Full 为 22/26；阶段 3 的定向语义修复替换口径为 23/26；截至 R12 的最新替换口径为 24/26。各阶段均须保留 P0、V0/V1/V2、P1、官方评估、轨迹和账本证据。
+
+按每个冻结任务选取最新有效官方评测制品的 26 任务合成口径，当前测试指标为：F2P **30/32（93.75%）**，P2P **592/592（100%）**。这不是单一同质批次的测试总计：它合成了 `r2-v6-r3`、`r2-v6-r4/controller-identity-3`、`r2-v6-r5/semantic-workflow-4`、`r2-v6-r9/semantic-workflow-followup-3`、`r2-v6-r12/self-review-recovery-3345-1` 和携带的 `immutable-js__immutable-js-2005` 官方制品；因此必须与历史 20/26、corrected 22/26 分开报告。
 
 ## 2. 阶段 1：R2 Full 初始结果（20/26，76.9%）
 
@@ -98,6 +101,47 @@ RepoFix 的阶段性成功率从 **20/26（76.9%）**、**22/26（84.6%）** 到
 - 保留可终止的 V0/V1/V2 及基线/候选比较记录。
 - 保留覆盖所有 PLAN 语义义务的 PLAN-to-diff 处置记录。
 - 不重跑 Pi，也不在本阶段启动 R2 ablation。
+
+### 4.4 `3345` 的工作流恢复验证与语义反馈缺口
+
+`preactjs__preact-3345` 在 `r2-v6-r9` 首次进入 `SELF_REVIEW` 时漏报了一项已在 PLAN 中声明的 preservation invariant，因而没有保留 final snapshot。随后三次单任务恢复必须严格与原 R2 结果分开记录：
+
+| 执行根 | 直接失败原因 | 结论 |
+| --- | --- | --- |
+| `r2-v6-r10` | PLAN obligation id 含大写 `forEach`，但拒绝反馈只说“schema 不符合”，未指出字段和模式。 | 不能判断任务语义；修复为返回当前阶段的首个字段级 schema 错误。 |
+| `r2-v6-r11` | 证据预算触发本轮停止后，停止标志未被消费，导致后续 completion-only 恢复 prompt 被直接短路。 | 不能判断任务语义；修复为一次性消费停止标志，并以 faux fixture 覆盖“预算收束后 schema 拒绝仍可重试”。 |
+| `r2-v6-r12` | 七个阶段完成、P1 快照保留、官方评测正常执行；F2P 0/1，P2P 16/16。 | 这是有效的**语义未解决**，不是环境、Controller 或工作流失败。 |
+
+R12 说明“工作流可控”与“补丁语义正确”是两个不同命题。工作流已经保证：模型必须提交 PLAN/IMPLEMENT/SELF_REVIEW 结构化产物，PLAN obligation 和 invariant 必须在后续阶段一一处置，非法产物有有限恢复，最终评测必定运行或被明确分类。但这些控制不能把未被验证的语义自动变成正确答案。
+
+### 4.5 R9 follow-up 与当前替换口径（24/26，92.3%）
+
+`r2-v6-r9/semantic-workflow-followup-3` 对阶段 3 的三个剩余逻辑任务进行了独立 follow-up：
+
+| 任务 | R9 结果 | 当前采用的结果 | 结论 |
+| --- | --- | --- | --- |
+| `preactjs__preact-4316` | 官方已解决：F2P 1/1、P2P 10/10 | R9 官方结果 | 窄化 focus 规则后不再回归 CamelCase 自定义事件；替换阶段 3 的 P2P 9/10 未解决结果。 |
+| `preactjs__preact-3345` | 工作流失败，未进入官方评测：SELF_REVIEW 不变量处置覆盖检查失败 | R12 官方结果：F2P 0/1、P2P 16/16 | R9 不能作为语义结论；R12 证明工作流恢复后仍未实现 error/cleanup 时序，属于有效语义未解决。 |
+| `preactjs__preact-3567` | 官方未解决：F2P 0/1、P2P 20/20 | R9 官方结果 | 未破坏既有测试，但没有实现 tentative/committed hook state 与重入语义。 |
+
+因此，阶段 3 的 23/26 经 R9/R12 结果替换后为 **24 已解决 / 2 语义未解决**。这一数字是当前的替换口径，不改写原始 R2 Full 或 corrected R2 Full 的历史制品。
+
+本任务中的实际缺口如下：
+
+- 模型的 P1 只修改 `hooks/src/index.js` 的 `options.unmount`：它把 `forEach(invokeCleanup)` 换成逐项 `try/catch`，收集第一个错误后再调用 `_catchError`。
+- 该改动确实避免“第一个 cleanup 抛错就不再遍历剩余 cleanup”，所以 16 个 P2P 不回归；但它没有证明并未完整实现任务的 error/cleanup 时序。尤其是模型自己在 SELF_REVIEW 中承认：如果 `_catchError` 再次抛错，`unmount()` 后续的 DOM 移除仍可能被跳过，却把此项写成“可接受的既有风险”。这与本任务要求的“异常后仍完成卸载、ErrorBoundary 显示 fallback”直接相关，不能被接受为已验证结论。
+- V0/V1/V2 选择的 Controller 候选是通用 `test:karma`。基线和候选均以 exit code 0 被记录为 `passed`，即使输出中存在构建解析错误；它只提供广泛回归信号，不执行私有 F2P 的 cleanup/error-boundary 复现。因此“V1/V2 passed”最多说明没有观察到该通用命令的回归，不能证明 3345 的接受行为。
+- 模型随后将“922 个通用测试通过”和“diff inspection”写为所有 obligation/invariant 的证据。当前 SELF_REVIEW 只检查 id 覆盖和证据字段非空，无法区分“可执行的行为证据”与“模型对 diff 的乐观解释”。
+
+`3567` 的 F2P 0/1、P2P 20/20 也是同类边界：其候选补丁未破坏通用回归，但没有证明 tentative render、committed hook state、render 内 `setState` 与延迟 effect 的目标语义。它不是基础设施问题，也不能由 P2P 全通过推导为修复正确。
+
+预期修复方案必须增加“语义验证闭环”，而不是放宽阶段契约或把私有评测结果直接提供给模型：
+
+1. Controller 将验证结果拆成 `regression_pass`、`acceptance_proven` 与 `inconclusive`。基线/候选共同通过的通用脚本只能产生 `regression_pass`，绝不能作为 F2P 或 PLAN acceptance 的正向证据；非零构建诊断但零退出的命令也必须标记为 `inconclusive`。
+2. PLAN 对每个问题陈述中的可观察行为建立 acceptance obligation：3345 至少包括“cleanup handle 在调用边界的状态”“任一 cleanup 抛错后其余 cleanup 的调用”“ErrorBoundary fallback 与旧 DOM 移除的顺序”；3567 至少包括 tentative/committed 状态隔离和重入/延迟状态转移。每项必须有反例及对应的 Controller-owned probe 或明确的 `inconclusive` 处置。
+3. Controller 从冻结的公共任务复现、预审核的仓库测试或声明式行为探针生成候选；模型只能选择候选 id，不能写入或执行任意测试。probe 必须对基线与 P1 分别运行，并把可复现的行为差异反馈给 REFINE，而不是只返回整套测试的退出码。
+4. SELF_REVIEW 只有在每个 acceptance obligation 取得 `acceptance_proven` 的 Controller 观察时才可标为 `verified`。仅有 diff inspection、P2P 通过或“既有风险”时，必须标为 `inconclusive`；若该项是任务核心行为，则阻止 P1 作为“已解决”进入官方汇总，并要求一次受限的语义 refinement。
+5. 对 3345，下一版候选必须同时处理 cleanup 调用前的引用状态、逐项 cleanup 继续执行以及异常时卸载/DOM 移除与 ErrorBoundary 的可观察顺序；对 3567，下一版候选必须由 committed/pending hook state 的状态转移 probe 驱动。两项均只重跑自身，不能改写 R2 历史 aggregate。
 
 ## 5. 报告规则与证据入口
 
