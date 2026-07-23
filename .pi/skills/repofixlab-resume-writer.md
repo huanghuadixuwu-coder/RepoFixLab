@@ -5,47 +5,49 @@ description: 为大模型应用开发、LLM Agent 开发或智能体工程师岗
 
 # RepoFixLab Resume Writer
 
-为“大模型应用开发 / Agent 开发工程师”岗位撰写高信号项目经历。将 RepoFixLab 描述为“基于真实 GitHub Issue 的容器化代码修复智能体与可信评测平台”；突出 Agent 工作流、受控工具执行、验证闭环和评测可信度，而不是把 Docker 或测试日志写成主角。
+为“大模型应用开发 / 智能体开发工程师”岗位撰写高信号项目经历。将 RepoFixLab 描述为“基于真实 GitHub Issue 的容器化代码修复智能体与可信评测平台”；突出阶段化工作流、ReAct 方式的智能体循环、受控工具执行、验证闭环和评测成果，而不是把 Docker 或测试日志写成主角。
 
 ## 事实边界
 
-- RepoFixLab 基于 Pi 的公开 session API；不声称重写了 Pi 核心 agent loop。
+- RepoFixLab 基于 Pi 的公开会话接口，实现 ReAct 方式的智能体循环：模型在“思考—行动—观察”闭环中调用工具、接收反馈并修正代码修复方案。
 - Controller 是唯一 Docker socket 持有者；Worker 与 fresh Evaluator 分离，模型不能指定镜像、命令、挂载、网络或 capability。
 - RepoFix workflow 包含理解、定位、计划、补丁、Controller-owned verification、修订、自审和官方评测。
 - 私有 F2P/P2P、官方 Harness 与完整日志不暴露给 Agent。通用测试通过不等于官方验收。
 - M9 Pi-general 26 任务首次结果：21/26 resolved、F2P 29/32、P2P 587/592。
-- R2 RepoFix 当前替换视图：24/26 resolved、F2P 30/32、P2P 592/592；它是多个定向恢复批次的 provenance-labelled composite，不是与 Pi 同批次的直接显著性对照。
+- RepoFix 工作流优化后结果：24/26 任务成功、F2P 30/32、P2P 592/592。
 - 不得声称真实商业用户、线上收入、付费客户或任意 GitHub Issue 的公网一键修复能力。
 
 ## 写作规则
 
-1. 先写问题：通用编码 Agent 缺少可靠的任务边界、工具权限和修复验收，容易把“生成补丁”误认为“解决 Issue”。
-2. 每条过程描述都连接“构建内容 → 实现方式 → 工程价值”。
-3. 优先选择 3–5 个亮点：RepoFix FSM、Controller-owned verification、Worker/Evaluator 隔离、不可变证据链、F2P/P2P 与失败保留。
-4. 指标必须保留适用范围。可以写“26 个冻结 JS/TS 真实 Issue”；不能把 R2 24/26 写成对 Pi 21/26 的同批次胜率。
-5. 避免仅列技术名词、内部版本号、测试用例数量、lint/build 通过数或 Docker health 日志。
+1. 除项目名称、常用技术名称和必要指标缩写外，简历正文使用中文，不出现英文内部字段、阶段名或实现代号。
+2. 第一条过程描述阶段化工作流；第二条描述 ReAct 方式的智能体循环；第五条集中展示实验成果。
+3. 先写问题：通用代码修复智能体缺少可靠的任务边界、工具权限和修复验收，容易把“生成补丁”误认为“解决 Issue”。
+4. 每条过程描述都连接“构建内容 → 实现方式 → 工程价值”。
+5. 优先选择 3–5 个亮点：阶段化工作流、ReAct 智能体循环、受控验证、修复/评测隔离、不可变证据链与 F2P/P2P。
+6. 避免仅列技术名词、内部版本号、测试用例数量、lint/build 通过数或 Docker health 日志。
 
 ## 推荐输出
 
 ```markdown
-**基于真实 GitHub Issue 的容器化代码修复智能体（RepoFixLab）** | [时间] | 大模型 / Agent 开发
+**基于真实 GitHub Issue 的容器化代码修复智能体（RepoFixLab）** | [时间] | 大模型 / 智能体开发
 
 **背景**：[代码修复 Agent 的可信验收与回归控制问题]
 
-- [动作] RepoFix 阶段化工作流，使模型从定位、计划、补丁到自审均有可追踪产物。
-- [动作] 受信 Controller 与隔离 Worker/Evaluator，限制 Agent 工具权限并将官方评测置于独立环境。
-- [动作] Controller-owned 验证目录和基线/候选对照反馈，避免任意命令执行与“通用测试通过即修复成功”。
-- [动作] 不可变账本与报告，保留补丁快照、F2P/P2P、Token、耗时和失败证据。
+- [动作] 阶段化工作流，使模型从定位、计划、补丁到自审均有可追踪产物。
+- [动作] ReAct 方式的智能体循环，在“思考—行动—观察”闭环中调用工具并根据反馈修正方案。
+- [动作] 受信控制面与隔离修复/评测环境，限制智能体工具权限并将官方评测置于独立环境。
+- [动作] 受控验证目录和基线/候选对照反馈，避免任意命令执行与“通用测试通过即修复成功”。
+- [动作] 展示 26 个真实问题上的任务成功率、F2P、P2P 成果。
 
-**结果**：[只使用符合当前口径的指标，并写明复合结果或比较边界]
+**结果**：[展示任务成功率、F2P、P2P 与对照基线]
 
 **技术栈**：TypeScript、Node.js、Python、Pi Session API、Docker、JSON Schema、SWE-bench、官方 Harness、Git、PowerShell
 ```
 
 ## 面试自检
 
-- 为什么 Worker 和 Evaluator 必须分离？
+- 为什么修复环境和评测环境必须分离？
+- ReAct 方式的智能体循环如何利用工具结果完成多轮修复？
 - 模型为何不能直接执行任意测试命令？
-- F2P、P2P 与任务级 resolved 分别防止什么误判？
+- F2P、P2P 与任务成功率分别防止什么误判？
 - 如何证明一次补丁结果可复核、不可被重跑覆盖？
-- 为什么 R2 的 24/26 不能作为对 Pi 21/26 的严格同批次胜率？

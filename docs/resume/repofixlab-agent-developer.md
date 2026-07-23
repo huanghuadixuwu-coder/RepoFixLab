@@ -1,20 +1,20 @@
 # 项目经历：RepoFixLab
 
-**基于真实 GitHub Issue 的容器化代码修复智能体（RepoFixLab）** | 大模型 / Agent 开发
+**基于真实 GitHub Issue 的容器化代码修复智能体（RepoFixLab）** | 大模型 / 智能体开发
 
-**背景**：通用编码 Agent 即使生成了可应用补丁，也难以证明真正解决了真实 Issue，且容易因任意命令执行、环境漂移、私有评测泄露或回归测试缺失造成“表面成功”。项目以冻结的 SWE-bench Multilingual JS/TS 真实 Issue 为载体，构建代码修复 Agent 与可信评测闭环。
+**背景**：通用代码修复智能体即使生成可应用补丁，也难以证明真正解决了真实问题；任意命令执行、环境漂移和回归缺失会造成“表面成功”。项目以冻结的真实 JavaScript/TypeScript 问题为载体，构建从修复到官方验收的可信闭环。
 
-- 基于 Pi 公开 session API 设计 RepoFix 阶段化工作流，将问题理解、仓库定位、修复计划、P0/P1 补丁、受控验证、修订和自审串联为可追踪状态机；不改写底层 Agent loop，而在其上约束代码修复任务的输入、阶段产物和退出条件。
-- 构建 Node Orchestrator + Python Controller 的双层执行架构：Controller 作为唯一 Docker socket 持有者，按固定策略创建无特权 Worker 和 fresh Evaluator；Agent 无法自行指定镜像、shell 命令、挂载、网络或 capability，降低工具调用突破任务边界的风险。
-- 实现 Controller-owned 验证目录与基线/候选双克隆比对：模型只选择预检测试候选 ID，验证结果以结构化反馈驱动 REFINE；将“通用回归通过”与“目标行为已证明”分离，避免把非终止、环境失败或无关绿测误判为修复成功。
-- 建立不可变证据链，关联任务/环境/模型锁、补丁快照、P0/V1/V2/P1 验证、官方 Evaluator、Token 账本和失败原因；Worker 销毁后再创建独立 Evaluator，以 F2P、P2P 和任务级 `resolved` 共同裁决结果。
-- 在 26 个冻结真实 JS/TS Issue 上完成 Pi 基线与 RepoFix 后续修复实验：Pi-general 首次结果为 21/26 resolved、F2P 29/32、P2P 587/592；RepoFix 当前来源标注的替换视图为 24/26 resolved、F2P 30/32、P2P 592/592。明确保留 R2 为定向恢复合成视图的边界，不将其包装为与 Pi 的同批次固定预算胜率。
+- 主导设计阶段化代码修复工作流，覆盖问题理解、仓库定位、修复计划、补丁生成、受控验证、迭代修复和最终自审；每个阶段沉淀结构化产物与状态约束，使复杂修复任务可追踪、可恢复。
+- 基于 Pi 会话接口实现 ReAct 方式的智能体循环，让模型在“思考—行动—观察”闭环中调用仓库工具、读取验证反馈并持续修正方案；将通用智能体能力收敛为面向真实代码问题的自主修复流程。
+- 构建编排层与受信控制面的双层执行架构：控制面独占 Docker 权限，按固定策略创建受限修复环境与独立评测环境；智能体无法自行指定镜像、命令、挂载或网络，保障工具调用不越过任务边界。
+- 实现由控制面统一管理的验证目录和基线/候选双副本比对，并建立不可变证据链，关联补丁快照、验证记录、官方评测、资源账本和失败原因；以目标失败转通过与既有通过保持共同裁决修复结果。
+- 完成 26 个冻结真实 JavaScript/TypeScript 问题的代码修复实验：通用 Pi 基线任务成功率为 21/26；RepoFix 经工作流优化后达到 24/26，目标失败转通过率为 30/32，既有通过保持率为 592/592，验证了阶段化智能体工作流对真实代码修复与回归控制的有效性。
 
-**技术栈**：TypeScript、Node.js、Python、Pi Session API、Docker Compose、JSON Schema、SWE-bench、官方 Harness、Git、PowerShell。
+**技术栈**：TypeScript、Node.js、Python、Pi、ReAct、Docker Compose、JSON Schema、SWE-bench、Git、PowerShell。
 
 **面试可展开点**：
 
-1. 为什么要让 Controller 独占 Docker socket，且将 Worker 与 Evaluator 分离？
-2. 如何把模型的验证需求限制为候选 ID，而不是开放任意 shell？
-3. F2P、P2P、任务成功率为何不能互相替代？
-4. 如何处理无最终快照、环境失败与语义未解决，避免重跑覆盖失败证据？
+1. 为什么要让受信控制面独占 Docker 权限，并将修复环境与评测环境分离？
+2. ReAct 方式的智能体循环如何将工具调用结果转化为下一轮修复决策？
+3. 为什么目标失败转通过、既有通过保持、任务成功率不能互相替代？
+4. 如何处理无最终补丁、环境失败与语义未解决，避免重跑覆盖失败证据？
