@@ -34,7 +34,10 @@ export class GlobalBudgetWriterLease {
 			throw error;
 		}
 		try {
-			await file.writeFile(`${stableStringify({ schema_version: "v1", ledger_type: "global_budget_writer" })}\n`, "utf8");
+			await file.writeFile(
+				`${stableStringify({ schema_version: "v1", ledger_type: "global_budget_writer" })}\n`,
+				"utf8",
+			);
 			await file.sync();
 		} finally {
 			await file.close();
@@ -100,7 +103,8 @@ export class GlobalBudgetLedger {
 			return ledger;
 		}
 		const value: unknown = JSON.parse(existing);
-		if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Global budget ledger is malformed");
+		if (typeof value !== "object" || value === null || Array.isArray(value))
+			throw new Error("Global budget ledger is malformed");
 		const record = value as GlobalBudgetState;
 		const { state_sha256: actual, ...unsigned } = record;
 		if (
@@ -124,7 +128,11 @@ export class GlobalBudgetLedger {
 
 	async reserve(tokens: number): Promise<boolean> {
 		assertTokens(tokens, "reservation_tokens");
-		if (tokens === 0 || this.state.reconciliation_required || this.state.accounted_tokens + this.state.reserved_tokens + tokens > this.state.cap_tokens) {
+		if (
+			tokens === 0 ||
+			this.state.reconciliation_required ||
+			this.state.accounted_tokens + this.state.reserved_tokens + tokens > this.state.cap_tokens
+		) {
 			return false;
 		}
 		this.state = { ...this.state, reserved_tokens: this.state.reserved_tokens + tokens };
@@ -165,7 +173,10 @@ export class GlobalBudgetLedger {
 		if (this.state.reconciliation_required || this.state.reserved_tokens !== 0) {
 			throw new Error("Observed usage cannot be recorded while budget reconciliation or a reservation is active");
 		}
-		if (!Number.isSafeInteger(this.state.accounted_tokens + actualTokens) || this.state.accounted_tokens + actualTokens > this.state.cap_tokens) {
+		if (
+			!Number.isSafeInteger(this.state.accounted_tokens + actualTokens) ||
+			this.state.accounted_tokens + actualTokens > this.state.cap_tokens
+		) {
 			throw new Error("Observed usage exceeds the global budget ledger representation limit");
 		}
 		this.state = { ...this.state, accounted_tokens: this.state.accounted_tokens + actualTokens };

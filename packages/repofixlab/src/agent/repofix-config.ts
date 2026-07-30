@@ -147,7 +147,9 @@ export function createRepoFixConfigurationDiffReport(
 		schema_version: "v1" as const,
 		report_type: "repofix_configuration_diff" as const,
 		configurations,
-		shared_invariants: Object.fromEntries(Object.entries(sharedInvariants).sort(([left], [right]) => left.localeCompare(right))),
+		shared_invariants: Object.fromEntries(
+			Object.entries(sharedInvariants).sort(([left], [right]) => left.localeCompare(right)),
+		),
 	};
 	return { ...draft, report_sha256: sha256(draft) };
 }

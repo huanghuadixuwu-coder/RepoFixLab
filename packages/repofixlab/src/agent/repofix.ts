@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
+import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import {
 	type AuthStorage,
 	type CreateAgentSessionOptions,
@@ -9,25 +10,24 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import type { RepoToolTransport } from "../controller/client.ts";
 import { createRepoTools, MODEL_VISIBLE_STAGE_OUTPUT_LIMIT, RepoToolOutputBudget } from "../sandbox/repo-tools.ts";
-import {
-	createStageCompleteTool,
-	isRepoFixToolName,
-	REPOFIX_STAGE_COMPLETE_TOOL_NAME,
-	REPOFIX_TOOL_NAMES,
-	RepoFixStageMachine,
-	stageCompletionArtifactRequirement,
-	stageCompletionWireSchema,
-	type StageCompletion,
-} from "./repofix-fsm.ts";
 import {
 	assertRepoFixWorkflowConfig,
 	type RepoFixConfigId,
 	type RepoFixStage,
 	type RepoFixWorkflowConfig,
 } from "./repofix-config.ts";
+import {
+	createStageCompleteTool,
+	isRepoFixToolName,
+	REPOFIX_STAGE_COMPLETE_TOOL_NAME,
+	REPOFIX_TOOL_NAMES,
+	RepoFixStageMachine,
+	type StageCompletion,
+	stageCompletionArtifactRequirement,
+	stageCompletionWireSchema,
+} from "./repofix-fsm.ts";
 
 export interface RepoFixSessionOptions {
 	readonly leaseId: string;
@@ -73,7 +73,11 @@ export interface ControlledVerificationCatalog {
 
 export interface StageRecovery {
 	readonly stage: RepoFixStage;
-	readonly trigger: "provider_output_length" | "repository_output_budget_exhausted" | "stage_completion_rejected" | "stage_completion_missing";
+	readonly trigger:
+		| "provider_output_length"
+		| "repository_output_budget_exhausted"
+		| "stage_completion_rejected"
+		| "stage_completion_missing";
 	readonly maximum_attempts: number;
 }
 
@@ -84,55 +88,55 @@ export interface StageRecovery {
  */
 export type RepoFixTrajectoryEvent =
 	| {
-		readonly schema_version: "v1";
-		readonly event_type: "stage_started";
-		readonly stage: RepoFixStage;
-		readonly completed_stages: readonly RepoFixStage[];
-		readonly stage_prompt_chars: number;
-		readonly stage_prompt_sha256: string;
-		readonly sealed_handoff_chars: number;
-		readonly sealed_handoff_sha256: string | null;
-	}
+			readonly schema_version: "v1";
+			readonly event_type: "stage_started";
+			readonly stage: RepoFixStage;
+			readonly completed_stages: readonly RepoFixStage[];
+			readonly stage_prompt_chars: number;
+			readonly stage_prompt_sha256: string;
+			readonly sealed_handoff_chars: number;
+			readonly sealed_handoff_sha256: string | null;
+	  }
 	| {
-		readonly schema_version: "v1";
-		readonly event_type: "provider_request";
-		readonly stage: RepoFixStage;
-		readonly stage_model_turn: number;
-		readonly completion_only: boolean;
-		readonly allowed_tools: readonly string[];
-		readonly context_message_count: number;
-		readonly context_chars: number;
-		readonly sealed_repository_tool_results: number;
-		readonly current_stage_repository_tool_results: number;
-	}
+			readonly schema_version: "v1";
+			readonly event_type: "provider_request";
+			readonly stage: RepoFixStage;
+			readonly stage_model_turn: number;
+			readonly completion_only: boolean;
+			readonly allowed_tools: readonly string[];
+			readonly context_message_count: number;
+			readonly context_chars: number;
+			readonly sealed_repository_tool_results: number;
+			readonly current_stage_repository_tool_results: number;
+	  }
 	| {
-		readonly schema_version: "v1";
-		readonly event_type: "repository_tool_requested";
-		readonly stage: RepoFixStage;
-		readonly repository_tool_calls: number;
-		readonly tool_name: string;
-	}
+			readonly schema_version: "v1";
+			readonly event_type: "repository_tool_requested";
+			readonly stage: RepoFixStage;
+			readonly repository_tool_calls: number;
+			readonly tool_name: string;
+	  }
 	| {
-		readonly schema_version: "v1";
-		readonly event_type: "stage_checkpoint";
-		readonly stage: RepoFixStage;
-		readonly checkpoint: "model_turns" | "repository_tool_calls";
-		readonly observed: number;
-	}
+			readonly schema_version: "v1";
+			readonly event_type: "stage_checkpoint";
+			readonly stage: RepoFixStage;
+			readonly checkpoint: "model_turns" | "repository_tool_calls";
+			readonly observed: number;
+	  }
 	| {
-		readonly schema_version: "v1";
-		readonly event_type: "completion_mode_entered";
-		readonly stage: RepoFixStage;
-		readonly trigger: StageRecovery["trigger"];
-		readonly model_turns: number;
-		readonly repository_tool_calls: number;
-	}
+			readonly schema_version: "v1";
+			readonly event_type: "completion_mode_entered";
+			readonly stage: RepoFixStage;
+			readonly trigger: StageRecovery["trigger"];
+			readonly model_turns: number;
+			readonly repository_tool_calls: number;
+	  }
 	| {
-		readonly schema_version: "v1";
-		readonly event_type: "stage_completed";
-		readonly stage: RepoFixStage;
-		readonly completion_sha256: string;
-	};
+			readonly schema_version: "v1";
+			readonly event_type: "stage_completed";
+			readonly stage: RepoFixStage;
+			readonly completion_sha256: string;
+	  };
 
 interface RepoFixStageCompletionControl {
 	start(
@@ -176,7 +180,10 @@ const STAGE_REPOSITORY_TOOL_CALL_CHECKPOINT = 8;
 const MAX_STAGE_COMPLETION_ONLY_ATTEMPTS = 2;
 
 type CompletionOnlyStreamOptions = SimpleStreamOptions & {
-	readonly toolChoice?: { readonly type: "function"; readonly function: { readonly name: typeof REPOFIX_STAGE_COMPLETE_TOOL_NAME } };
+	readonly toolChoice?: {
+		readonly type: "function";
+		readonly function: { readonly name: typeof REPOFIX_STAGE_COMPLETE_TOOL_NAME };
+	};
 };
 
 function hasExactRepoFixToolSet(actualNames: string[]): boolean {
@@ -225,7 +232,7 @@ function stagePrompt(
 				: `Choose exactly one Controller-preflighted verification_candidate_id; do not invent an argv. Available candidates:\n${candidates.map((candidate) => `- ${candidate.candidate_id}: ${candidate.description}`).join("\n")}`,
 		);
 		base.push(
-		"PLAN must record stable obligation ids for every required code site and stable invariant ids for every preservation_invariant with a concrete observable counterexample. state_transition_checks must cover success, error, and re-entry ordering for callback/cleanup/deferred-state code, or state why that class is inapplicable using repository evidence.",
+			"PLAN must record stable obligation ids for every required code site and stable invariant ids for every preservation_invariant with a concrete observable counterexample. state_transition_checks must cover success, error, and re-entry ordering for callback/cleanup/deferred-state code, or state why that class is inapplicable using repository evidence.",
 		);
 	}
 	if (stage === "LOCALIZE") {
@@ -240,7 +247,7 @@ function stagePrompt(
 	}
 	if (stage === "SELF_REVIEW") {
 		base.push(
-		"risk_disposition must account for every credible PLAN risk. preservation_dispositions must use each PLAN invariant id exactly once, even when several invariants have the same scope; obligation_dispositions must account for every PLAN obligation. 'rare', 'partial tests passed', or 'baseline also failed' is not sufficient evidence.",
+			"risk_disposition must account for every credible PLAN risk. preservation_dispositions must use each PLAN invariant id exactly once, even when several invariants have the same scope; obligation_dispositions must account for every PLAN obligation. 'rare', 'partial tests passed', or 'baseline also failed' is not sufficient evidence.",
 		);
 	}
 	if (feedback !== undefined) base.push(`Controlled verification feedback:\n${feedback}`);
@@ -259,9 +266,7 @@ type HandoffEntry = {
 };
 
 function truncateHandoffText(value: string): string {
-	return value.length <= MAX_HANDOFF_TEXT_CHARS
-		? value
-		: `${value.slice(0, MAX_HANDOFF_TEXT_CHARS - 1)}…`;
+	return value.length <= MAX_HANDOFF_TEXT_CHARS ? value : `${value.slice(0, MAX_HANDOFF_TEXT_CHARS - 1)}…`;
 }
 
 function summarizeHandoffValue(value: unknown): unknown {
@@ -330,7 +335,10 @@ async function emitTrajectory(
 	}
 }
 
-function countRepositoryToolResults(context: Context, historyMessageCount: number): {
+function countRepositoryToolResults(
+	context: Context,
+	historyMessageCount: number,
+): {
 	readonly sealed: number;
 	readonly currentStage: number;
 } {
@@ -377,9 +385,9 @@ function stageRecoveryPrompt(stage: RepoFixStage, trigger: StageRecovery["trigge
 			? "Your previous response reached the frozen provider output limit before the stage completed."
 			: trigger === "repository_output_budget_exhausted"
 				? "The fixed model-visible repository-output budget for this stage is exhausted. Further repo_* calls cannot provide new visible evidence."
-			: trigger === "stage_completion_rejected"
-				? "Your previous stage_complete payload was rejected because it did not satisfy the required structured artifact schema."
-				: "Your previous response ended without a valid stage_complete artifact.";
+				: trigger === "stage_completion_rejected"
+					? "Your previous stage_complete payload was rejected because it did not satisfy the required structured artifact schema."
+					: "Your previous response ended without a valid stage_complete artifact.";
 	return [
 		cause,
 		`This is completion-only attempt ${String(attempt)} of ${String(MAX_STAGE_COMPLETION_ONLY_ATTEMPTS)}.`,
@@ -409,22 +417,37 @@ function completionOnlyStreamOptions(
 	};
 }
 
-function stageCompletionContext(context: Context, stage: RepoFixStage, completionOnly: boolean, historyMessageCount: number): Context {
+function stageCompletionContext(
+	context: Context,
+	stage: RepoFixStage,
+	completionOnly: boolean,
+	historyMessageCount: number,
+): Context {
 	const stageCompleteTool = context.tools?.find((tool) => tool.name === REPOFIX_STAGE_COMPLETE_TOOL_NAME);
 	if (stageCompleteTool === undefined) {
 		throw new Error("RepoFix stage control requires a stage_complete tool definition");
 	}
 	const stageTool = { ...stageCompleteTool, parameters: stageCompletionWireSchema(stage) };
 	const messages = context.messages.map((message, index) => {
-		if (index >= historyMessageCount || message.role !== "toolResult" || !message.toolName.startsWith("repo_")) return message;
+		if (index >= historyMessageCount || message.role !== "toolResult" || !message.toolName.startsWith("repo_"))
+			return message;
 		return {
 			...message,
-			content: [{ type: "text" as const, text: "Prior repository tool output is sealed in the trajectory. Use the prior-stage artifact summary instead." }],
+			content: [
+				{
+					type: "text" as const,
+					text: "Prior repository tool output is sealed in the trajectory. Use the prior-stage artifact summary instead.",
+				},
+			],
 		};
 	});
 	return completionOnly
 		? { ...context, messages, tools: [stageTool] }
-		: { ...context, messages, tools: context.tools?.map((tool) => (tool.name === stageTool.name ? stageTool : tool)) };
+		: {
+				...context,
+				messages,
+				tools: context.tools?.map((tool) => (tool.name === stageTool.name ? stageTool : tool)),
+			};
 }
 
 function createStageCompletionControl(
@@ -500,11 +523,7 @@ function createStageCompletionControl(
 				current_stage_repository_tool_results: repositoryToolResults.currentStage,
 			});
 			if (active.completion_forced) {
-				return originalStream(
-					model,
-					providerContext,
-					completionOnlyStreamOptions(streamOptions, forceToolChoice),
-				);
+				return originalStream(model, providerContext, completionOnlyStreamOptions(streamOptions, forceToolChoice));
 			}
 			return originalStream(model, providerContext, streamOptions);
 		}
@@ -667,7 +686,10 @@ export async function createRepoFixSession(options: RepoFixSessionOptions): Prom
 		sessionManager,
 		noTools: "builtin",
 		tools: [...REPOFIX_TOOL_NAMES],
-		customTools: [...createRepoTools(options.leaseId, options.transport, repoToolOutputBudget), createStageCompleteTool(stageMachine)],
+		customTools: [
+			...createRepoTools(options.leaseId, options.transport, repoToolOutputBudget),
+			createStageCompleteTool(stageMachine),
+		],
 	});
 	const actualToolNames = session.getAllTools().map((tool) => tool.name);
 	if (!hasExactRepoFixToolSet(actualToolNames)) {
@@ -680,7 +702,14 @@ export async function createRepoFixSession(options: RepoFixSessionOptions): Prom
 		stageMachine,
 		options.forceStageCompletionToolChoice ?? true,
 	);
-	const result: RepoFixSessionResult = { session, sessionManager, settingsManager, stageMachine, stageCompletionControl, repoToolOutputBudget };
+	const result: RepoFixSessionResult = {
+		session,
+		sessionManager,
+		settingsManager,
+		stageMachine,
+		stageCompletionControl,
+		repoToolOutputBudget,
+	};
 	installStageHooks(result);
 	return result;
 }
@@ -707,14 +736,19 @@ export async function runRepoFixWorkflow(
 					? verificationPrompt(config, verificationFeedback[1])
 					: stage === "SELF_REVIEW" && verificationFeedback[2] !== undefined
 						? verificationPrompt(config, verificationFeedback[2])
-					: undefined;
+						: undefined;
 		result.stageCompletionControl.start(stage, callbacks.onStageRecovery, callbacks.onTrajectoryEvent);
 		let completion: StageCompletion | null = null;
 		let rejectedCompletion = false;
 		try {
 			const handoff = stageHandoff(result.stageMachine);
 			const prompt = [
-				stagePrompt(stage, problemStatement, feedback, stage === "PLAN" ? callbacks.verificationCatalog : undefined),
+				stagePrompt(
+					stage,
+					problemStatement,
+					feedback,
+					stage === "PLAN" ? callbacks.verificationCatalog : undefined,
+				),
 				handoff,
 			]
 				.filter((value): value is string => value !== undefined)

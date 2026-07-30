@@ -38,7 +38,7 @@ const REPOFIX_AGENT_SYSTEM_PROMPT = [
 	"For this controlled SWE-bench evaluation, never modify files under test/ or tests/, and never create standalone test files. The evaluator applies its private test patch after your candidate; test-file overlap invalidates the candidate before tests run.",
 	"repo_read accepts exactly one field: path. Do not add line ranges, content, or other fields. repo_search accepts query and optional path.",
 	"repo_edit creates only new files when given content. To modify an existing file, send path, old_text, and new_text; old_text must be an exact unique fragment and new_text replaces it.",
-	"repo_exec is non-shell: argv must always be a JSON string array, for example [\"node\", \"test/unit/adapters/http.js\"]. If a tool request is rejected, correct its input instead of working around the tool boundary.",
+	'repo_exec is non-shell: argv must always be a JSON string array, for example ["node", "test/unit/adapters/http.js"]. If a tool request is rejected, correct its input instead of working around the tool boundary.',
 	"Do not claim a repair is verified until the relevant existing test command has run and repo_diff contains only intended changes.",
 ].join("\n");
 

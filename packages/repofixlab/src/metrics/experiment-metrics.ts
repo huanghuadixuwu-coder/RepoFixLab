@@ -78,7 +78,8 @@ function evidenceByRun(
 ): ReadonlyMap<string, RunMetricEvidence> {
 	const expected = new Set(specs.map((spec) => spec.run_id));
 	for (const [runId, value] of Object.entries(evidence)) {
-		if (!expected.has(runId) || value.run_id !== runId) throw new Error("Metric evidence is not bound to a registered run");
+		if (!expected.has(runId) || value.run_id !== runId)
+			throw new Error("Metric evidence is not bound to a registered run");
 		if (value.evaluation !== null) verifyEvaluationResult(value.evaluation);
 		if (value.security !== null) {
 			assertCount(value.security.blocked_operation_count, "blocked_operation_count");
@@ -153,7 +154,8 @@ export function createExperimentMetrics(
 				).length,
 				unstable_replicate_group_count: replicateGroups.filter(
 					(values) =>
-						values.observed_outcomes.length === values.expected_replicates && new Set(values.observed_outcomes).size > 1,
+						values.observed_outcomes.length === values.expected_replicates &&
+						new Set(values.observed_outcomes).size > 1,
 				).length,
 			};
 		});
@@ -162,7 +164,9 @@ export function createExperimentMetrics(
 	return {
 		schema_version: "v1",
 		metric_type: "experiment_metrics",
-		failure_categories: Object.fromEntries(Object.entries(failureCategories).sort(([left], [right]) => left.localeCompare(right))),
+		failure_categories: Object.fromEntries(
+			Object.entries(failureCategories).sort(([left], [right]) => left.localeCompare(right)),
+		),
 		tests: {
 			evaluation_evidence_run_count: evaluationEvidenceRunIds.length,
 			evaluation_evidence_missing_run_ids: specs

@@ -1,0 +1,4 @@
+interface:
+  display_name: "RepoFix 项目学习"
+  short_description: "通过代码驱动问答系统掌握 RepoFixLab 架构与实现"
+  default_prompt: "使用 $project-learner 通过代码驱动问答学习 RepoFixLab。"

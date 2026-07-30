@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { RepoFixConfigId } from "../agent/repofix-config.ts";
+import { stableStringify } from "../contracts/canonical-json.ts";
 import {
 	createArtifactIndex,
 	createAttempt,
@@ -8,19 +10,17 @@ import {
 	createRunResult,
 	type RunResult,
 } from "../contracts/run-contracts.ts";
-import { stableStringify } from "../contracts/canonical-json.ts";
-import type { RepoFixConfigId } from "../agent/repofix-config.ts";
-import { ArtifactStore } from "../storage/artifact-store.ts";
 import {
 	createDefaultM4DevWorkflowDependencies,
-	M4PreProviderInputError,
-	runM4DevWorkflow,
 	type M4DevWorkflowDependencies,
 	type M4DevWorkflowSummary,
+	M4PreProviderInputError,
+	runM4DevWorkflow,
 } from "../runner/m4-dev-workflow.ts";
 import { KnownProviderUsageBatchFailure, PreProviderBatchFailure } from "../runner/pre-provider-failure.ts";
 import { createDeepSeekV4FlashRuntime, runtimeIdentityFromSession } from "../runner/runtime-factory.ts";
 import { DirectoryTaskEnvironmentLockSource, FilePublicTaskSource } from "../runner/task-source.ts";
+import { ArtifactStore } from "../storage/artifact-store.ts";
 import { normalizeM6OfficialEvaluation } from "./evaluation-adapter.ts";
 
 const MAX_POLLS = 7_200;
@@ -54,20 +54,31 @@ function usageFromLedger(content: string): RunResult["usage"] {
 	const openReservations = new Set<string>();
 	for (const line of content.split("\n")) {
 		if (line.length === 0) continue;
-		const event = JSON.parse(line) as { event_type: string; request_id: string; accounted_tokens: number | null; provider_total_tokens: number | null };
+		const event = JSON.parse(line) as {
+			event_type: string;
+			request_id: string;
+			accounted_tokens: number | null;
+			provider_total_tokens: number | null;
+		};
 		if (event.event_type === "reservation_open") {
 			openReservations.add(event.request_id);
 			continue;
 		}
 		if (event.event_type === "reservation_settled") {
-			if (event.accounted_tokens === null || event.provider_total_tokens === null) throw new Error("Settled token usage is incomplete");
-			if (!openReservations.delete(event.request_id)) throw new Error("Settled token usage has no matching reservation");
+			if (event.accounted_tokens === null || event.provider_total_tokens === null)
+				throw new Error("Settled token usage is incomplete");
+			if (!openReservations.delete(event.request_id))
+				throw new Error("Settled token usage has no matching reservation");
 			accounted += event.accounted_tokens;
 			actual += event.provider_total_tokens;
 			modelTurns += 1;
-		} else if (event.event_type === "reservation_charged_unverified" || event.event_type === "budget_protocol_invalid") {
+		} else if (
+			event.event_type === "reservation_charged_unverified" ||
+			event.event_type === "budget_protocol_invalid"
+		) {
 			if (event.accounted_tokens === null) throw new Error("Unverified token charge is malformed");
-			if (!openReservations.delete(event.request_id)) throw new Error("Unverified token charge has no matching reservation");
+			if (!openReservations.delete(event.request_id))
+				throw new Error("Unverified token charge has no matching reservation");
 			accounted += event.accounted_tokens;
 			complete = false;
 		}
@@ -102,12 +113,16 @@ function hasProviderReservation(content: string): boolean {
 			value.event_type === "reservation_settled" ||
 			value.event_type === "reservation_charged_unverified" ||
 			value.event_type === "budget_protocol_invalid"
-		) return true;
+		)
+			return true;
 	}
 	return false;
 }
 
-export async function runM7FormalRun(options: M7FormalRunOptions, dependencies: M7FormalRunDependencies): Promise<RunResult> {
+export async function runM7FormalRun(
+	options: M7FormalRunOptions,
+	dependencies: M7FormalRunDependencies,
+): Promise<RunResult> {
 	let environment: Awaited<ReturnType<M4DevWorkflowDependencies["environmentLockSource"]["load"]>>;
 	let publicTask: Awaited<ReturnType<M4DevWorkflowDependencies["publicTaskSource"]["load"]>>;
 	let runtime: ReturnType<typeof createDeepSeekV4FlashRuntime>;
@@ -119,18 +134,18 @@ export async function runM7FormalRun(options: M7FormalRunOptions, dependencies: 
 		const manifestSession =
 			options.configId === "pi-general"
 				? await dependencies.createPiGeneralSession({
-					leaseId: "lease-manifest",
-					attemptDirectory: "/tmp/m7-manifest",
-					cwd: "/testbed",
-					transport: dependencies.controller.toolTransport(options.attemptId),
-				})
+						leaseId: "lease-manifest",
+						attemptDirectory: "/tmp/m7-manifest",
+						cwd: "/testbed",
+						transport: dependencies.controller.toolTransport(options.attemptId),
+					})
 				: await dependencies.createRepoFixSession({
-					leaseId: "lease-manifest",
-					attemptDirectory: "/tmp/m7-manifest",
-					cwd: "/testbed",
-					transport: dependencies.controller.toolTransport(options.attemptId),
-					configId: options.configId,
-				});
+						leaseId: "lease-manifest",
+						attemptDirectory: "/tmp/m7-manifest",
+						cwd: "/testbed",
+						transport: dependencies.controller.toolTransport(options.attemptId),
+						configId: options.configId,
+					});
 		try {
 			identity = runtimeIdentityFromSession(manifestSession.session, runtime.modelSpecSha256);
 		} finally {
@@ -141,35 +156,85 @@ export async function runM7FormalRun(options: M7FormalRunOptions, dependencies: 
 	}
 	const startedAt = dependencies.now().toISOString();
 	const manifest = createRunManifest({
-		schema_version: "v1", manifest_type: "run_manifest", manifest_id: `manifest-${options.runId}`,
-		experiment_id: options.experimentId, run_id: options.runId, config_id: options.configId,
-		instance_id: options.instanceId, replicate: options.replicate,
-		public_task_manifest_id: publicTask.manifest.manifest_id, public_task_manifest_sha256: publicTask.manifest.manifest_sha256,
-		task_environment_lock_id: environment.lockId, task_environment_lock_sha256: environment.lockSha256,
-		model: { provider: "deepseek", model_id: "deepseek-v4-flash", model_spec_sha256: runtime.modelSpecSha256, pricing_spec_sha256: runtime.pricingSpecSha256, system_prompt_sha256: identity.systemPromptSha256, tool_schema_sha256: identity.toolSchemaSha256 },
-		budget: { accounted_admission_cap_tokens: M7_PER_RUN_CAP, max_model_turns: options.maxModelTurns, max_tool_calls: null, max_wall_time_ms: 1_800_000 }, created_at: startedAt,
+		schema_version: "v1",
+		manifest_type: "run_manifest",
+		manifest_id: `manifest-${options.runId}`,
+		experiment_id: options.experimentId,
+		run_id: options.runId,
+		config_id: options.configId,
+		instance_id: options.instanceId,
+		replicate: options.replicate,
+		public_task_manifest_id: publicTask.manifest.manifest_id,
+		public_task_manifest_sha256: publicTask.manifest.manifest_sha256,
+		task_environment_lock_id: environment.lockId,
+		task_environment_lock_sha256: environment.lockSha256,
+		model: {
+			provider: "deepseek",
+			model_id: "deepseek-v4-flash",
+			model_spec_sha256: runtime.modelSpecSha256,
+			pricing_spec_sha256: runtime.pricingSpecSha256,
+			system_prompt_sha256: identity.systemPromptSha256,
+			tool_schema_sha256: identity.toolSchemaSha256,
+		},
+		budget: {
+			accounted_admission_cap_tokens: M7_PER_RUN_CAP,
+			max_model_turns: options.maxModelTurns,
+			max_tool_calls: null,
+			max_wall_time_ms: 1_800_000,
+		},
+		created_at: startedAt,
 	});
 	const root = resolve(options.formalRunsRoot, options.runId);
 	const store = await ArtifactStore.createNew(`${root}.staging`);
-	await store.writeNew("run.json", stableStringify(manifest), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
+	await store.writeNew("run.json", stableStringify(manifest), {
+		mediaType: "application/json",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
 	let m4: M4DevWorkflowSummary;
 	try {
-		m4 = await runM4DevWorkflow({ artifactsRoot: options.artifactsRoot, instanceId: options.instanceId, configId: options.configId, accountedAdmissionCapTokens: M7_PER_RUN_CAP, tokenAdmissionEstimator: { version: "m6-deepseek-v4-flash-v1", multiplier: 1.351, framing_margin_tokens: 4096 }, maxModelTurns: options.maxModelTurns, runId: options.runId, attemptId: options.attemptId, retainWorkerForFormalEvaluation: true }, dependencies);
+		m4 = await runM4DevWorkflow(
+			{
+				artifactsRoot: options.artifactsRoot,
+				instanceId: options.instanceId,
+				configId: options.configId,
+				accountedAdmissionCapTokens: M7_PER_RUN_CAP,
+				tokenAdmissionEstimator: {
+					version: "m6-deepseek-v4-flash-v1",
+					multiplier: 1.351,
+					framing_margin_tokens: 4096,
+				},
+				maxModelTurns: options.maxModelTurns,
+				runId: options.runId,
+				attemptId: options.attemptId,
+				retainWorkerForFormalEvaluation: true,
+			},
+			dependencies,
+		);
 	} catch (error) {
 		if (error instanceof M4PreProviderInputError) throw new PreProviderBatchFailure(errorMessage(error));
 		throw error;
 	}
-	await store.writeNew("agent-summary.json", stableStringify(m4), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
+	await store.writeNew("agent-summary.json", stableStringify(m4), {
+		mediaType: "application/json",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
 	const m4Ledger = await readFile(resolve(m4.run_directory, "token-ledger.jsonl")).catch((error: unknown) => {
 		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return null;
 		throw error;
 	});
 	if (m4Ledger === null) {
-		if (m4.terminal_status !== "completed") throw new PreProviderBatchFailure("M7 Agent failed before creating a Provider token ledger");
+		if (m4.terminal_status !== "completed")
+			throw new PreProviderBatchFailure("M7 Agent failed before creating a Provider token ledger");
 		throw new Error("M7 Agent completed without a Provider token ledger");
 	}
 	const ledgerContent = new TextDecoder("utf-8", { fatal: true }).decode(m4Ledger);
-	await store.writeNew("token-ledger.jsonl", m4Ledger, { mediaType: "application/x-ndjson", sensitivity: "internal", generatedBy: "orchestrator" });
+	await store.writeNew("token-ledger.jsonl", m4Ledger, {
+		mediaType: "application/x-ndjson",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
 	const usage = usageFromLedger(ledgerContent);
 	if (m4.terminal_status !== "completed" && !hasProviderReservation(ledgerContent)) {
 		throw new PreProviderBatchFailure("M7 Agent failed before its first Provider reservation");
@@ -181,34 +246,141 @@ export async function runM7FormalRun(options: M7FormalRunOptions, dependencies: 
 		throw new Error("M7 Agent usage is incomplete or lacks a settled Provider response");
 	}
 	try {
-		if (m4.terminal_status !== "completed" || m4.worker_lease_id === null || m4.final_snapshot_id === null || m4.p1_patch_sha256 === null) throw new Error("M7 Agent did not produce a retained final snapshot");
+		if (
+			m4.terminal_status !== "completed" ||
+			m4.worker_lease_id === null ||
+			m4.final_snapshot_id === null ||
+			m4.p1_patch_sha256 === null
+		)
+			throw new Error("M7 Agent did not produce a retained final snapshot");
 		await options.hooks?.agentFinished();
-		const destroyed = await dependencies.controller.destroy(options.attemptId, `${options.attemptId}:destroy`, m4.worker_lease_id);
+		const destroyed = await dependencies.controller.destroy(
+			options.attemptId,
+			`${options.attemptId}:destroy`,
+			m4.worker_lease_id,
+		);
 		if (!destroyed.clean) throw new Error("M7 Worker cleanup reported residual resources");
 		await options.hooks?.evaluating();
-		const job = await dependencies.controller.startEvaluation(options.attemptId, `${options.attemptId}:evaluate`, options.runId, m4.final_snapshot_id);
+		const job = await dependencies.controller.startEvaluation(
+			options.attemptId,
+			`${options.attemptId}:evaluate`,
+			options.runId,
+			m4.final_snapshot_id,
+		);
 		let status = await dependencies.controller.getJob(options.attemptId, job.jobId);
-		for (let polls = 0; (status.status === "queued" || status.status === "running") && polls < MAX_POLLS; polls += 1) { await dependencies.sleep(POLL_INTERVAL_MS); status = await dependencies.controller.getJob(options.attemptId, job.jobId); }
-		if (status.status === "queued" || status.status === "running") throw new Error("M7 official evaluation polling limit exceeded");
+		for (
+			let polls = 0;
+			(status.status === "queued" || status.status === "running") && polls < MAX_POLLS;
+			polls += 1
+		) {
+			await dependencies.sleep(POLL_INTERVAL_MS);
+			status = await dependencies.controller.getJob(options.attemptId, job.jobId);
+		}
+		if (status.status === "queued" || status.status === "running")
+			throw new Error("M7 official evaluation polling limit exceeded");
 		const artifacts = await dependencies.controller.getArtifacts(options.attemptId, job.jobId);
-		for (const [index, artifact] of artifacts.artifacts.entries()) await store.writeNew(evaluatorArtifactPath(artifact.name, index), artifact.content, { mediaType: artifact.name.endsWith(".json") ? "application/json" : "text/plain", sensitivity: "private", generatedBy: "evaluator" });
+		for (const [index, artifact] of artifacts.artifacts.entries())
+			await store.writeNew(evaluatorArtifactPath(artifact.name, index), artifact.content, {
+				mediaType: artifact.name.endsWith(".json") ? "application/json" : "text/plain",
+				sensitivity: "private",
+				generatedBy: "evaluator",
+			});
 		const evaluationArtifact = artifacts.artifacts.find((artifact) => artifact.name === "evaluation.json");
 		if (evaluationArtifact === undefined) throw new Error("M7 evaluator did not return evaluation.json");
 		const finishedAt = dependencies.now().toISOString();
 		const evaluation = normalizeM6OfficialEvaluation(
 			JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(evaluationArtifact.content)),
-			{ runId: options.runId, attemptId: options.attemptId, jobId: job.jobId, instanceId: options.instanceId, baseCommit: publicTask.task.base_commit, candidatePatchSha256: m4.p1_patch_sha256, finishedAt },
+			{
+				runId: options.runId,
+				attemptId: options.attemptId,
+				jobId: job.jobId,
+				instanceId: options.instanceId,
+				baseCommit: publicTask.task.base_commit,
+				candidatePatchSha256: m4.p1_patch_sha256,
+				finishedAt,
+			},
 		);
-		await store.writeNew("evaluation-normalized.json", stableStringify(evaluation), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
-		const acknowledged = await dependencies.controller.acknowledge(options.attemptId, `${options.attemptId}:ack`, job.jobId, artifacts.artifactSetSha256);
+		await store.writeNew("evaluation-normalized.json", stableStringify(evaluation), {
+			mediaType: "application/json",
+			sensitivity: "internal",
+			generatedBy: "orchestrator",
+		});
+		const acknowledged = await dependencies.controller.acknowledge(
+			options.attemptId,
+			`${options.attemptId}:ack`,
+			job.jobId,
+			artifacts.artifactSetSha256,
+		);
 		if (!acknowledged.clean) throw new Error("M7 Evaluator cleanup reported residual resources");
 		if (evaluation.status !== "completed") throw new Error(evaluation.error_class ?? "Official evaluation failed");
-		const attempt = createAttempt({ schema_version: "v1", record_type: "attempt", attempt_id: options.attemptId, run_id: options.runId, attempt_number: 1, status: "completed", started_at: startedAt, finished_at: finishedAt, worker_lease_id: m4.worker_lease_id, evaluator_job_id: job.jobId, termination_reason: "agent_completed", accounted_tokens: usage.accounted_tokens, provider_actual_tokens: usage.provider_actual_tokens, usage_complete: usage.usage_complete });
-		await store.writeNew("attempt.json", stableStringify(attempt), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
-		const index = createArtifactIndex({ schema_version: "v1", index_type: "artifact_index", run_id: options.runId, attempt_id: options.attemptId, artifacts: store.listArtifacts().map((artifact, index) => ({ name: `artifact-${String(index + 1).padStart(4, "0")}`, path: artifact.path, media_type: artifact.mediaType, bytes: artifact.bytes, sha256: artifact.sha256, sensitivity: artifact.sensitivity, generated_by: artifact.generatedBy })), created_at: finishedAt });
-		const result = createRunResult({ schema_version: "v1", result_type: "run", run_id: options.runId, attempt_id: options.attemptId, manifest_sha256: manifest.manifest_sha256, terminal_status: "completed", termination_reason: evaluation.resolved ? "official_resolved" : "official_unresolved", resolved: evaluation.resolved, started_at: startedAt, finished_at: finishedAt, wall_time_ms: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), usage, attempt_sha256: attempt.attempt_sha256, patch_snapshot_sha256: m4.p1_patch_sha256, evaluation_result_sha256: evaluation.evaluation_sha256, artifact_index_sha256: index.index_sha256, failure: null });
-		await store.writeNew("artifact-index.json", stableStringify(index), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
-		await store.writeNew("result.json", stableStringify(result), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
+		const attempt = createAttempt({
+			schema_version: "v1",
+			record_type: "attempt",
+			attempt_id: options.attemptId,
+			run_id: options.runId,
+			attempt_number: 1,
+			status: "completed",
+			started_at: startedAt,
+			finished_at: finishedAt,
+			worker_lease_id: m4.worker_lease_id,
+			evaluator_job_id: job.jobId,
+			termination_reason: "agent_completed",
+			accounted_tokens: usage.accounted_tokens,
+			provider_actual_tokens: usage.provider_actual_tokens,
+			usage_complete: usage.usage_complete,
+		});
+		await store.writeNew("attempt.json", stableStringify(attempt), {
+			mediaType: "application/json",
+			sensitivity: "internal",
+			generatedBy: "orchestrator",
+		});
+		const index = createArtifactIndex({
+			schema_version: "v1",
+			index_type: "artifact_index",
+			run_id: options.runId,
+			attempt_id: options.attemptId,
+			artifacts: store
+				.listArtifacts()
+				.map((artifact, index) => ({
+					name: `artifact-${String(index + 1).padStart(4, "0")}`,
+					path: artifact.path,
+					media_type: artifact.mediaType,
+					bytes: artifact.bytes,
+					sha256: artifact.sha256,
+					sensitivity: artifact.sensitivity,
+					generated_by: artifact.generatedBy,
+				})),
+			created_at: finishedAt,
+		});
+		const result = createRunResult({
+			schema_version: "v1",
+			result_type: "run",
+			run_id: options.runId,
+			attempt_id: options.attemptId,
+			manifest_sha256: manifest.manifest_sha256,
+			terminal_status: "completed",
+			termination_reason: evaluation.resolved ? "official_resolved" : "official_unresolved",
+			resolved: evaluation.resolved,
+			started_at: startedAt,
+			finished_at: finishedAt,
+			wall_time_ms: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
+			usage,
+			attempt_sha256: attempt.attempt_sha256,
+			patch_snapshot_sha256: m4.p1_patch_sha256,
+			evaluation_result_sha256: evaluation.evaluation_sha256,
+			artifact_index_sha256: index.index_sha256,
+			failure: null,
+		});
+		await store.writeNew("artifact-index.json", stableStringify(index), {
+			mediaType: "application/json",
+			sensitivity: "internal",
+			generatedBy: "orchestrator",
+		});
+		await store.writeNew("result.json", stableStringify(result), {
+			mediaType: "application/json",
+			sensitivity: "internal",
+			generatedBy: "orchestrator",
+		});
 		await store.publishTo(root);
 		return result;
 	} catch (error) {

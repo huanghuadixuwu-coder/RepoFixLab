@@ -1,3 +1,18 @@
+/**
+ * Durable batch orchestration for RepoFix experiment runs.
+ *
+ * This module:
+ * - Converts frozen experiment assignments into deterministic logical runs.
+ * - Executes runs under exclusive owner and global-budget leases.
+ * - Persists immutable state and results for safe restart and audit.
+ * - Publishes aggregate experiment evidence after all runnable work finishes.
+ *
+ * Trust boundary:
+ * - The Node Orchestrator owns batch state, token admission, and artifacts.
+ * - The injected executor delegates repository and container operations to the
+ *   trusted Controller without transferring model credentials or budget state.
+ */
+
 import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -69,6 +84,10 @@ export interface BatchExecutionSummary {
 
 const EXECUTION_NAMESPACE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 
+/**
+ * Return the stable namespace that separates durable Controller operations
+ * belonging to different physical executions of the same experiment root.
+ */
 export function executionNamespaceForRoot(root: string, requested?: string): string {
 	if (requested !== undefined) {
 		if (!EXECUTION_NAMESPACE.test(requested)) throw new Error("execution_namespace is invalid");
@@ -77,6 +96,10 @@ export function executionNamespaceForRoot(root: string, requested?: string): str
 	return `execution-${createHash("sha256").update(resolve(root), "utf8").digest("hex").slice(0, 24)}`;
 }
 
+/**
+ * Derive a deterministic physical attempt ID from one logical run, its retry
+ * sequence, and the execution namespace used by Controller operations.
+ */
 export function attemptIdFor(
 	spec: BatchRunSpec,
 	sequence: number,
@@ -88,10 +111,12 @@ export function attemptIdFor(
 	return `attempt-${executionNamespace}-run-${logicalRunToken}-${String(sequence).padStart(3, "0")}`;
 }
 
+/** Compare immutable run specifications by canonical JSON value. */
 function sameSpec(left: BatchRunSpec, right: BatchRunSpec): boolean {
 	return stableStringify(left) === stableStringify(right);
 }
 
+/** Extract the immutable run specification embedded in durable batch state. */
 function specFromState(state: BatchRunState): BatchRunSpec {
 	return {
 		run_id: state.run_id,
@@ -102,11 +127,16 @@ function specFromState(state: BatchRunState): BatchRunSpec {
 	};
 }
 
+/** Reject duplicate logical run IDs before any state or budget mutation. */
 function assertBatchSpecs(specs: readonly BatchRunSpec[]): void {
 	const ids = specs.map((spec) => spec.run_id);
 	if (new Set(ids).size !== ids.length) throw new Error("Batch specs contain duplicate run IDs");
 }
 
+/**
+ * Write an artifact exactly once, accepting an identical pre-existing value
+ * during restart but rejecting conflicting content at the same path.
+ */
 async function writeImmutable(path: string, content: string): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
 	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -128,6 +158,7 @@ async function writeImmutable(path: string, content: string): Promise<void> {
 	}
 }
 
+/** Persist the namespace-to-root binding that identifies this batch execution. */
 async function writeExecutionIdentity(root: string, executionNamespace: string): Promise<void> {
 	const resolvedRoot = resolve(root);
 	await writeImmutable(
@@ -141,22 +172,30 @@ async function writeExecutionIdentity(root: string, executionNamespace: string):
 	);
 }
 
+/**
+ * Store completed run results as immutable, contract-verified artifacts and
+ * verify their hash and identity again when a resumed batch reads them.
+ */
 class BatchResultStore {
 	private readonly root: string;
 
+	/** Bind the store to the result directory beneath one experiment root. */
 	constructor(root: string) {
 		this.root = resolve(root, "results");
 	}
 
+	/** Map a logical run ID to its immutable result artifact path. */
 	private pathFor(runId: string): string {
 		return join(this.root, `${runId}.json`);
 	}
 
+	/** Verify and persist one completed run result without permitting replacement. */
 	async write(result: RunResult): Promise<void> {
 		const verified = verifyRunResult(result);
 		await writeImmutable(this.pathFor(verified.run_id), stableStringify(verified));
 	}
 
+	/** Read a completed result and verify its binding to the durable run state. */
 	async read(state: BatchRunState): Promise<RunResult> {
 		let raw: string;
 		try {
@@ -180,6 +219,7 @@ class BatchResultStore {
 	}
 }
 
+/** Derive a stable logical run ID from the frozen experiment coordinates. */
 function deterministicRunId(
 	plan: ExperimentPlan,
 	groupId: string,
@@ -198,9 +238,11 @@ function deterministicRunId(
 }
 
 /**
- * M5 converts a frozen cohort assignment into an immutable logical-run set.
- * It never selects the first N dataset entries itself: M6 must supply the
- * frozen Dev/Validation/Test cohort assignment explicitly.
+ * Convert frozen cohort assignments into the immutable logical-run set.
+ *
+ * The function validates every group, task, configuration, and replicate
+ * against the frozen plan. It never selects dataset entries itself: the
+ * caller must supply the already frozen Dev/Validation/Test assignments.
  */
 export function createBatchRunSpecs(
 	plan: ExperimentPlan,
@@ -243,6 +285,10 @@ export function createBatchRunSpecs(
 	return specs;
 }
 
+/**
+ * Reconcile requested runs with durable state, registering an empty batch or
+ * rejecting any specification drift during restart.
+ */
 async function reconcileSpecs(store: BatchStateStore, specs: readonly BatchRunSpec[]): Promise<void> {
 	const states = store.values;
 	if (states.length === 0) {
@@ -260,9 +306,13 @@ async function reconcileSpecs(store: BatchStateStore, specs: readonly BatchRunSp
 }
 
 /**
- * M5 deliberately serializes work under an owner lease. The executor is
- * injected so M6 can bind it to the frozen Controller lifecycle without
- * changing state-machine, durability, or aggregate-report semantics.
+ * Execute and resume a batch under exclusive ownership.
+ *
+ * The Orchestrator serializes runs, reserves global budget before invoking the
+ * executor, settles known usage, conservatively charges uncertain failures,
+ * persists immutable results, and publishes the aggregate report. The
+ * executor is injected so container and repository work can remain behind the
+ * Controller boundary without changing state or accounting semantics.
  */
 export async function executeBatch(
 	root: string,
@@ -369,6 +419,7 @@ export async function executeBatch(
 	}
 }
 
+/** Return runs that have not yet reached a completed or failed terminal state. */
 export function incompleteRuns(states: readonly BatchRunState[]): readonly BatchRunState[] {
 	return states.filter((state) => state.status !== "completed" && state.status !== "failed");
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { stableStringify } from "../contracts/canonical-json.ts";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
+import { stableStringify } from "../contracts/canonical-json.ts";
 import type { M3SplitManifest } from "../m3/split.ts";
 
 export const M6_CALIBRATION_PROTOCOL_REVISION = "repofixlab-protocol-1.5-deepseek-v4-flash" as const;
@@ -51,7 +51,9 @@ function isSha256(value: unknown): value is string {
 }
 
 function equalsStringArray(value: unknown, expected: readonly string[]): boolean {
-	return Array.isArray(value) && value.length === expected.length && value.every((item, index) => item === expected[index]);
+	return (
+		Array.isArray(value) && value.length === expected.length && value.every((item, index) => item === expected[index])
+	);
 }
 
 function createRunId(instanceId: M6CalibrationRun["instance_id"], configId: M6CalibrationRun["config_id"]): string {
@@ -77,7 +79,9 @@ function isConfigurationId(value: unknown): value is M6CalibrationRun["config_id
 }
 
 export function createM6DevCalibrationBatch(split: M3SplitManifest): M6DevCalibrationBatch {
-	const dev = new Set(split.assignments.filter((assignment) => assignment.split === "dev").map((assignment) => assignment.instance_id));
+	const dev = new Set(
+		split.assignments.filter((assignment) => assignment.split === "dev").map((assignment) => assignment.instance_id),
+	);
 	if (!M6_CALIBRATION_INSTANCE_IDS.every((instanceId) => dev.has(instanceId))) {
 		throw new Error("M6 v2 calibration tasks must all belong to the frozen Dev split");
 	}
@@ -154,7 +158,10 @@ export function verifyM6DevCalibrationBatch(value: unknown): M6DevCalibrationBat
 	}
 	for (const instanceId of M6_CALIBRATION_INSTANCE_IDS) {
 		for (const configId of CALIBRATION_CONFIG_IDS) {
-			if (typed.logical_runs.filter((run) => run.instance_id === instanceId && run.config_id === configId).length !== 1) {
+			if (
+				typed.logical_runs.filter((run) => run.instance_id === instanceId && run.config_id === configId).length !==
+				1
+			) {
 				throw new Error("M6 Dev calibration batch must contain exactly one run per task and configuration");
 			}
 		}

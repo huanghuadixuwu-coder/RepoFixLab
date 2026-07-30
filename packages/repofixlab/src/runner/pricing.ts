@@ -64,7 +64,8 @@ export const FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC = {
 			cache_write_cny: 0,
 		},
 	],
-	cache_write_note: "DeepSeek V4 Flash publishes cache-hit and cache-miss input prices; Pi records no cache-write usage for this provider.",
+	cache_write_note:
+		"DeepSeek V4 Flash publishes cache-hit and cache-miss input prices; Pi records no cache-write usage for this provider.",
 } as const;
 
 export const FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256 = canonicalContractSha256(

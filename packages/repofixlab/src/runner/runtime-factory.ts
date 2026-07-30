@@ -1,3 +1,18 @@
+/**
+ * Frozen model and Pi session construction for RepoFix experiments.
+ *
+ * This module:
+ * - Resolves Provider credentials only inside the Node Orchestrator.
+ * - Registers exact model, context-window, and pricing specifications.
+ * - Creates comparable Pi-general and RepoFix sessions.
+ * - Enforces frozen request options and run-level admission limits.
+ *
+ * Trust boundary:
+ * - API keys remain in in-memory Orchestrator auth storage.
+ * - The Controller receives repository and container requests, not model
+ *   credentials, model selection authority, or token-budget ownership.
+ */
+
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import {
@@ -156,6 +171,7 @@ const DEEPSEEK_V4_FLASH_RUNTIME: ModelRuntimeDefinition = {
 	forceStageCompletionToolChoice: false,
 };
 
+/** Create the frozen GLM-4.5-Air runtime used by the primary configuration. */
 export function createFrozenModelRuntime(
 	apiKey?: string,
 	apiKeyFile?: string,
@@ -164,6 +180,7 @@ export function createFrozenModelRuntime(
 	return createModelRuntime(GLM_45_AIR_RUNTIME, apiKey, apiKeyFile, useEnvironment);
 }
 
+/** Create the frozen DeepSeek V4 Flash runtime used by the alternate configuration. */
 export function createDeepSeekV4FlashRuntime(
 	apiKey?: string,
 	apiKeyFile?: string,
@@ -172,6 +189,10 @@ export function createDeepSeekV4FlashRuntime(
 	return createModelRuntime(DEEPSEEK_V4_FLASH_RUNTIME, apiKey, apiKeyFile, useEnvironment);
 }
 
+/**
+ * Resolve one Provider credential, construct in-memory auth and model
+ * registries, and register the immutable model definition used by a run.
+ */
 function createModelRuntime(
 	definition: ModelRuntimeDefinition,
 	apiKey?: string,
@@ -230,6 +251,7 @@ function createModelRuntime(
 	};
 }
 
+/** Create a Pi-general session and wrap it with the frozen Provider options. */
 export async function createFrozenPiGeneralSession(
 	runtime: FrozenModelRuntime,
 	options: Omit<PiGeneralSessionOptions, "model" | "authStorage" | "modelRegistry" | "thinkingLevel">,
@@ -247,6 +269,7 @@ export async function createFrozenPiGeneralSession(
 	return result;
 }
 
+/** Create a RepoFix session and wrap it with the frozen Provider options. */
 export async function createFrozenRepoFixSession(
 	runtime: FrozenModelRuntime,
 	options: Omit<RepoFixSessionOptions, "model" | "authStorage" | "modelRegistry" | "thinkingLevel">,
@@ -265,6 +288,10 @@ export async function createFrozenRepoFixSession(
 	return result;
 }
 
+/**
+ * Merge caller cancellation with the frozen temperature, output-token limit,
+ * request timeout, and timeout signal used for every Provider call.
+ */
 export function frozenProviderStreamOptions(streamOptions?: SimpleStreamOptions): SimpleStreamOptions {
 	const deadline = AbortSignal.timeout(FROZEN_PROVIDER_REQUEST_TIMEOUT_MS);
 	const signal = streamOptions?.signal === undefined ? deadline : AbortSignal.any([streamOptions.signal, deadline]);
@@ -277,6 +304,10 @@ export function frozenProviderStreamOptions(streamOptions?: SimpleStreamOptions)
 	};
 }
 
+/**
+ * Hash the effective model specification, system prompt, and sorted tool
+ * schema so artifacts identify the runtime that actually executed.
+ */
 export function runtimeIdentityFromSession(
 	session: PiGeneralSessionResult["session"] | RepoFixSessionResult["session"],
 	modelSpecSha256: string,
@@ -292,6 +323,10 @@ export function runtimeIdentityFromSession(
 	};
 }
 
+/**
+ * Block a new Provider turn after any configured accumulated-token,
+ * model-turn, or tool-call boundary has been reached.
+ */
 export function installRunAdmissionGate(
 	session: AdmissionGatedSession,
 	limits: { readonly accountedTokens: number | null; readonly modelTurns: number; readonly toolCalls: number | null },
@@ -344,6 +379,7 @@ export function installRunAdmissionGate(
 	};
 }
 
+/** Compute the exact UTF-8 SHA-256 used for raw prompt identity evidence. */
 function canonicalRawTextSha256(value: string): string {
 	return createHash("sha256").update(value, "utf8").digest("hex");
 }

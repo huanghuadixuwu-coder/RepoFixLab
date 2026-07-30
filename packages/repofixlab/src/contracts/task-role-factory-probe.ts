@@ -373,7 +373,11 @@ export function createTaskEnvironmentCandidate(input: unknown): TaskEnvironmentC
 		throw new Error("Task environment candidate build input does not satisfy the strict v1 contract");
 	}
 	const workerFilesystem = buildFilesystemProfile(input.instance_id, "worker", input.roles.worker.filesystem_profile);
-	const evaluatorFilesystem = buildFilesystemProfile(input.instance_id, "evaluator", input.roles.evaluator.filesystem_profile);
+	const evaluatorFilesystem = buildFilesystemProfile(
+		input.instance_id,
+		"evaluator",
+		input.roles.evaluator.filesystem_profile,
+	);
 	const identity: CandidateIdentityMaterial = {
 		schema_version: "v1",
 		candidate_type: "task_environment_candidate",
@@ -395,7 +399,11 @@ export function createTaskEnvironmentCandidate(input: unknown): TaskEnvironmentC
 				image: { ...input.roles.evaluator.image, platform: "linux/amd64" },
 				runtime_user: { ...input.roles.evaluator.runtime_user },
 				security_profile: buildSecurityProfile(input.instance_id, "evaluator"),
-				resource_profile: buildResourceProfile(input.instance_id, "evaluator", input.roles.evaluator.resource_profile),
+				resource_profile: buildResourceProfile(
+					input.instance_id,
+					"evaluator",
+					input.roles.evaluator.resource_profile,
+				),
 				filesystem_profile: evaluatorFilesystem,
 			},
 		},

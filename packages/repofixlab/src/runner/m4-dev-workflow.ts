@@ -1,3 +1,19 @@
+/**
+ * Single-attempt RepoFix and Pi-general execution workflow.
+ *
+ * This module:
+ * - Binds sealed task inputs to a Controller-owned worker.
+ * - Creates the selected model session under Orchestrator-owned limits.
+ * - Captures patch checkpoints and controlled-verification evidence.
+ * - Publishes an immutable attempt directory for later formal evaluation.
+ *
+ * Trust boundary:
+ * - The Orchestrator owns model credentials, session state, budgets, and
+ *   artifacts.
+ * - The Controller owns trusted Docker, repository, snapshot, and controlled
+ *   verification operations and never selects the model or budget.
+ */
+
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -128,24 +144,32 @@ export interface M4DevWorkflowSummary {
 
 /** A failure before the first Provider reservation is safe to report without token reconciliation. */
 export class M4PreProviderInputError extends Error {
+	/** Mark an input or readiness failure known to occur before Provider admission. */
 	constructor(message: string) {
 		super(message);
 		this.name = "M4PreProviderInputError";
 	}
 }
 
+/** Convert an unknown failure into a bounded message safe for persisted evidence. */
 function safeMessage(error: unknown): string {
 	return (error instanceof Error ? error.message : "Unknown M4 Dev workflow failure").slice(0, 2_000);
 }
 
+/** Remove non-JSON runtime values before writing a session trajectory. */
 function jsonSerializable(value: unknown): unknown {
 	return JSON.parse(JSON.stringify(value));
 }
 
+/** Map a named patch checkpoint to its immutable artifact filename. */
 function snapshotArtifactPath(label: "P0" | "V1" | "V2" | "P1"): string {
 	return `${label.toLowerCase()}.patch`;
 }
 
+/**
+ * Persist raw Controller patch bytes and the hash-bound snapshot contract for
+ * one P0, V1, V2, or P1 checkpoint.
+ */
 async function persistSnapshot(
 	store: ArtifactStore,
 	runId: string,
@@ -183,6 +207,7 @@ async function persistSnapshot(
 	return snapshot;
 }
 
+/** Convert a full Controller verification result into bounded model feedback. */
 function toControlledFeedback(response: RuntimeVerificationResult): ControlledVerificationFeedback {
 	const rawOutput = ["stdout:", response.stdout, "stderr:", response.stderr].join("\n");
 	return {
@@ -200,16 +225,19 @@ function toControlledFeedback(response: RuntimeVerificationResult): ControlledVe
 	};
 }
 
+/** Validate that the run cap can admit at least one frozen output reservation. */
 function assertCap(value: number): void {
 	if (!Number.isSafeInteger(value) || value < DEFAULT_MAX_OUTPUT_TOKENS + 1) {
 		throw new Error("M4 Dev accounted admission cap must exceed one frozen provider output reservation");
 	}
 }
 
+/** Validate the run-level model-turn termination limit. */
 function assertModelTurnLimit(value: number): void {
 	if (!Number.isSafeInteger(value) || value < 1) throw new Error("M4 Dev max model turns must be a positive safe integer");
 }
 
+/** Persist a completed RepoFix stage and its repository-output budget snapshot. */
 async function writeStageEvidence(
 	store: ArtifactStore,
 	completion: StageCompletion,
@@ -227,6 +255,7 @@ async function writeStageEvidence(
 	});
 }
 
+/** Persist evidence that the workflow recovered a missing stage-completion call. */
 async function writeStageRecoveryEvidence(store: ArtifactStore, recovery: StageRecovery): Promise<void> {
 	await store.writeNew(`stages/${recovery.stage.toLowerCase()}.recovery.json`, stableStringify(recovery), {
 		mediaType: "application/json",
@@ -236,9 +265,16 @@ async function writeStageRecoveryEvidence(store: ArtifactStore, recovery: StageR
 }
 
 /**
- * Executes the M4 Dev workflow against one prepared Controller worker. This
- * is deliberately not an official benchmark runner: M5 owns queueing,
- * attempts, official evaluation, recovery, and aggregate reporting.
+ * Execute one Pi-general or RepoFix attempt against a Controller-owned worker.
+ *
+ * The workflow loads sealed task inputs before Provider admission, prepares
+ * and probes the worker, creates the frozen session, supervises token and turn
+ * limits, and persists trajectories plus P0/V1/V2/P1 evidence. RepoFix
+ * verification uses only Controller-owned catalog operations; the model
+ * cannot supply arbitrary verification commands.
+ *
+ * This is not the official benchmark evaluator. The formal runner owns
+ * queueing, retries, final evaluation, recovery, and aggregate reporting.
  */
 export async function runM4DevWorkflow(
 	options: M4DevWorkflowOptions,
@@ -278,6 +314,7 @@ export async function runM4DevWorkflow(
 	const repofixTrajectoryEvents: RepoFixTrajectoryEvent[] = [];
 	let repofixTrajectoryPersisted = false;
 	let terminalStatus: "completed" | "failed" = "failed";
+	/** Write the RepoFix control trajectory once after at least one event exists. */
 	const persistRepoFixTrajectory = async (): Promise<void> => {
 		if (repofixTrajectoryPersisted || repofixTrajectoryEvents.length === 0) return;
 		await store.writeNew(
@@ -374,6 +411,7 @@ export async function runM4DevWorkflow(
 			);
 			const estimator = createTokenAdmissionEstimator(options.tokenAdmissionEstimator ?? M4_DEV_TOKEN_ESTIMATOR);
 			let requestSequence = 0;
+			/** Install reservation-based Provider admission on the active Pi session. */
 			const installSupervisor = (session: PiGeneralSessionResult["session"] | RepoFixSessionResult["session"]): void => {
 				installTokenSupervisor(session, {
 					ledger,
@@ -646,6 +684,10 @@ export async function runM4DevWorkflow(
 	return summary;
 }
 
+/**
+ * Construct production Controller, task-source, and frozen-session
+ * dependencies while keeping Provider credentials inside the Orchestrator.
+ */
 export function createDefaultM4DevWorkflowDependencies(
 	controllerUrl: string,
 	runtime: FrozenModelRuntime = createFrozenModelRuntime(),

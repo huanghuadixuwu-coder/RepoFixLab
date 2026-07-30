@@ -68,7 +68,6 @@ function exactImageFacts(image: OfficialImageSourceLock["images"][number]): Expe
 	};
 }
 
-
 function areStrictlySortedImageKeys(keys: readonly string[]): boolean {
 	return keys.every((key, index) => {
 		const previous = keys[index - 1];
@@ -132,7 +131,9 @@ export function verifyOfficialImageSourceLock(
 		value.images.length !== expected.images.length ||
 		value.images.some((image, index) => {
 			const imageExpected = expected.images[index];
-			return imageExpected === undefined || stableStringify(exactImageFacts(image)) !== stableStringify(imageExpected);
+			return (
+				imageExpected === undefined || stableStringify(exactImageFacts(image)) !== stableStringify(imageExpected)
+			);
 		})
 	) {
 		throw new Error("Official image source lock does not match the expected frozen facts");

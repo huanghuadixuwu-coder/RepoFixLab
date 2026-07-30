@@ -25,6 +25,7 @@ packages/*/dist-firefox/
 
 # Package specific
 .npm/
+.pnpm-store/
 coverage/
 .nyc_output/
 .pi_config/
@@ -50,3 +51,7 @@ artifacts/
 packages/repofixlab/controller-work/
 packages/repofixlab/data/private/
 packages/repofixlab/**/*.private.jsonl
+
+# Local Python bytecode
+__pycache__/
+*.py[cod]

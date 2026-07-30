@@ -185,10 +185,7 @@ export class FilePublicTaskSource implements PublicTaskSource {
 	private readonly rootPath: string;
 	private readonly split: PublicTaskSplit;
 
-	constructor(
-		rootPath = process.env.REPOFIX_DATASET_PUBLIC_PATH ?? "/data/public",
-		split: PublicTaskSplit = "dev",
-	) {
+	constructor(rootPath = process.env.REPOFIX_DATASET_PUBLIC_PATH ?? "/data/public", split: PublicTaskSplit = "dev") {
 		this.rootPath = rootPath;
 		this.split = split;
 	}
@@ -271,7 +268,8 @@ export class DirectoryTaskEnvironmentLockSource implements TaskEnvironmentLockSo
 	private readonly sharedDatasetLockLocation: SharedDatasetLockLocation | null;
 
 	constructor(
-		rootPath = process.env.REPOFIX_TASK_ENVIRONMENT_LOCK_ROOT ?? fileURLToPath(new URL("../../configs/runtime", import.meta.url)),
+		rootPath = process.env.REPOFIX_TASK_ENVIRONMENT_LOCK_ROOT ??
+			fileURLToPath(new URL("../../configs/runtime", import.meta.url)),
 		sharedDatasetLockLocation: SharedDatasetLockLocation | null = null,
 	) {
 		this.rootPath = rootPath;

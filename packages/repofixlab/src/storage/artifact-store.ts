@@ -166,8 +166,7 @@ export class ArtifactStore {
 		await this.syncDirectory(dirname(candidate));
 		this.openAppendOnlyFiles += 1;
 		return new AppendOnlyArtifactFile(this, path, file, () => {
-			if (this.openAppendOnlyFiles === 0)
-				throw new Error("Artifact store append-only file accounting underflow");
+			if (this.openAppendOnlyFiles === 0) throw new Error("Artifact store append-only file accounting underflow");
 			this.openAppendOnlyFiles -= 1;
 		});
 	}

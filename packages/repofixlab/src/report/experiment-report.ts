@@ -1,10 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import type { RepoFixConfigId } from "../agent/repofix-config.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import type { RunResult } from "../contracts/run-contracts.ts";
-import type { RepoFixConfigId } from "../agent/repofix-config.ts";
-import { createExperimentMetrics, type ExperimentMetrics, type RunMetricEvidence } from "../metrics/experiment-metrics.ts";
+import {
+	createExperimentMetrics,
+	type ExperimentMetrics,
+	type RunMetricEvidence,
+} from "../metrics/experiment-metrics.ts";
 import type { BatchRunSpec } from "../runner/batch-state.ts";
 
 export interface ExperimentAggregate {
@@ -48,7 +52,8 @@ export function createExperimentAggregate(
 	if (new Set(ids).size !== ids.length) throw new Error("Experiment aggregate specs contain duplicate run IDs");
 	const missing = ids.filter((id) => results[id] === undefined).sort();
 	for (const [runId, result] of Object.entries(results)) {
-		if (!ids.includes(runId) || result.run_id !== runId) throw new Error("Experiment result is not bound to a registered run");
+		if (!ids.includes(runId) || result.run_id !== runId)
+			throw new Error("Experiment result is not bound to a registered run");
 	}
 	const configIds = [...new Set(specs.map((spec) => spec.config_id))].sort() as RepoFixConfigId[];
 	const configurations = configIds.map((configId) => {
@@ -73,13 +78,24 @@ export function createExperimentAggregate(
 			config_id: configId,
 			denominator: configSpecs.length,
 			resolved_count: configResults.filter((result) => result.resolved).length,
-			resolved_rate: configSpecs.length === 0 ? 0 : configResults.filter((result) => result.resolved).length / configSpecs.length,
-			terminal_counts: Object.fromEntries(Object.entries(terminalCounts).sort(([left], [right]) => left.localeCompare(right))),
+			resolved_rate:
+				configSpecs.length === 0
+					? 0
+					: configResults.filter((result) => result.resolved).length / configSpecs.length,
+			terminal_counts: Object.fromEntries(
+				Object.entries(terminalCounts).sort(([left], [right]) => left.localeCompare(right)),
+			),
 			accounted_tokens: configResults.reduce((total, result) => total + result.usage.accounted_tokens, 0),
 			provider_actual_tokens: actual,
 			wall_time_ms: {
-				p50: percentile(configResults.map((result) => result.wall_time_ms), 0.5),
-				p90: percentile(configResults.map((result) => result.wall_time_ms), 0.9),
+				p50: percentile(
+					configResults.map((result) => result.wall_time_ms),
+					0.5,
+				),
+				p90: percentile(
+					configResults.map((result) => result.wall_time_ms),
+					0.9,
+				),
 				total: configResults.reduce((total, result) => total + result.wall_time_ms, 0),
 			},
 			cost_complete: completeCost,

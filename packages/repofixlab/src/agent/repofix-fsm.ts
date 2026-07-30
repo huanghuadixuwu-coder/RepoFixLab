@@ -1,7 +1,7 @@
-import { Type, type Static } from "typebox";
-import { Compile } from "typebox/compile";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
+import { Compile } from "typebox/compile";
 import type { RepoFixStage, RepoFixWorkflowConfig } from "./repofix-config.ts";
 
 const EvidenceSchema = Type.String({ minLength: 1, maxLength: 4_096 });
@@ -159,7 +159,10 @@ const PlanCompletionToolSchema = Type.Object(
 	{
 		stage: Type.Literal("PLAN"),
 		minimal_change_steps: WireTextListSchema,
-		obligations: Type.Union([Type.Array(PlanObligationSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema]),
+		obligations: Type.Union([
+			Type.Array(PlanObligationSchema, { minItems: 1, maxItems: 16 }),
+			JsonEncodedStructuredValueSchema,
+		]),
 		risks: WireTextListSchema,
 		preservation_invariants: Type.Union([
 			Type.Array(PreservationInvariantSchema, { minItems: 1, maxItems: 16 }),
@@ -175,7 +178,10 @@ const ImplementCompletionToolSchema = Type.Object(
 	{
 		stage: Type.Literal("IMPLEMENT"),
 		change_summary: WireTextListSchema,
-		obligation_dispositions: Type.Union([Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema]),
+		obligation_dispositions: Type.Union([
+			Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }),
+			JsonEncodedStructuredValueSchema,
+		]),
 	},
 	{ additionalProperties: false },
 );
@@ -204,8 +210,14 @@ const SelfReviewCompletionToolSchema = Type.Object(
 		diff_checklist: WireTextListSchema,
 		remaining_risks: WireTextListSchema,
 		risk_disposition: WireTextListSchema,
-		obligation_dispositions: Type.Union([Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema]),
-		preservation_dispositions: Type.Union([Type.Array(PreservationDispositionSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema]),
+		obligation_dispositions: Type.Union([
+			Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }),
+			JsonEncodedStructuredValueSchema,
+		]),
+		preservation_dispositions: Type.Union([
+			Type.Array(PreservationDispositionSchema, { minItems: 1, maxItems: 16 }),
+			JsonEncodedStructuredValueSchema,
+		]),
 	},
 	{ additionalProperties: false },
 );
@@ -245,7 +257,12 @@ const UnderstandCompletionWireSchema = Type.Object(
 const LocalizeCompletionWireSchema = Type.Object(
 	{
 		stage: Type.Literal("LOCALIZE"),
-		candidates: Type.Optional(Type.Union([Type.Array(LocalizeCandidateSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema])),
+		candidates: Type.Optional(
+			Type.Union([
+				Type.Array(LocalizeCandidateSchema, { minItems: 1, maxItems: 16 }),
+				JsonEncodedStructuredValueSchema,
+			]),
+		),
 		exclusions: Type.Optional(WireOptionalTextListSchema),
 	},
 	{ additionalProperties: true },
@@ -255,10 +272,18 @@ const PlanCompletionWireSchema = Type.Object(
 	{
 		stage: Type.Literal("PLAN"),
 		minimal_change_steps: Type.Optional(WireTextListSchema),
-		obligations: Type.Optional(Type.Union([Type.Array(PlanObligationSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema])),
+		obligations: Type.Optional(
+			Type.Union([
+				Type.Array(PlanObligationSchema, { minItems: 1, maxItems: 16 }),
+				JsonEncodedStructuredValueSchema,
+			]),
+		),
 		risks: Type.Optional(WireTextListSchema),
 		preservation_invariants: Type.Optional(
-			Type.Union([Type.Array(PreservationInvariantSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema]),
+			Type.Union([
+				Type.Array(PreservationInvariantSchema, { minItems: 1, maxItems: 16 }),
+				JsonEncodedStructuredValueSchema,
+			]),
 		),
 		state_transition_checks: Type.Optional(WireTextListSchema),
 		verification_candidate_id: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
@@ -270,7 +295,12 @@ const ImplementCompletionWireSchema = Type.Object(
 	{
 		stage: Type.Literal("IMPLEMENT"),
 		change_summary: Type.Optional(WireTextListSchema),
-		obligation_dispositions: Type.Optional(Type.Union([Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema])),
+		obligation_dispositions: Type.Optional(
+			Type.Union([
+				Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }),
+				JsonEncodedStructuredValueSchema,
+			]),
+		),
 	},
 	{ additionalProperties: true },
 );
@@ -299,8 +329,18 @@ const SelfReviewCompletionWireSchema = Type.Object(
 		diff_checklist: Type.Optional(WireTextListSchema),
 		remaining_risks: Type.Optional(WireTextListSchema),
 		risk_disposition: Type.Optional(WireTextListSchema),
-		obligation_dispositions: Type.Optional(Type.Union([Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema])),
-		preservation_dispositions: Type.Optional(Type.Union([Type.Array(PreservationDispositionSchema, { minItems: 1, maxItems: 16 }), JsonEncodedStructuredValueSchema])),
+		obligation_dispositions: Type.Optional(
+			Type.Union([
+				Type.Array(ObligationDispositionSchema, { minItems: 1, maxItems: 16 }),
+				JsonEncodedStructuredValueSchema,
+			]),
+		),
+		preservation_dispositions: Type.Optional(
+			Type.Union([
+				Type.Array(PreservationDispositionSchema, { minItems: 1, maxItems: 16 }),
+				JsonEncodedStructuredValueSchema,
+			]),
+		),
 	},
 	{ additionalProperties: true },
 );
@@ -316,13 +356,19 @@ const STAGE_COMPLETION_WIRE_SCHEMAS = {
 } as const;
 
 const STAGE_COMPLETION_ARTIFACT_REQUIREMENTS: Record<RepoFixStage, string> = {
-	UNDERSTAND: 'For UNDERSTAND call stage_complete with exactly {"stage":"UNDERSTAND","problem_summary":"...","expected_behavior":["..."],"constraints":["..."],"acceptance_evidence":["..."]}.',
-	LOCALIZE: 'For LOCALIZE call stage_complete with exactly {"stage":"LOCALIZE","candidates":[{"path":"src/file.ts","symbol":"target","evidence":"why this code is relevant"}],"exclusions":["..."]}; use an empty exclusions array when no relevant alternatives were excluded.',
+	UNDERSTAND:
+		'For UNDERSTAND call stage_complete with exactly {"stage":"UNDERSTAND","problem_summary":"...","expected_behavior":["..."],"constraints":["..."],"acceptance_evidence":["..."]}.',
+	LOCALIZE:
+		'For LOCALIZE call stage_complete with exactly {"stage":"LOCALIZE","candidates":[{"path":"src/file.ts","symbol":"target","evidence":"why this code is relevant"}],"exclusions":["..."]}; use an empty exclusions array when no relevant alternatives were excluded.',
 	PLAN: 'For PLAN call stage_complete with exactly {"stage":"PLAN","minimal_change_steps":["..."],"obligations":[{"id":"obligation-id","code_scope":"repository code site","required_change":"required semantic outcome","evidence":"repository evidence"}],"risks":["..."],"preservation_invariants":[{"id":"invariant-id","scope":"affected branch or neighbor","preserved_behavior":"must remain true","counterexample":"observable behavior that would falsify it","evidence":"repository evidence"}],"state_transition_checks":["callback/re-entry state ordering, or not applicable with evidence"],"verification_candidate_id":"controller-provided-id"}.',
-	IMPLEMENT: 'For IMPLEMENT call stage_complete with exactly {"stage":"IMPLEMENT","change_summary":["..."],"obligation_dispositions":[{"id":"PLAN obligation id","status":"implemented|ruled_out|blocked","evidence":"diff or repository evidence"}]}.',
-	REFINE_1: 'For REFINE_1 call stage_complete with exactly {"stage":"REFINE_1","feedback_assessment":"...","revision_summary":["..."]}.',
-	REFINE_2: 'For REFINE_2 call stage_complete with exactly {"stage":"REFINE_2","feedback_assessment":"...","revision_summary":["..."]}.',
-	SELF_REVIEW: 'For SELF_REVIEW call stage_complete with exactly {"stage":"SELF_REVIEW","diff_checklist":["..."],"remaining_risks":["..."],"risk_disposition":["..."],"obligation_dispositions":[{"id":"PLAN obligation id","status":"implemented|ruled_out|blocked","evidence":"diff or repository evidence"}],"preservation_dispositions":[{"id":"PLAN invariant id","status":"verified","evidence":"diff and repository/test evidence"}]}.',
+	IMPLEMENT:
+		'For IMPLEMENT call stage_complete with exactly {"stage":"IMPLEMENT","change_summary":["..."],"obligation_dispositions":[{"id":"PLAN obligation id","status":"implemented|ruled_out|blocked","evidence":"diff or repository evidence"}]}.',
+	REFINE_1:
+		'For REFINE_1 call stage_complete with exactly {"stage":"REFINE_1","feedback_assessment":"...","revision_summary":["..."]}.',
+	REFINE_2:
+		'For REFINE_2 call stage_complete with exactly {"stage":"REFINE_2","feedback_assessment":"...","revision_summary":["..."]}.',
+	SELF_REVIEW:
+		'For SELF_REVIEW call stage_complete with exactly {"stage":"SELF_REVIEW","diff_checklist":["..."],"remaining_risks":["..."],"risk_disposition":["..."],"obligation_dispositions":[{"id":"PLAN obligation id","status":"implemented|ruled_out|blocked","evidence":"diff or repository evidence"}],"preservation_dispositions":[{"id":"PLAN invariant id","status":"verified","evidence":"diff and repository/test evidence"}]}.',
 };
 
 export const StageCompletionSchema = Type.Union([
@@ -415,7 +461,11 @@ function assertObligationDispositionCoverage(
 ): void {
 	const planned = new Set(plan.obligations.map((obligation) => obligation.id));
 	const supplied = new Set(dispositions.map((disposition) => disposition.id));
-	if (planned.size !== plan.obligations.length || supplied.size !== dispositions.length || planned.size !== supplied.size) {
+	if (
+		planned.size !== plan.obligations.length ||
+		supplied.size !== dispositions.length ||
+		planned.size !== supplied.size
+	) {
 		throw new Error(`${stage} obligation dispositions must provide each PLAN obligation exactly once`);
 	}
 	for (const id of planned) {
@@ -519,7 +569,13 @@ export function normalizeStageCompletionParams(value: unknown): unknown {
 		case "SELF_REVIEW":
 			return normalizeStructuredFields(
 				value,
-				["diff_checklist", "remaining_risks", "risk_disposition", "obligation_dispositions", "preservation_dispositions"],
+				[
+					"diff_checklist",
+					"remaining_risks",
+					"risk_disposition",
+					"obligation_dispositions",
+					"preservation_dispositions",
+				],
 				["diff_checklist", "remaining_risks", "risk_disposition"],
 			);
 		default:
@@ -598,11 +654,14 @@ export class RepoFixStageMachine {
 		const validator = completionValidators[this.active];
 		if (!validator.Check(value)) {
 			const violation = validator.Errors(value)[0];
-			const location = violation === undefined || violation.instancePath.length === 0
-				? "payload"
-				: `payload${violation.instancePath}`;
+			const location =
+				violation === undefined || violation.instancePath.length === 0
+					? "payload"
+					: `payload${violation.instancePath}`;
 			const detail = violation === undefined ? "does not match the required structure" : violation.message;
-			throw new Error(`stage_complete payload violates the v1 stage schema at ${location}: ${detail}. ${stageCompletionArtifactRequirement(this.active)}`);
+			throw new Error(
+				`stage_complete payload violates the v1 stage schema at ${location}: ${detail}. ${stageCompletionArtifactRequirement(this.active)}`,
+			);
 		}
 		const completion = value as StageCompletion;
 		if (completion.stage !== this.active) {
@@ -610,12 +669,14 @@ export class RepoFixStageMachine {
 		}
 		if (completion.stage === "IMPLEMENT") {
 			const plan = this.completions.get("PLAN");
-			if (plan === undefined || plan.stage !== "PLAN") throw new Error("IMPLEMENT reached without a completed PLAN artifact");
+			if (plan === undefined || plan.stage !== "PLAN")
+				throw new Error("IMPLEMENT reached without a completed PLAN artifact");
 			assertObligationDispositionCoverage("IMPLEMENT", plan, completion.obligation_dispositions);
 		}
 		if (completion.stage === "SELF_REVIEW") {
 			const plan = this.completions.get("PLAN");
-			if (plan === undefined || plan.stage !== "PLAN") throw new Error("SELF_REVIEW reached without a completed PLAN artifact");
+			if (plan === undefined || plan.stage !== "PLAN")
+				throw new Error("SELF_REVIEW reached without a completed PLAN artifact");
 			assertSelfReviewCoverage(plan, completion);
 		}
 		this.completions.set(this.active, completion);

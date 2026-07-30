@@ -112,10 +112,7 @@ export interface AgentOptions {
 		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
-	shouldStopAfterTurn?: (
-		context: ShouldStopAfterTurnContext,
-		signal?: AbortSignal,
-	) => Promise<boolean> | boolean;
+	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => Promise<boolean> | boolean;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;

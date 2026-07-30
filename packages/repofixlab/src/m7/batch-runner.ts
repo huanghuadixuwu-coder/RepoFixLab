@@ -1,15 +1,15 @@
 import { join } from "node:path";
 import type { ExperimentPlan } from "../contracts/experiment-plan.ts";
 import type { RunResult } from "../contracts/run-contracts.ts";
+import { type M6EvaluationCohorts, verifyM6EvaluationCohorts } from "../m6/cohorts.ts";
 import type { RunMetricEvidence } from "../metrics/experiment-metrics.ts";
-import { createBatchRunSpecs, executeBatch, type BatchExecutionSummary } from "../runner/batch-runner.ts";
-import { BatchStateStore, type BatchRunSpec, type BatchRunState } from "../runner/batch-state.ts";
-import { GlobalBudgetLedger } from "../runner/global-budget-ledger.ts";
-import { verifyM6EvaluationCohorts, type M6EvaluationCohorts } from "../m6/cohorts.ts";
-import { createDefaultM7FormalRunDependencies, runM7FormalRun } from "./formal-runner.ts";
-import { loadM7FormalMetricEvidence } from "./formal-metric-evidence.ts";
-import { createM7SecurityAuditReport } from "./security-audit.ts";
 import { R2_PROTOCOL_REVISION, runR2Batch } from "../r2/batch-runner.ts";
+import { type BatchExecutionSummary, createBatchRunSpecs, executeBatch } from "../runner/batch-runner.ts";
+import { type BatchRunSpec, type BatchRunState, BatchStateStore } from "../runner/batch-state.ts";
+import { GlobalBudgetLedger } from "../runner/global-budget-ledger.ts";
+import { loadM7FormalMetricEvidence } from "./formal-metric-evidence.ts";
+import { createDefaultM7FormalRunDependencies, runM7FormalRun } from "./formal-runner.ts";
+import { createM7SecurityAuditReport } from "./security-audit.ts";
 
 export const M7_PER_RUN_ADMISSION_CAP_TOKENS = 5_000_000;
 export const M7_MAX_MODEL_TURNS = 128;
@@ -32,7 +32,8 @@ function assertM7Plan(plan: ExperimentPlan): asserts plan is M7FrozenExperimentP
 		plan.task_selection.declared_task_count !== 26 ||
 		plan.budget.per_run_accounted_admission_cap_tokens !== M7_PER_RUN_ADMISSION_CAP_TOKENS ||
 		plan.budget.total_accounted_admission_cap_tokens !== M7_SOURCE_TOTAL_ADMISSION_CAP_TOKENS
-	) throw new Error("M7 plan binding is not the protocol 1.7.3 continuation configuration");
+	)
+		throw new Error("M7 plan binding is not the protocol 1.7.3 continuation configuration");
 }
 
 async function loadM7ReportEvidence(
@@ -42,7 +43,8 @@ async function loadM7ReportEvidence(
 ): Promise<Readonly<Record<string, RunMetricEvidence>>> {
 	const evaluationEvidence = await loadM7FormalMetricEvidence(batchRoot, specs, results);
 	const securityAudit = await createM7SecurityAuditReport(join(batchRoot, ".."));
-	if (securityAudit.status !== "pass") throw new Error("M7 security audit did not pass; refusing to publish aggregate evidence");
+	if (securityAudit.status !== "pass")
+		throw new Error("M7 security audit did not pass; refusing to publish aggregate evidence");
 	const securityByRunId = new Map(securityAudit.runs.map((run) => [run.execution_run_id, run]));
 	const merged: Record<string, RunMetricEvidence> = {};
 	for (const spec of specs) {
@@ -65,7 +67,9 @@ async function loadM7ReportEvidence(
 
 export async function finalizeM7ContinuationSource(sourceRoot: string): Promise<BatchStateStore> {
 	const sourceStore = await BatchStateStore.open(sourceRoot);
-	const inFlight = sourceStore.values.filter((state) => state.status !== "queued" && state.status !== "completed" && state.status !== "failed");
+	const inFlight = sourceStore.values.filter(
+		(state) => state.status !== "queued" && state.status !== "completed" && state.status !== "failed",
+	);
 	if (inFlight.length === 0) return sourceStore;
 	if (inFlight.length !== 1 || inFlight[0]?.status !== "running" || inFlight[0].attempt_id === null) {
 		throw new Error("M7 continuation source has an unsupported non-terminal recovery state");
@@ -74,10 +78,7 @@ export async function finalizeM7ContinuationSource(sourceRoot: string): Promise<
 		join(sourceRoot, "_control", "m7-global-budget.json"),
 		M7_SOURCE_TOTAL_ADMISSION_CAP_TOKENS,
 	);
-	if (
-		ledger.snapshot.reconciliation_required ||
-		ledger.snapshot.reserved_tokens !== M7_PER_RUN_ADMISSION_CAP_TOKENS
-	) {
+	if (ledger.snapshot.reconciliation_required || ledger.snapshot.reserved_tokens !== M7_PER_RUN_ADMISSION_CAP_TOKENS) {
 		throw new Error("M7 continuation source budget cannot safely finalize its interrupted Provider request");
 	}
 	await ledger.chargeUnverified(M7_PER_RUN_ADMISSION_CAP_TOKENS);
@@ -103,10 +104,13 @@ export function selectM7ContinuationSpecs(
 		throw new Error("M7 continuation requires the complete frozen 74-run source matrix");
 	}
 	const sourceByKey = new Map(sourceStates.map((state) => [continuationKey(state), state]));
-	if (sourceByKey.size !== sourceStates.length) throw new Error("M7 continuation source contains duplicate logical identities");
+	if (sourceByKey.size !== sourceStates.length)
+		throw new Error("M7 continuation source contains duplicate logical identities");
 	const selected = specs.filter((spec) => sourceByKey.get(continuationKey(spec))?.status !== "completed");
 	if (selected.length !== M7_CONTINUATION_RUN_COUNT) {
-		throw new Error(`M7 continuation requires exactly ${M7_CONTINUATION_RUN_COUNT} failed, interrupted, or queued source runs`);
+		throw new Error(
+			`M7 continuation requires exactly ${M7_CONTINUATION_RUN_COUNT} failed, interrupted, or queued source runs`,
+		);
 	}
 	return selected;
 }
@@ -128,7 +132,8 @@ export async function runM7Batch(
 		{ group_id: "ablation-no-verify-feedback", instance_ids: cohorts.ablation_instance_ids },
 		{ group_id: "stability-additional", instance_ids: cohorts.stability_instance_ids },
 	]);
-	if (specs.length !== M7_FULL_MATRIX_RUN_COUNT) throw new Error("M7 frozen cohort matrix must contain exactly 74 logical runs");
+	if (specs.length !== M7_FULL_MATRIX_RUN_COUNT)
+		throw new Error("M7 frozen cohort matrix must contain exactly 74 logical runs");
 	const sourceStore = await finalizeM7ContinuationSource(join(artifactsRoot, M7_CONTINUATION_SOURCE_DIRECTORY));
 	const continuationSpecs = selectM7ContinuationSpecs(specs, sourceStore.values);
 	const dependencies = createDefaultM7FormalRunDependencies(controllerUrl);
@@ -144,18 +149,21 @@ export async function runM7Batch(
 		continuationSpecs,
 		{
 			execute: (spec, attemptId, hooks) =>
-				runM7FormalRun({
-					artifactsRoot,
-					formalRunsRoot: join(batchRoot, "runs"),
-					experimentId: plan.experiment_id,
-					runId: spec.run_id,
-					attemptId,
-					instanceId: spec.instance_id,
-				configId: spec.config_id,
-				replicate: spec.replicate,
-				maxModelTurns: M7_MAX_MODEL_TURNS,
-					hooks,
-				}, dependencies),
+				runM7FormalRun(
+					{
+						artifactsRoot,
+						formalRunsRoot: join(batchRoot, "runs"),
+						experimentId: plan.experiment_id,
+						runId: spec.run_id,
+						attemptId,
+						instanceId: spec.instance_id,
+						configId: spec.config_id,
+						replicate: spec.replicate,
+						maxModelTurns: M7_MAX_MODEL_TURNS,
+						hooks,
+					},
+					dependencies,
+				),
 		},
 		{
 			budget_admission: {

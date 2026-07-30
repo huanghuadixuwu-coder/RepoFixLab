@@ -276,7 +276,14 @@ function verifyM3PreflightRequest(
 ): { readonly request: JsonObject; readonly targetTask: M3PreflightTask; readonly requestSha256: string } {
 	if (
 		!isRecord(value) ||
-		!hasExactKeys(value, ["dataset_revision", "operation_id", "private_volume", "request_type", "schema_version", "tasks"]) ||
+		!hasExactKeys(value, [
+			"dataset_revision",
+			"operation_id",
+			"private_volume",
+			"request_type",
+			"schema_version",
+			"tasks",
+		]) ||
 		value.schema_version !== "v1" ||
 		value.request_type !== "m3_official_image_preflight" ||
 		typeof value.operation_id !== "string" ||
@@ -288,7 +295,12 @@ function verifyM3PreflightRequest(
 		throw new Error("M3 preflight request is malformed or does not bind the DatasetLock");
 	}
 	const tasks = value.tasks.map(parseM3PreflightTask);
-	if (!isCanonicalInstanceIds(tasks.map((task) => task.instance_id), M6_ELIGIBLE_TASK_COUNT)) {
+	if (
+		!isCanonicalInstanceIds(
+			tasks.map((task) => task.instance_id),
+			M6_ELIGIBLE_TASK_COUNT,
+		)
+	) {
 		throw new Error("M3 preflight request does not contain the canonical 26-task M6 population");
 	}
 	for (const task of tasks) assertM3PreflightTaskMatchesFrozenInputs(task, datasetLock, officialImageSourceLock);
@@ -389,7 +401,8 @@ function parseM3PreflightProbe(
 	parseGradeCounts(value.official_grading.pass_to_pass, "PASS_TO_PASS", true);
 	if (probeKind === "base") {
 		const failToPass = value.official_grading.fail_to_pass as JsonObject;
-		if (failToPass.failed === 0) throw new Error("M3 base probe does not demonstrate an unresolved FAIL_TO_PASS test");
+		if (failToPass.failed === 0)
+			throw new Error("M3 base probe does not demonstrate an unresolved FAIL_TO_PASS test");
 	}
 	return {
 		harness_mode: mode,

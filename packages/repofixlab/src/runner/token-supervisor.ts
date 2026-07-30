@@ -1,3 +1,17 @@
+/**
+ * Reservation-based Provider token supervision for RepoFix sessions.
+ *
+ * This module:
+ * - Estimates prompt size before each Provider request.
+ * - Durably reserves worst-case input and output usage.
+ * - Settles reservations from exact terminal Provider usage.
+ * - Charges uncertain requests conservatively and blocks further admission.
+ *
+ * Ownership boundary:
+ * - Token policy, accounting state, and ledger evidence stay in the Node
+ *   Orchestrator; the Controller does not receive budget authority.
+ */
+
 import {
 	createAssistantMessageEventStream,
 	type Api,
@@ -35,9 +49,11 @@ export interface TokenLedgerSink {
 	append(event: TokenLedgerEvent): void;
 }
 
+/** Collect token-ledger events in memory for local or non-production consumers. */
 export class InMemoryTokenLedgerSink implements TokenLedgerSink {
 	readonly events: TokenLedgerEvent[] = [];
 
+	/** Record one token-accounting transition in insertion order. */
 	append(event: TokenLedgerEvent): void {
 		this.events.push(event);
 	}
@@ -51,15 +67,18 @@ export class InMemoryTokenLedgerSink implements TokenLedgerSink {
 export class FsyncTokenLedgerSink implements TokenLedgerSink {
 	private readonly descriptor: number;
 
+	/** Open the append-only ledger file with owner-only permissions. */
 	constructor(path: string) {
 		this.descriptor = openSync(path, "a", 0o600);
 	}
 
+	/** Append and fsync one reservation transition before returning. */
 	append(event: TokenLedgerEvent): void {
 		writeSync(this.descriptor, `${JSON.stringify(event)}\n`, undefined, "utf8");
 		fsyncSync(this.descriptor);
 	}
 
+	/** Close the durable ledger after all Provider requests have settled. */
 	close(): void {
 		closeSync(this.descriptor);
 	}
@@ -91,14 +110,20 @@ export interface TokenUsage {
 	readonly total_tokens: number;
 }
 
+/** Validate token quantities that must be positive safe integers. */
 function assertPositiveSafeInteger(value: number, name: string): void {
 	if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive safe integer`);
 }
 
+/** Validate token quantities that may be zero. */
 function assertNonNegativeSafeInteger(value: number, name: string): void {
 	if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative safe integer`);
 }
 
+/**
+ * Track open Provider reservations and exact accounted usage for one
+ * Orchestrator process, with independent per-run and project-wide caps.
+ */
 export class TokenReservationLedger {
 	private readonly reservations = new Map<string, TokenReservation>();
 	private readonly runAccountedTokens = new Map<string, number>();
@@ -107,6 +132,7 @@ export class TokenReservationLedger {
 	private readonly sink: TokenLedgerSink;
 	private readonly limits: TokenSupervisorLimits;
 
+	/** Bind the ledger to fixed caps and an append-only evidence sink. */
 	constructor(limits: TokenSupervisorLimits, sink: TokenLedgerSink) {
 		assertPositiveSafeInteger(limits.per_run_accounted_cap_tokens, "per_run_accounted_cap_tokens");
 		assertPositiveSafeInteger(limits.project_accounted_cap_tokens, "project_accounted_cap_tokens");
@@ -114,6 +140,11 @@ export class TokenReservationLedger {
 		this.sink = sink;
 	}
 
+	/**
+	 * Reserve estimated input plus maximum output before a Provider request.
+	 * Returns a rejection without calling the Provider when a cap is exhausted
+	 * or earlier uncertain usage requires reconciliation.
+	 */
 	reserve(input: {
 		readonly request_id: string;
 		readonly run_id: string;
@@ -171,6 +202,7 @@ export class TokenReservationLedger {
 		return { admitted: true, reservation };
 	}
 
+	/** Settle an open reservation against exact, internally consistent usage. */
 	settle(reservation: TokenReservation, usage: TokenUsage): void {
 		this.assertOpen(reservation);
 		try {
@@ -221,6 +253,10 @@ export class TokenReservationLedger {
 		});
 	}
 
+	/**
+	 * Charge the full reservation when exact Provider usage cannot be proven
+	 * and require reconciliation before another request is admitted.
+	 */
 	chargeUnverified(reservation: TokenReservation, reason: string): void {
 		this.assertOpen(reservation);
 		this.reservations.delete(reservation.request_id);
@@ -241,20 +277,24 @@ export class TokenReservationLedger {
 		});
 	}
 
+	/** Report whether uncertain accounting has blocked further admission. */
 	get requiresReconciliation(): boolean {
 		return this.reconciliationRequired;
 	}
 
+	/** Return project-wide tokens currently held or finally accounted. */
 	get projectAccounted(): number {
 		return this.projectAccountedTokens;
 	}
 
+	/** Prove that a caller is settling the exact reservation still held. */
 	private assertOpen(reservation: TokenReservation): void {
 		if (this.reservations.get(reservation.request_id) !== reservation) {
 			throw new Error(`Token reservation ${reservation.request_id} is not open`);
 		}
 	}
 
+	/** Close an invalid reservation conservatively and record protocol failure. */
 	private protocolInvalid(reservation: TokenReservation, reason: string): void {
 		this.reservations.delete(reservation.request_id);
 		this.reconciliationRequired = true;
@@ -274,6 +314,7 @@ export class TokenReservationLedger {
 		});
 	}
 
+	/** Record a request rejected before Provider admission. */
 	private reject(requestId: string, runId: string, reason: "budget_exhausted" | "reconciliation_required"): void {
 		this.sink.append({
 			schema_version: "v1",
@@ -323,6 +364,7 @@ export interface TokenAdmissionEstimator {
 	estimate(context: Context): number;
 }
 
+/** Create a deterministic prompt estimator with an explicit safety margin. */
 export function createTokenAdmissionEstimator(spec: TokenAdmissionEstimatorSpec): TokenAdmissionEstimator {
 	if (!Number.isFinite(spec.multiplier) || spec.multiplier < 1) {
 		throw new Error("Token estimator multiplier must be finite and at least 1");
@@ -331,9 +373,11 @@ export function createTokenAdmissionEstimator(spec: TokenAdmissionEstimatorSpec)
 	if (spec.version.length === 0) throw new Error("Token estimator version is required");
 	return {
 		spec: { ...spec },
+		/** Return the unsmoothed serialized-context estimate used in evidence. */
 		baseEstimate(context: Context): number {
 			return estimateContextTokens(context);
 		},
+		/** Apply the configured multiplier and framing margin for admission. */
 		estimate(context: Context): number {
 			const estimate = Math.ceil(this.baseEstimate(context) * spec.multiplier) + spec.framing_margin_tokens;
 			assertPositiveSafeInteger(estimate, "estimated_input_tokens");
@@ -342,6 +386,7 @@ export function createTokenAdmissionEstimator(spec: TokenAdmissionEstimatorSpec)
 	};
 }
 
+/** Construct a zero-usage assistant error for a local admission failure. */
 function errorMessage(model: Model<Api>, message: string): AssistantMessage {
 	return {
 		role: "assistant",
@@ -363,6 +408,7 @@ function errorMessage(model: Model<Api>, message: string): AssistantMessage {
 	};
 }
 
+/** Wrap a local admission failure in Pi's assistant event-stream protocol. */
 function errorStream(model: Model<Api>, message: string): AssistantMessageEventStream {
 	const error = errorMessage(model, message);
 	const stream = createAssistantMessageEventStream();
@@ -370,6 +416,7 @@ function errorStream(model: Model<Api>, message: string): AssistantMessageEventS
 	return stream;
 }
 
+/** Convert Pi assistant usage fields into the ledger's usage contract. */
 function usageFromMessage(message: AssistantMessage): TokenUsage {
 	return {
 		input_tokens: message.usage.input,
@@ -380,6 +427,10 @@ function usageFromMessage(message: AssistantMessage): TokenUsage {
 	};
 }
 
+/**
+ * Wrap a session stream so every Provider request is estimated, reserved
+ * before dispatch, and settled or conservatively charged on termination.
+ */
 export function installTokenSupervisor(session: TokenSupervisedSession, options: TokenSupervisorOptions): void {
 	assertPositiveSafeInteger(options.max_output_tokens, "max_output_tokens");
 	const original = session.agent.streamFn;
@@ -454,6 +505,7 @@ export function installTokenSupervisor(session: TokenSupervisedSession, options:
 	};
 }
 
+/** Estimate prompt tokens conservatively from serialized context bytes. */
 export function estimateContextTokens(context: Context): number {
 	const bytes = new TextEncoder().encode(JSON.stringify(context)).byteLength;
 	return Math.max(1, Math.ceil(bytes / 4));

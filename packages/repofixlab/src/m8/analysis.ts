@@ -4,10 +4,10 @@ import { dirname, join, resolve, sep } from "node:path";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import {
-	verifyEvaluationResult,
-	verifyRunResult,
 	type EvaluationResult,
 	type RunResult,
+	verifyEvaluationResult,
+	verifyRunResult,
 } from "../contracts/run-contracts.ts";
 
 const M8_METHOD_REVISION = "repofixlab-m8-v1.1" as const;
@@ -157,7 +157,13 @@ interface M8PairedComparison {
 }
 
 interface M8FailureRootCause {
-	readonly category: "agent_no_final_snapshot" | "candidate_patch_not_applied" | "evaluator_timeout" | "fail_to_pass_failure" | "pass_to_pass_regression" | "official_unresolved_other";
+	readonly category:
+		| "agent_no_final_snapshot"
+		| "candidate_patch_not_applied"
+		| "evaluator_timeout"
+		| "fail_to_pass_failure"
+		| "pass_to_pass_regression"
+		| "official_unresolved_other";
 	readonly count: number;
 	readonly sample_source_run_ids: readonly string[];
 }
@@ -231,12 +237,19 @@ function expectSha256(value: unknown, label: string): string {
 }
 
 function expectCount(value: unknown, label: string): number {
-	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a non-negative safe integer`);
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+		throw new Error(`${label} must be a non-negative safe integer`);
 	return value;
 }
 
 function expectConfigId(value: unknown, label: string): RepoFixConfigId {
-	if (value === "pi-general" || value === "repofix-full" || value === "repofix-no-localize" || value === "repofix-no-verify-feedback") return value;
+	if (
+		value === "pi-general" ||
+		value === "repofix-full" ||
+		value === "repofix-no-localize" ||
+		value === "repofix-no-verify-feedback"
+	)
+		return value;
 	throw new Error(`${label} is not a RepoFixLab configuration ID`);
 }
 
@@ -272,9 +285,12 @@ function parseM7ContinuationInput(value: unknown): M7ContinuationInput {
 		const continuationRunId = item.continuation_run_id;
 		const resultSha256 = item.result_sha256;
 		const resolved = item.resolved;
-		if (continuationRunId !== null && typeof continuationRunId !== "string") throw new Error(`M7 continuation observation ${index}.continuation_run_id is invalid`);
-		if (resultSha256 !== null && typeof resultSha256 !== "string") throw new Error(`M7 continuation observation ${index}.result_sha256 is invalid`);
-		if (resolved !== null && typeof resolved !== "boolean") throw new Error(`M7 continuation observation ${index}.resolved is invalid`);
+		if (continuationRunId !== null && typeof continuationRunId !== "string")
+			throw new Error(`M7 continuation observation ${index}.continuation_run_id is invalid`);
+		if (resultSha256 !== null && typeof resultSha256 !== "string")
+			throw new Error(`M7 continuation observation ${index}.result_sha256 is invalid`);
+		if (resolved !== null && typeof resolved !== "boolean")
+			throw new Error(`M7 continuation observation ${index}.resolved is invalid`);
 		return {
 			source_run_id: expectString(item.source_run_id, `M7 continuation observation ${index}.source_run_id`),
 			continuation_run_id: continuationRunId,
@@ -286,14 +302,23 @@ function parseM7ContinuationInput(value: unknown): M7ContinuationInput {
 			status: expectObservationStatus(item.status, `M7 continuation observation ${index}.status`),
 			terminal_reason: expectString(item.terminal_reason, `M7 continuation observation ${index}.terminal_reason`),
 			resolved,
-			result_sha256: resultSha256 === null ? null : expectSha256(resultSha256, `M7 continuation observation ${index}.result_sha256`),
+			result_sha256:
+				resultSha256 === null
+					? null
+					: expectSha256(resultSha256, `M7 continuation observation ${index}.result_sha256`),
 		};
 	});
 	return {
 		report_sha256: reportSha256,
 		status: "pass",
-		expected_original_run_count: expectCount(value.expected_original_run_count, "M7 continuation report.expected_original_run_count"),
-		terminal_observation_count: expectCount(value.terminal_observation_count, "M7 continuation report.terminal_observation_count"),
+		expected_original_run_count: expectCount(
+			value.expected_original_run_count,
+			"M7 continuation report.expected_original_run_count",
+		),
+		terminal_observation_count: expectCount(
+			value.terminal_observation_count,
+			"M7 continuation report.terminal_observation_count",
+		),
 		comparison_scope: "turn_limit_stratified_no_cross_stratum_pairing",
 		observations,
 	};
@@ -305,17 +330,30 @@ function parseM7SecurityInput(value: unknown): M7SecurityInput {
 	if (value.schema_version !== "v1" || value.report_type !== "m7_security_audit" || value.status !== "pass") {
 		throw new Error("M7 security audit is not a passing v1 security audit");
 	}
-	if (!isRecord(value.security) || !Array.isArray(value.runs)) throw new Error("M7 security audit evidence is malformed");
+	if (!isRecord(value.security) || !Array.isArray(value.runs))
+		throw new Error("M7 security audit evidence is malformed");
 	const evidenceMissingRunIds = value.security.evidence_missing_run_ids;
 	if (!Array.isArray(evidenceMissingRunIds) || !evidenceMissingRunIds.every((item) => typeof item === "string")) {
 		throw new Error("M7 security audit evidence_missing_run_ids is invalid");
 	}
 	const security = {
-		evidence_run_count: expectCount(value.security.evidence_run_count, "M7 security audit.security.evidence_run_count"),
+		evidence_run_count: expectCount(
+			value.security.evidence_run_count,
+			"M7 security audit.security.evidence_run_count",
+		),
 		evidence_missing_run_ids: evidenceMissingRunIds,
-		blocked_operation_count: expectCount(value.security.blocked_operation_count, "M7 security audit.security.blocked_operation_count"),
-		policy_violation_count: expectCount(value.security.policy_violation_count, "M7 security audit.security.policy_violation_count"),
-		sandbox_escape_attempt_count: expectCount(value.security.sandbox_escape_attempt_count, "M7 security audit.security.sandbox_escape_attempt_count"),
+		blocked_operation_count: expectCount(
+			value.security.blocked_operation_count,
+			"M7 security audit.security.blocked_operation_count",
+		),
+		policy_violation_count: expectCount(
+			value.security.policy_violation_count,
+			"M7 security audit.security.policy_violation_count",
+		),
+		sandbox_escape_attempt_count: expectCount(
+			value.security.sandbox_escape_attempt_count,
+			"M7 security audit.security.sandbox_escape_attempt_count",
+		),
 	};
 	const runs = value.runs.map((item, index): M7SecurityRunInput => {
 		if (!isRecord(item)) throw new Error(`M7 security audit run ${index} must be an object`);
@@ -324,17 +362,32 @@ function parseM7SecurityInput(value: unknown): M7SecurityInput {
 			execution_run_id: expectString(item.execution_run_id, `M7 security audit run ${index}.execution_run_id`),
 			max_model_turns: expectTurns(item.max_model_turns, `M7 security audit run ${index}.max_model_turns`),
 			status: expectObservationStatus(item.status, `M7 security audit run ${index}.status`),
-			blocked_operation_count: expectCount(item.blocked_operation_count, `M7 security audit run ${index}.blocked_operation_count`),
-			policy_violation_count: expectCount(item.policy_violation_count, `M7 security audit run ${index}.policy_violation_count`),
-			sandbox_escape_attempt_count: expectCount(item.sandbox_escape_attempt_count, `M7 security audit run ${index}.sandbox_escape_attempt_count`),
-			unblocked_sandbox_escape_attempt_count: expectCount(item.unblocked_sandbox_escape_attempt_count, `M7 security audit run ${index}.unblocked_sandbox_escape_attempt_count`),
+			blocked_operation_count: expectCount(
+				item.blocked_operation_count,
+				`M7 security audit run ${index}.blocked_operation_count`,
+			),
+			policy_violation_count: expectCount(
+				item.policy_violation_count,
+				`M7 security audit run ${index}.policy_violation_count`,
+			),
+			sandbox_escape_attempt_count: expectCount(
+				item.sandbox_escape_attempt_count,
+				`M7 security audit run ${index}.sandbox_escape_attempt_count`,
+			),
+			unblocked_sandbox_escape_attempt_count: expectCount(
+				item.unblocked_sandbox_escape_attempt_count,
+				`M7 security audit run ${index}.unblocked_sandbox_escape_attempt_count`,
+			),
 		};
 	});
 	return {
 		report_sha256: reportSha256,
 		status: "pass",
 		audited_run_count: expectCount(value.audited_run_count, "M7 security audit.audited_run_count"),
-		unblocked_sandbox_escape_attempt_count: expectCount(value.unblocked_sandbox_escape_attempt_count, "M7 security audit.unblocked_sandbox_escape_attempt_count"),
+		unblocked_sandbox_escape_attempt_count: expectCount(
+			value.unblocked_sandbox_escape_attempt_count,
+			"M7 security audit.unblocked_sandbox_escape_attempt_count",
+		),
 		security,
 		runs,
 	};
@@ -346,10 +399,12 @@ function repositoryFor(instanceId: string): string {
 }
 
 function safeArtifactPath(artifactsRoot: string, relativePath: string): string {
-	if (relativePath.length === 0 || relativePath.includes("\u0000")) throw new Error("M8 input artifact path is invalid");
+	if (relativePath.length === 0 || relativePath.includes("\u0000"))
+		throw new Error("M8 input artifact path is invalid");
 	const root = resolve(artifactsRoot);
 	const candidate = resolve(root, relativePath);
-	if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) throw new Error("M8 input artifact path escapes the artifacts root");
+	if (candidate !== root && !candidate.startsWith(`${root}${sep}`))
+		throw new Error("M8 input artifact path escapes the artifacts root");
 	return candidate;
 }
 
@@ -358,7 +413,8 @@ async function readJson(path: string): Promise<unknown> {
 }
 
 function usageFromResult(result: RunResult): M8Usage {
-	if (result.usage.provider_actual_tokens === null) throw new Error(`M8 run result usage is incomplete: ${result.run_id}`);
+	if (result.usage.provider_actual_tokens === null)
+		throw new Error(`M8 run result usage is incomplete: ${result.run_id}`);
 	return {
 		evidence_source: "run_result",
 		evidence_sha256: result.result_sha256,
@@ -379,7 +435,8 @@ async function loadFailedTokenLedger(artifactsRoot: string, runId: string): Prom
 	const ledgerPath = safeArtifactPath(artifactsRoot, `m4-dev/runs/${runId}/token-ledger.jsonl`);
 	const bytes = await readFile(ledgerPath);
 	const lines = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim().split("\n");
-	if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) throw new Error(`M8 failed token ledger is empty: ${runId}`);
+	if (lines.length === 0 || (lines.length === 1 && lines[0] === ""))
+		throw new Error(`M8 failed token ledger is empty: ${runId}`);
 	const reservations = new Map<string, number>();
 	let accountedTokens = 0;
 	let providerActualTokens = 0;
@@ -391,9 +448,13 @@ async function loadFailedTokenLedger(artifactsRoot: string, runId: string): Prom
 		}
 		const eventType = value.event_type;
 		const requestId = expectString(value.request_id, `M8 failed token ledger request_id ${runId}:${index}`);
-		const reservationTokens = nullableCount(value.reservation_tokens, `M8 failed token ledger reservation_tokens ${runId}:${index}`);
+		const reservationTokens = nullableCount(
+			value.reservation_tokens,
+			`M8 failed token ledger reservation_tokens ${runId}:${index}`,
+		);
 		if (eventType === "reservation_open") {
-			if (reservationTokens === null || reservations.has(requestId)) throw new Error(`M8 failed token ledger open reservation is invalid: ${runId}:${index}`);
+			if (reservationTokens === null || reservations.has(requestId))
+				throw new Error(`M8 failed token ledger open reservation is invalid: ${runId}:${index}`);
 			reservations.set(requestId, reservationTokens);
 			continue;
 		}
@@ -401,8 +462,14 @@ async function loadFailedTokenLedger(artifactsRoot: string, runId: string): Prom
 			throw new Error(`M8 failed token ledger contains unverified or rejected usage: ${runId}:${index}`);
 		}
 		const reserved = reservations.get(requestId);
-		const settledTokens = nullableCount(value.accounted_tokens, `M8 failed token ledger accounted_tokens ${runId}:${index}`);
-		const providerTotalTokens = nullableCount(value.provider_total_tokens, `M8 failed token ledger provider_total_tokens ${runId}:${index}`);
+		const settledTokens = nullableCount(
+			value.accounted_tokens,
+			`M8 failed token ledger accounted_tokens ${runId}:${index}`,
+		);
+		const providerTotalTokens = nullableCount(
+			value.provider_total_tokens,
+			`M8 failed token ledger provider_total_tokens ${runId}:${index}`,
+		);
 		if (
 			reserved === undefined ||
 			reservationTokens !== reserved ||
@@ -430,13 +497,20 @@ async function loadFailedTokenLedger(artifactsRoot: string, runId: string): Prom
 	};
 }
 
-async function loadObservations(artifactsRoot: string, continuation: M7ContinuationInput): Promise<readonly M8AnalysisObservation[]> {
+async function loadObservations(
+	artifactsRoot: string,
+	continuation: M7ContinuationInput,
+): Promise<readonly M8AnalysisObservation[]> {
 	const observations: M8AnalysisObservation[] = [];
 	for (const observation of continuation.observations) {
 		const executionRunId = observation.continuation_run_id ?? observation.source_run_id;
 		const runRoot = observation.max_model_turns === 64 ? "m7-v1.7.2" : "m7-v1.7.3";
 		if (observation.status === "continuation_failed") {
-			if (observation.resolved !== null || observation.result_sha256 !== null || observation.continuation_run_id === null) {
+			if (
+				observation.resolved !== null ||
+				observation.result_sha256 !== null ||
+				observation.continuation_run_id === null
+			) {
 				throw new Error(`M7 failed continuation observation is malformed: ${observation.source_run_id}`);
 			}
 			observations.push({
@@ -456,8 +530,14 @@ async function loadObservations(artifactsRoot: string, continuation: M7Continuat
 			});
 			continue;
 		}
-		const result = verifyRunResult(await readJson(safeArtifactPath(artifactsRoot, `${runRoot}/results/${executionRunId}.json`)));
-		const evaluation = verifyEvaluationResult(await readJson(safeArtifactPath(artifactsRoot, `${runRoot}/runs/${executionRunId}/evaluation-normalized.json`)));
+		const result = verifyRunResult(
+			await readJson(safeArtifactPath(artifactsRoot, `${runRoot}/results/${executionRunId}.json`)),
+		);
+		const evaluation = verifyEvaluationResult(
+			await readJson(
+				safeArtifactPath(artifactsRoot, `${runRoot}/runs/${executionRunId}/evaluation-normalized.json`),
+			),
+		);
 		if (
 			result.run_id !== executionRunId ||
 			result.result_sha256 !== observation.result_sha256 ||
@@ -505,7 +585,8 @@ function wilson95(successes: number, total: number): WilsonInterval | null {
 	const zSquared = Z_95 * Z_95;
 	const denominator = 1 + zSquared / total;
 	const center = (proportion + zSquared / (2 * total)) / denominator;
-	const margin = (Z_95 * Math.sqrt((proportion * (1 - proportion)) / total + zSquared / (4 * total * total))) / denominator;
+	const margin =
+		(Z_95 * Math.sqrt((proportion * (1 - proportion)) / total + zSquared / (4 * total * total))) / denominator;
 	return { confidence_level: 0.95, lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
 }
 
@@ -513,37 +594,47 @@ function configurationSummaries(observations: readonly M8AnalysisObservation[]):
 	const configIds = ["pi-general", "repofix-full", "repofix-no-localize", "repofix-no-verify-feedback"] as const;
 	return ([64, 128] as const).flatMap((maxModelTurns) =>
 		configIds.flatMap((configId) => {
-			const members = observations.filter((item) => item.max_model_turns === maxModelTurns && item.config_id === configId);
+			const members = observations.filter(
+				(item) => item.max_model_turns === maxModelTurns && item.config_id === configId,
+			);
 			if (members.length === 0) return [];
 			const results = members.flatMap((item) => (item.result === null ? [] : [item.result]));
 			const resolved = results.filter((result) => result.resolved).length;
 			const costComplete = members.every((item) => item.usage.cost_complete);
-			return [{
-				max_model_turns: maxModelTurns,
-				config_id: configId,
-				planned_count: members.length,
-				official_evaluation_count: results.length,
-				usage_evidence_count: members.length,
-				wall_time_evidence_count: results.length,
-				official_resolved_count: resolved,
-				official_unresolved_count: results.length - resolved,
-				agent_terminal_without_evaluation_count: members.length - results.length,
-				intention_to_treat_resolved_rate: resolved / members.length,
-				intention_to_treat_wilson_95: wilson95(resolved, members.length),
-				evaluated_resolved_rate: rate(resolved, results.length),
-				accounted_tokens: members.reduce((total, item) => total + item.usage.accounted_tokens, 0),
-				provider_actual_tokens: members.reduce((total, item) => total + item.usage.provider_actual_tokens, 0),
-				cost_complete: costComplete,
-				estimated_cost_cny_nano: costComplete
-					? results.reduce((total, result) => total + (result.usage.estimated_cost_cny_nano ?? 0), 0)
-					: null,
-				wall_time_ms: {
-					p50: percentile(results.map((result) => result.wall_time_ms), 0.5),
-					p90: percentile(results.map((result) => result.wall_time_ms), 0.9),
-					total: results.reduce((total, result) => total + result.wall_time_ms, 0),
+			return [
+				{
+					max_model_turns: maxModelTurns,
+					config_id: configId,
+					planned_count: members.length,
+					official_evaluation_count: results.length,
+					usage_evidence_count: members.length,
+					wall_time_evidence_count: results.length,
+					official_resolved_count: resolved,
+					official_unresolved_count: results.length - resolved,
+					agent_terminal_without_evaluation_count: members.length - results.length,
+					intention_to_treat_resolved_rate: resolved / members.length,
+					intention_to_treat_wilson_95: wilson95(resolved, members.length),
+					evaluated_resolved_rate: rate(resolved, results.length),
+					accounted_tokens: members.reduce((total, item) => total + item.usage.accounted_tokens, 0),
+					provider_actual_tokens: members.reduce((total, item) => total + item.usage.provider_actual_tokens, 0),
+					cost_complete: costComplete,
+					estimated_cost_cny_nano: costComplete
+						? results.reduce((total, result) => total + (result.usage.estimated_cost_cny_nano ?? 0), 0)
+						: null,
+					wall_time_ms: {
+						p50: percentile(
+							results.map((result) => result.wall_time_ms),
+							0.5,
+						),
+						p90: percentile(
+							results.map((result) => result.wall_time_ms),
+							0.9,
+						),
+						total: results.reduce((total, result) => total + result.wall_time_ms, 0),
+					},
+					model_turns: members.reduce((total, item) => total + item.usage.model_turns, 0),
 				},
-				model_turns: members.reduce((total, item) => total + item.usage.model_turns, 0),
-			}];
+			];
 		}),
 	);
 }
@@ -574,7 +665,9 @@ function exactMcNemarPValue(treatmentWins: number, baselineWins: number): number
 function bootstrapRepositoryInterval(pairs: readonly PairOutcome[]): M8PairedComparison["repository_bootstrap_95"] {
 	const repositories = [...new Set(pairs.map((pair) => pair.repository))].sort();
 	if (repositories.length === 0) return null;
-	const byRepository = new Map(repositories.map((repository) => [repository, pairs.filter((pair) => pair.repository === repository)]));
+	const byRepository = new Map(
+		repositories.map((repository) => [repository, pairs.filter((pair) => pair.repository === repository)]),
+	);
 	let state = BOOTSTRAP_SEED >>> 0;
 	const values: number[] = [];
 	for (let sample = 0; sample < BOOTSTRAP_SAMPLES; sample += 1) {
@@ -603,8 +696,16 @@ function bootstrapRepositoryInterval(pairs: readonly PairOutcome[]): M8PairedCom
 
 function pairedComparisons(observations: readonly M8AnalysisObservation[]): readonly M8PairedComparison[] {
 	return ([64, 128] as const).map((maxModelTurns) => {
-		const candidates = observations.filter((item) => item.max_model_turns === maxModelTurns && item.group_id === "main" && (item.config_id === "pi-general" || item.config_id === "repofix-full"));
-		const byKey = new Map<string, { piGeneral: M8AnalysisObservation | null; repofixFull: M8AnalysisObservation | null }>();
+		const candidates = observations.filter(
+			(item) =>
+				item.max_model_turns === maxModelTurns &&
+				item.group_id === "main" &&
+				(item.config_id === "pi-general" || item.config_id === "repofix-full"),
+		);
+		const byKey = new Map<
+			string,
+			{ piGeneral: M8AnalysisObservation | null; repofixFull: M8AnalysisObservation | null }
+		>();
 		for (const observation of candidates) {
 			const key = pairKey(observation);
 			const current = byKey.get(key) ?? { piGeneral: null, repofixFull: null };
@@ -612,7 +713,8 @@ function pairedComparisons(observations: readonly M8AnalysisObservation[]): read
 				if (current.piGeneral !== null) throw new Error(`M8 paired comparison has duplicate Pi baseline: ${key}`);
 				current.piGeneral = observation;
 			} else {
-				if (current.repofixFull !== null) throw new Error(`M8 paired comparison has duplicate RepoFix treatment: ${key}`);
+				if (current.repofixFull !== null)
+					throw new Error(`M8 paired comparison has duplicate RepoFix treatment: ${key}`);
 				current.repofixFull = observation;
 			}
 			byKey.set(key, current);
@@ -620,7 +722,12 @@ function pairedComparisons(observations: readonly M8AnalysisObservation[]): read
 		const pairs: PairOutcome[] = [];
 		let incompletePairCount = 0;
 		for (const value of byKey.values()) {
-			if (value.piGeneral?.result === null || value.repofixFull?.result === null || value.piGeneral === null || value.repofixFull === null) {
+			if (
+				value.piGeneral?.result === null ||
+				value.repofixFull?.result === null ||
+				value.piGeneral === null ||
+				value.repofixFull === null
+			) {
 				incompletePairCount += 1;
 				continue;
 			}
@@ -656,7 +763,9 @@ function pairedComparisons(observations: readonly M8AnalysisObservation[]): read
 					resolved_rate_difference:
 						remaining.length === 0
 							? null
-							: (remaining.filter((pair) => pair.repofixFullResolved).length - remaining.filter((pair) => pair.piGeneralResolved).length) / remaining.length,
+							: (remaining.filter((pair) => pair.repofixFullResolved).length -
+									remaining.filter((pair) => pair.piGeneralResolved).length) /
+								remaining.length,
 				};
 			}),
 		};
@@ -686,7 +795,9 @@ function stabilitySummary(observations: readonly M8AnalysisObservation[]): M8Ana
 	const configIds = ["pi-general", "repofix-full", "repofix-no-localize", "repofix-no-verify-feedback"] as const;
 	return ([64, 128] as const).flatMap((maxModelTurns) =>
 		configIds.flatMap((configId) => {
-			const members = observations.filter((item) => item.max_model_turns === maxModelTurns && item.config_id === configId);
+			const members = observations.filter(
+				(item) => item.max_model_turns === maxModelTurns && item.config_id === configId,
+			);
 			if (members.length === 0) return [];
 			const groups = new Map<string, M8AnalysisObservation[]>();
 			for (const member of members) {
@@ -696,13 +807,17 @@ function stabilitySummary(observations: readonly M8AnalysisObservation[]): M8Ana
 			}
 			const replicateGroups = [...groups.values()].filter((group) => group.length > 1);
 			const complete = replicateGroups.filter((group) => group.every((item) => item.result !== null));
-			return [{
-				max_model_turns: maxModelTurns,
-				config_id: configId,
-				replicate_group_count: replicateGroups.length,
-				complete_replicate_group_count: complete.length,
-				unstable_replicate_group_count: complete.filter((group) => new Set(group.map((item) => item.result?.resolved)).size > 1).length,
-			}];
+			return [
+				{
+					max_model_turns: maxModelTurns,
+					config_id: configId,
+					replicate_group_count: replicateGroups.length,
+					complete_replicate_group_count: complete.length,
+					unstable_replicate_group_count: complete.filter(
+						(group) => new Set(group.map((item) => item.result?.resolved)).size > 1,
+					).length,
+				},
+			];
 		}),
 	);
 }
@@ -729,11 +844,18 @@ function failureRootCauses(observations: readonly M8AnalysisObservation[]): read
 		grouped.set(category, current);
 	}
 	return [...grouped.entries()]
-		.map(([category, sourceRunIds]) => ({ category, count: sourceRunIds.length, sample_source_run_ids: sourceRunIds.sort().slice(0, 3) }))
+		.map(([category, sourceRunIds]) => ({
+			category,
+			count: sourceRunIds.length,
+			sample_source_run_ids: sourceRunIds.sort().slice(0, 3),
+		}))
 		.sort((left, right) => right.count - left.count || left.category.localeCompare(right.category));
 }
 
-function validateSecurityBinding(observations: readonly M8AnalysisObservation[], security: M7SecurityInput): M8SecuritySummary {
+function validateSecurityBinding(
+	observations: readonly M8AnalysisObservation[],
+	security: M7SecurityInput,
+): M8SecuritySummary {
 	if (
 		security.audited_run_count !== EXPECTED_OBSERVATION_COUNT ||
 		security.security.evidence_run_count !== EXPECTED_OBSERVATION_COUNT ||
@@ -744,7 +866,8 @@ function validateSecurityBinding(observations: readonly M8AnalysisObservation[],
 		throw new Error("M7 security audit did not satisfy the M8 safety admission gate");
 	}
 	const securityBySourceRunId = new Map(security.runs.map((run) => [run.source_run_id, run]));
-	if (securityBySourceRunId.size !== observations.length) throw new Error("M7 security audit has duplicate or missing source run identities");
+	if (securityBySourceRunId.size !== observations.length)
+		throw new Error("M7 security audit has duplicate or missing source run identities");
 	for (const observation of observations) {
 		const audit = securityBySourceRunId.get(observation.source_run_id);
 		if (
@@ -771,7 +894,10 @@ export function createM8Analysis(
 	continuationReportSha256: string,
 	security: M8SecuritySummary,
 ): M8AnalysisReport {
-	if (observations.length !== EXPECTED_OBSERVATION_COUNT || new Set(observations.map((item) => item.source_run_id)).size !== observations.length) {
+	if (
+		observations.length !== EXPECTED_OBSERVATION_COUNT ||
+		new Set(observations.map((item) => item.source_run_id)).size !== observations.length
+	) {
 		throw new Error("M8 analysis requires exactly 74 uniquely identified terminal observations");
 	}
 	const results = observations.flatMap((observation) => (observation.result === null ? [] : [observation.result]));
@@ -779,7 +905,10 @@ export function createM8Analysis(
 	const officialUnresolved = results.length - resolved;
 	const agentFailures = observations.length - results.length;
 	const accountedTokens = observations.reduce((total, observation) => total + observation.usage.accounted_tokens, 0);
-	const providerActualTokens = observations.reduce((total, observation) => total + observation.usage.provider_actual_tokens, 0);
+	const providerActualTokens = observations.reduce(
+		(total, observation) => total + observation.usage.provider_actual_tokens,
+		0,
+	);
 	const costComplete = observations.every((observation) => observation.usage.cost_complete);
 	const overallWilson = wilson95(resolved, observations.length);
 	if (overallWilson === null) throw new Error("M8 overall Wilson interval is unavailable");
@@ -837,10 +966,16 @@ function percent(value: number | null): string {
 
 function createM8Markdown(report: M8AnalysisReport): string {
 	const configurationRows = report.configurations
-		.map((item) => `| ${item.max_model_turns} | ${item.config_id} | ${item.official_resolved_count}/${item.planned_count} | ${percent(item.intention_to_treat_resolved_rate)} | ${item.official_evaluation_count}/${item.planned_count} | ${item.usage_evidence_count}/${item.planned_count} | ${item.accounted_tokens} | ${item.estimated_cost_cny_nano === null ? "unavailable" : item.estimated_cost_cny_nano} |`)
+		.map(
+			(item) =>
+				`| ${item.max_model_turns} | ${item.config_id} | ${item.official_resolved_count}/${item.planned_count} | ${percent(item.intention_to_treat_resolved_rate)} | ${item.official_evaluation_count}/${item.planned_count} | ${item.usage_evidence_count}/${item.planned_count} | ${item.accounted_tokens} | ${item.estimated_cost_cny_nano === null ? "unavailable" : item.estimated_cost_cny_nano} |`,
+		)
 		.join("\n");
 	const comparisonRows = report.paired_comparisons
-		.map((item) => `| ${item.max_model_turns} | ${item.matched_pair_count} | ${item.incomplete_pair_count} | ${percent(item.resolved_rate_difference)} | ${item.repofix_only_resolved_count} | ${item.pi_only_resolved_count} | ${item.mcnemar_exact_two_sided_p_value?.toFixed(6) ?? "n/a"} |`)
+		.map(
+			(item) =>
+				`| ${item.max_model_turns} | ${item.matched_pair_count} | ${item.incomplete_pair_count} | ${percent(item.resolved_rate_difference)} | ${item.repofix_only_resolved_count} | ${item.pi_only_resolved_count} | ${item.mcnemar_exact_two_sided_p_value?.toFixed(6) ?? "n/a"} |`,
+		)
 		.join("\n");
 	const failureRows = report.failure_root_causes
 		.map((item) => `| ${item.category} | ${item.count} | ${item.sample_source_run_ids.join(", ")} |`)
@@ -850,13 +985,22 @@ function createM8Markdown(report: M8AnalysisReport): string {
 
 function createM8Html(report: M8AnalysisReport): string {
 	const configurationRows = report.configurations
-		.map((item) => `<tr><td>${item.max_model_turns}</td><td>${escapeHtml(item.config_id)}</td><td>${item.official_resolved_count}/${item.planned_count}</td><td>${percent(item.intention_to_treat_resolved_rate)}</td><td>${item.official_evaluation_count}/${item.planned_count}</td><td>${item.usage_evidence_count}/${item.planned_count}</td><td>${item.accounted_tokens}</td></tr>`)
+		.map(
+			(item) =>
+				`<tr><td>${item.max_model_turns}</td><td>${escapeHtml(item.config_id)}</td><td>${item.official_resolved_count}/${item.planned_count}</td><td>${percent(item.intention_to_treat_resolved_rate)}</td><td>${item.official_evaluation_count}/${item.planned_count}</td><td>${item.usage_evidence_count}/${item.planned_count}</td><td>${item.accounted_tokens}</td></tr>`,
+		)
 		.join("");
 	const comparisonRows = report.paired_comparisons
-		.map((item) => `<tr><td>${item.max_model_turns}</td><td>${item.matched_pair_count}</td><td>${item.incomplete_pair_count}</td><td>${percent(item.resolved_rate_difference)}</td><td>${item.repofix_only_resolved_count}</td><td>${item.pi_only_resolved_count}</td><td>${item.mcnemar_exact_two_sided_p_value?.toFixed(6) ?? "n/a"}</td></tr>`)
+		.map(
+			(item) =>
+				`<tr><td>${item.max_model_turns}</td><td>${item.matched_pair_count}</td><td>${item.incomplete_pair_count}</td><td>${percent(item.resolved_rate_difference)}</td><td>${item.repofix_only_resolved_count}</td><td>${item.pi_only_resolved_count}</td><td>${item.mcnemar_exact_two_sided_p_value?.toFixed(6) ?? "n/a"}</td></tr>`,
+		)
 		.join("");
 	const failureRows = report.failure_root_causes
-		.map((item) => `<tr><td>${escapeHtml(item.category)}</td><td>${item.count}</td><td>${escapeHtml(item.sample_source_run_ids.join(", "))}</td></tr>`)
+		.map(
+			(item) =>
+				`<tr><td>${escapeHtml(item.category)}</td><td>${item.count}</td><td>${escapeHtml(item.sample_source_run_ids.join(", "))}</td></tr>`,
+		)
 		.join("");
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>RepoFixLab M8 analysis</title></head><body><main><h1>RepoFixLab M8 final analysis</h1><p>Frozen runs: ${report.population.planned_logical_run_count}; official resolved: ${report.population.official_resolved_count}/${report.population.planned_logical_run_count}; intention-to-treat rate: ${percent(report.population.intention_to_treat_resolved_rate)}; official evaluations: ${report.population.official_evaluation_count}; Provider actual Tokens: ${report.population.provider_actual_tokens}.</p><h2>Configuration results, stratified by turn limit</h2><table><thead><tr><th>Max turns</th><th>Configuration</th><th>Resolved / planned</th><th>ITT rate</th><th>Official evidence</th><th>Usage evidence</th><th>Accounted Tokens</th></tr></thead><tbody>${configurationRows}</tbody></table><h2>Main paired comparison: RepoFix-full minus Pi-general</h2><table><thead><tr><th>Max turns</th><th>Complete pairs</th><th>Incomplete pairs</th><th>Difference</th><th>RepoFix-only wins</th><th>Pi-only wins</th><th>McNemar exact p</th></tr></thead><tbody>${comparisonRows}</tbody></table><h2>Failure root causes</h2><table><thead><tr><th>Category</th><th>Count</th><th>Example source run IDs</th></tr></thead><tbody>${failureRows}</tbody></table><h2>Safety</h2><p>Blocked operations: ${report.safety.blocked_operation_count}; policy violations: ${report.safety.policy_violation_count}; sandbox escape attempts: ${report.safety.sandbox_escape_attempt_count}; unblocked attempts: ${report.safety.unblocked_sandbox_escape_attempt_count}.</p><h2>Conclusion boundaries</h2><ul>${report.conclusion_boundaries.map((boundary) => `<li>${escapeHtml(boundary)}</li>`).join("")}</ul><p>M8 SHA-256: <code>${report.report_sha256}</code></p></main></body></html>`;
 }
@@ -884,13 +1028,25 @@ async function writeImmutable(path: string, content: string): Promise<void> {
 export async function publishM8Analysis(
 	artifactsRoot: string,
 	sourcePaths: M8AnalysisSourcePaths,
-): Promise<{ readonly report: M8AnalysisReport; readonly json_path: string; readonly markdown_path: string; readonly html_path: string }> {
+): Promise<{
+	readonly report: M8AnalysisReport;
+	readonly json_path: string;
+	readonly markdown_path: string;
+	readonly html_path: string;
+}> {
 	const root = resolve(artifactsRoot);
-	const continuation = parseM7ContinuationInput(await readJson(safeArtifactPath(root, sourcePaths.continuation_report_path)));
-	if (continuation.expected_original_run_count !== EXPECTED_OBSERVATION_COUNT || continuation.terminal_observation_count !== EXPECTED_OBSERVATION_COUNT) {
+	const continuation = parseM7ContinuationInput(
+		await readJson(safeArtifactPath(root, sourcePaths.continuation_report_path)),
+	);
+	if (
+		continuation.expected_original_run_count !== EXPECTED_OBSERVATION_COUNT ||
+		continuation.terminal_observation_count !== EXPECTED_OBSERVATION_COUNT
+	) {
 		throw new Error("M7 continuation report does not cover the fixed 74-run M8 population");
 	}
-	const securityInput = parseM7SecurityInput(await readJson(safeArtifactPath(root, sourcePaths.security_audit_report_path)));
+	const securityInput = parseM7SecurityInput(
+		await readJson(safeArtifactPath(root, sourcePaths.security_audit_report_path)),
+	);
 	const observations = await loadObservations(root, continuation);
 	const security = validateSecurityBinding(observations, securityInput);
 	const report = createM8Analysis(observations, continuation.report_sha256, security);

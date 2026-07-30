@@ -169,9 +169,7 @@ export function parseM3SamplingMetadataJsonl(content: string, expectedDatasetRev
 	return records;
 }
 
-function eligibilitySemanticSubset(
-	manifest: M3EligibilityManifest,
-): Omit<M3EligibilityManifest, "eligibility_sha256"> {
+function eligibilitySemanticSubset(manifest: M3EligibilityManifest): Omit<M3EligibilityManifest, "eligibility_sha256"> {
 	const { eligibility_sha256: _eligibilitySha256, ...semantic } = manifest;
 	return semantic;
 }
@@ -250,7 +248,10 @@ export function createM3EligibilityManifest(input: M3EligibilityManifestInput): 
 	return verifyM3EligibilityManifest({ ...draft, eligibility_sha256: canonicalHash(draft) });
 }
 
-function allocationForTarget(groups: ReadonlyMap<string, readonly M3SamplingMetadata[]>, target: number): Map<string, number> {
+function allocationForTarget(
+	groups: ReadonlyMap<string, readonly M3SamplingMetadata[]>,
+	target: number,
+): Map<string, number> {
 	const total = [...groups.values()].reduce((sum, records) => sum + records.length, 0);
 	if (!Number.isSafeInteger(target) || target < 0 || target > total) {
 		throw new Error("Split target is outside the available task population");
@@ -308,10 +309,7 @@ function assertAssignment(value: unknown): asserts value is M3SplitAssignment {
 	}
 }
 
-export function verifyM3RepoStratifiedSplit(
-	value: unknown,
-	eligibilityValue?: unknown,
-): M3SplitManifest {
+export function verifyM3RepoStratifiedSplit(value: unknown, eligibilityValue?: unknown): M3SplitManifest {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		throw new Error("M3 split manifest must be an object");
 	}
@@ -431,11 +429,17 @@ export function createM3RepoStratifiedSplit(
 	const validationCounts = allocationForTarget(remainingGroups, M3_SPLIT_TARGETS.validation);
 
 	const assignments: M3SplitAssignment[] = [];
-	for (const [repo, group] of [...groups.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))) {
+	for (const [repo, group] of [...groups.entries()].sort(([left], [right]) =>
+		left < right ? -1 : left > right ? 1 : 0,
+	)) {
 		const ranked = [...group].sort((left, right) => {
 			const leftScore = score(left);
 			const rightScore = score(right);
-			return leftScore < rightScore ? -1 : leftScore > rightScore ? 1 : left.instance_id.localeCompare(right.instance_id);
+			return leftScore < rightScore
+				? -1
+				: leftScore > rightScore
+					? 1
+					: left.instance_id.localeCompare(right.instance_id);
 		});
 		const devCount = devCounts.get(repo) ?? 0;
 		const validationCount = validationCounts.get(repo) ?? 0;

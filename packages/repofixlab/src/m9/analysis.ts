@@ -3,15 +3,13 @@ import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import { parseExperimentPlan } from "../contracts/experiment-plan.ts";
-import { verifyRunResult, type RunResult } from "../contracts/run-contracts.ts";
+import { type RunResult, verifyRunResult } from "../contracts/run-contracts.ts";
 import { BatchStateStore } from "../runner/batch-state.ts";
-import {
-	createM9RunSpecs,
-	M9_ARTIFACT_DIRECTORY,
-} from "./batch-runner.ts";
+import { createM9RunSpecs, M9_ARTIFACT_DIRECTORY } from "./batch-runner.ts";
 
 const M9_ANALYSIS_REVISION = "repofixlab-m9-analysis-v1" as const;
-const M7_CONTINUATION_REPORT = "m7-v1.7.3/report/continuation-edf1bdde883e630d3fa184ba85cd1a74c9c9dff8a844db9a20d1ae37550eb542.json";
+const M7_CONTINUATION_REPORT =
+	"m7-v1.7.3/report/continuation-edf1bdde883e630d3fa184ba85cd1a74c9c9dff8a844db9a20d1ae37550eb542.json";
 
 type M7ConfigId = "pi-general" | "repofix-full";
 
@@ -101,14 +99,16 @@ function shaField(value: unknown, label: string): string {
 }
 
 function parseM7ContinuationReport(value: unknown): M7ContinuationReportInput {
-	if (!isRecord(value) || !Array.isArray(value.observations)) throw new Error("M9 source continuation report is malformed");
+	if (!isRecord(value) || !Array.isArray(value.observations))
+		throw new Error("M9 source continuation report is malformed");
 	const reportSha256 = shaField(value.report_sha256, "M9 source continuation report");
 	const { report_sha256: _ignored, ...unsigned } = value;
 	if (sha256(unsigned) !== reportSha256) throw new Error("M9 source continuation report hash is invalid");
 	const observations = value.observations.map((raw, index): M7Observation => {
 		if (!isRecord(raw)) throw new Error(`M9 source observation ${index} is malformed`);
 		const resolved = raw.resolved;
-		if (resolved !== true && resolved !== false && resolved !== null) throw new Error(`M9 source observation ${index} resolution is invalid`);
+		if (resolved !== true && resolved !== false && resolved !== null)
+			throw new Error(`M9 source observation ${index} resolution is invalid`);
 		if (
 			typeof raw.source_run_id !== "string" ||
 			(raw.continuation_run_id !== null && typeof raw.continuation_run_id !== "string") ||
@@ -117,7 +117,8 @@ function parseM7ContinuationReport(value: unknown): M7ContinuationReportInput {
 			typeof raw.config_id !== "string" ||
 			(raw.max_model_turns !== 64 && raw.max_model_turns !== 128) ||
 			(raw.result_sha256 !== null && !/^[a-f0-9]{64}$/.test(String(raw.result_sha256)))
-		) throw new Error(`M9 source observation ${index} binding is invalid`);
+		)
+			throw new Error(`M9 source observation ${index} binding is invalid`);
 		return {
 			source_run_id: raw.source_run_id,
 			continuation_run_id: typeof raw.continuation_run_id === "string" ? raw.continuation_run_id : null,
@@ -134,7 +135,8 @@ function parseM7ContinuationReport(value: unknown): M7ContinuationReportInput {
 
 async function readVerifiedResult(path: string, runId: string, expectedSha256: string): Promise<RunResult> {
 	const result = verifyRunResult(JSON.parse(await readFile(path, "utf8")) as unknown);
-	if (result.run_id !== runId || result.result_sha256 !== expectedSha256) throw new Error(`M9 result binding drifted: ${runId}`);
+	if (result.run_id !== runId || result.result_sha256 !== expectedSha256)
+		throw new Error(`M9 result binding drifted: ${runId}`);
 	return result;
 }
 
@@ -151,7 +153,10 @@ function exactMcNemar(piOnly: number, repofixOnly: number): number | null {
 	return Math.min(1, 2 * cumulative);
 }
 
-function summarize(pairs: readonly M9TaskPair[], property: "repofix_first_attempt" | "repofix_operational_final"): PairSummary {
+function summarize(
+	pairs: readonly M9TaskPair[],
+	property: "repofix_first_attempt" | "repofix_operational_final",
+): PairSummary {
 	let piResolved = 0;
 	let repofixResolved = 0;
 	let both = 0;
@@ -213,29 +218,52 @@ async function writeImmutable(path: string, content: string): Promise<void> {
 	}
 }
 
-export async function publishM9Analysis(artifactsRoot: string): Promise<{ readonly report: M9AnalysisReport; readonly json_path: string; readonly markdown_path: string; readonly html_path: string }> {
+export async function publishM9Analysis(
+	artifactsRoot: string,
+): Promise<{
+	readonly report: M9AnalysisReport;
+	readonly json_path: string;
+	readonly markdown_path: string;
+	readonly html_path: string;
+}> {
 	const root = resolve(artifactsRoot);
-	const plan = parseExperimentPlan(await readFile(new URL("../../configs/experiments/m9-v1.yaml", import.meta.url), "utf8"));
+	const plan = parseExperimentPlan(
+		await readFile(new URL("../../configs/experiments/m9-v1.yaml", import.meta.url), "utf8"),
+	);
 	if (plan.task_selection.status !== "frozen") throw new Error("M9 task selection must be frozen");
 	const specs = createM9RunSpecs(plan);
 	const [m7, m9Store] = await Promise.all([
-		readFile(join(root, M7_CONTINUATION_REPORT), "utf8").then((content) => parseM7ContinuationReport(JSON.parse(content) as unknown)),
+		readFile(join(root, M7_CONTINUATION_REPORT), "utf8").then((content) =>
+			parseM7ContinuationReport(JSON.parse(content) as unknown),
+		),
 		BatchStateStore.open(join(root, M9_ARTIFACT_DIRECTORY)),
 	]);
 	const expectedRunIds = new Set(specs.map((spec) => spec.run_id));
 	if (
 		m9Store.values.length !== 21 ||
-		m9Store.values.some((state) => !expectedRunIds.has(state.run_id) || state.status !== "completed" || state.result_sha256 === null)
+		m9Store.values.some(
+			(state) => !expectedRunIds.has(state.run_id) || state.status !== "completed" || state.result_sha256 === null,
+		)
 	) {
 		throw new Error("M9 analysis requires 21 completed new runs");
 	}
 	const m9ByKey = new Map<string, RunResult>();
 	for (const state of m9Store.values) {
-		const result = await readVerifiedResult(join(root, M9_ARTIFACT_DIRECTORY, "results", `${state.run_id}.json`), state.run_id, state.result_sha256!);
+		const result = await readVerifiedResult(
+			join(root, M9_ARTIFACT_DIRECTORY, "results", `${state.run_id}.json`),
+			state.run_id,
+			state.result_sha256!,
+		);
 		m9ByKey.set(`${state.group_id}\u0000${state.instance_id}\u0000${state.config_id}`, result);
 	}
-	const m7Main = m7.observations.filter((observation) => observation.group_id === "main" && (observation.config_id === "pi-general" || observation.config_id === "repofix-full"));
-	const m7ByKey = new Map(m7Main.map((observation) => [`${observation.instance_id}\u0000${observation.config_id}`, observation]));
+	const m7Main = m7.observations.filter(
+		(observation) =>
+			observation.group_id === "main" &&
+			(observation.config_id === "pi-general" || observation.config_id === "repofix-full"),
+	);
+	const m7ByKey = new Map(
+		m7Main.map((observation) => [`${observation.instance_id}\u0000${observation.config_id}`, observation]),
+	);
 	const pairs: M9TaskPair[] = [];
 	for (const instanceId of plan.task_selection.instance_ids) {
 		const buildFirst = async (configId: M7ConfigId): Promise<OutcomeEvidence> => {
@@ -243,24 +271,61 @@ export async function publishM9Analysis(artifactsRoot: string): Promise<{ readon
 			if (observation !== undefined && observation.result_sha256 !== null && observation.resolved !== null) {
 				const runId = observation.continuation_run_id ?? observation.source_run_id;
 				const resultRoot = observation.max_model_turns === 64 ? "m7-v1.7.2" : "m7-v1.7.3";
-				const result = await readVerifiedResult(join(root, resultRoot, "results", `${runId}.json`), runId, observation.result_sha256);
-				if (result.resolved !== observation.resolved) throw new Error(`M7 reused outcome drifted: ${instanceId}/${configId}`);
-				return { source: "m7_reused", run_id: runId, result_sha256: result.result_sha256, resolved: result.resolved, observed_max_model_turns: observation.max_model_turns };
+				const result = await readVerifiedResult(
+					join(root, resultRoot, "results", `${runId}.json`),
+					runId,
+					observation.result_sha256,
+				);
+				if (result.resolved !== observation.resolved)
+					throw new Error(`M7 reused outcome drifted: ${instanceId}/${configId}`);
+				return {
+					source: "m7_reused",
+					run_id: runId,
+					result_sha256: result.result_sha256,
+					resolved: result.resolved,
+					observed_max_model_turns: observation.max_model_turns,
+				};
 			}
-			if (observation !== undefined) return { source: "m7_no_final_snapshot", run_id: observation.continuation_run_id, result_sha256: null, resolved: false, observed_max_model_turns: observation.max_model_turns };
+			if (observation !== undefined)
+				return {
+					source: "m7_no_final_snapshot",
+					run_id: observation.continuation_run_id,
+					result_sha256: null,
+					resolved: false,
+					observed_max_model_turns: observation.max_model_turns,
+				};
 			const result = m9ByKey.get(`m9-new-main-pairs\u0000${instanceId}\u0000${configId}`);
 			if (result === undefined) throw new Error(`M9 new first attempt is missing: ${instanceId}/${configId}`);
-			return { source: "m9_new_first_attempt", run_id: result.run_id, result_sha256: result.result_sha256, resolved: result.resolved, observed_max_model_turns: 128 };
+			return {
+				source: "m9_new_first_attempt",
+				run_id: result.run_id,
+				result_sha256: result.result_sha256,
+				resolved: result.resolved,
+				observed_max_model_turns: 128,
+			};
 		};
 		const pi = await buildFirst("pi-general");
 		const repofixFirst = await buildFirst("repofix-full");
 		const recovery = m9ByKey.get(`m9-repofix-controlled-recovery\u0000${instanceId}\u0000repofix-full`);
-		const repofixOperational: OutcomeEvidence = recovery === undefined
-			? repofixFirst
-			: { source: "m9_controlled_recovery", run_id: recovery.run_id, result_sha256: recovery.result_sha256, resolved: recovery.resolved, observed_max_model_turns: 128 };
-		pairs.push({ instance_id: instanceId, pi, repofix_first_attempt: repofixFirst, repofix_operational_final: repofixOperational });
+		const repofixOperational: OutcomeEvidence =
+			recovery === undefined
+				? repofixFirst
+				: {
+						source: "m9_controlled_recovery",
+						run_id: recovery.run_id,
+						result_sha256: recovery.result_sha256,
+						resolved: recovery.resolved,
+						observed_max_model_turns: 128,
+					};
+		pairs.push({
+			instance_id: instanceId,
+			pi,
+			repofix_first_attempt: repofixFirst,
+			repofix_operational_final: repofixOperational,
+		});
 	}
-	if (pairs.length !== 26 || new Set(pairs.map((pair) => pair.instance_id)).size !== 26) throw new Error("M9 task-pair coverage is incomplete");
+	if (pairs.length !== 26 || new Set(pairs.map((pair) => pair.instance_id)).size !== 26)
+		throw new Error("M9 task-pair coverage is incomplete");
 	const firstAttempt = summarize(pairs, "repofix_first_attempt");
 	const operationalFinal = summarize(pairs, "repofix_operational_final");
 	const recoveryOutcomes = pairs.filter((pair) => pair.repofix_operational_final.source === "m9_controlled_recovery");
@@ -270,12 +335,32 @@ export async function publishM9Analysis(artifactsRoot: string): Promise<{ readon
 		report_type: "m9_26_task_analysis" as const,
 		status: "pass" as const,
 		method_revision: M9_ANALYSIS_REVISION,
-		source: { m7_continuation_report_sha256: m7.report_sha256, m9_batch_state_sha256: shaField(JSON.parse(await readFile(join(root, M9_ARTIFACT_DIRECTORY, "batch-state.json"), "utf8")).state_sha256, "M9 batch state"), m9_new_run_count: 21 as const },
+		source: {
+			m7_continuation_report_sha256: m7.report_sha256,
+			m9_batch_state_sha256: shaField(
+				JSON.parse(await readFile(join(root, M9_ARTIFACT_DIRECTORY, "batch-state.json"), "utf8")).state_sha256,
+				"M9 batch state",
+			),
+			m9_new_run_count: 21 as const,
+		},
 		task_pairs: pairs,
 		first_attempt: firstAttempt,
 		operational_final: operationalFinal,
-		controlled_recovery: { eligible_count: 3 as const, resolved_count: recoveryOutcomes.filter((pair) => pair.repofix_operational_final.resolved).length, unresolved_count: recoveryOutcomes.filter((pair) => !pair.repofix_operational_final.resolved).length },
-		resources: { m9_new_accounted_tokens: m9Results.reduce((total, result) => total + result.usage.accounted_tokens, 0), m9_new_provider_actual_tokens: m9Results.reduce((total, result) => total + (result.usage.provider_actual_tokens ?? 0), 0), m9_new_model_turns: m9Results.reduce((total, result) => total + result.usage.model_turns, 0), m9_new_cost_complete: false as const, m9_new_estimated_cost_cny_nano: null },
+		controlled_recovery: {
+			eligible_count: 3 as const,
+			resolved_count: recoveryOutcomes.filter((pair) => pair.repofix_operational_final.resolved).length,
+			unresolved_count: recoveryOutcomes.filter((pair) => !pair.repofix_operational_final.resolved).length,
+		},
+		resources: {
+			m9_new_accounted_tokens: m9Results.reduce((total, result) => total + result.usage.accounted_tokens, 0),
+			m9_new_provider_actual_tokens: m9Results.reduce(
+				(total, result) => total + (result.usage.provider_actual_tokens ?? 0),
+				0,
+			),
+			m9_new_model_turns: m9Results.reduce((total, result) => total + result.usage.model_turns, 0),
+			m9_new_cost_complete: false as const,
+			m9_new_estimated_cost_cny_nano: null,
+		},
 		conclusion_boundaries: [
 			"This is a 26-task task-level comparison under observed ceilings of at most 128 turns; reused 64-turn outcomes remain labelled as 64-turn evidence.",
 			"The operational metric includes at most one separately recorded controlled recovery only for a no-final-snapshot first attempt; it is not a first-attempt ability metric.",
@@ -287,6 +372,10 @@ export async function publishM9Analysis(artifactsRoot: string): Promise<{ readon
 	const jsonPath = join(reportRoot, `analysis-${report.report_sha256}.json`);
 	const markdownPath = join(reportRoot, `analysis-${report.report_sha256}.md`);
 	const htmlPath = join(reportRoot, `analysis-${report.report_sha256}.html`);
-	await Promise.all([writeImmutable(jsonPath, stableStringify(report)), writeImmutable(markdownPath, markdown(report)), writeImmutable(htmlPath, html(report))]);
+	await Promise.all([
+		writeImmutable(jsonPath, stableStringify(report)),
+		writeImmutable(markdownPath, markdown(report)),
+		writeImmutable(htmlPath, html(report)),
+	]);
 	return { report, json_path: jsonPath, markdown_path: markdownPath, html_path: htmlPath };
 }

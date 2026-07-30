@@ -1,9 +1,9 @@
 import { join } from "node:path";
 import type { ExperimentPlan } from "../contracts/experiment-plan.ts";
-import { createBatchRunSpecs, executeBatch, type BatchExecutionSummary } from "../runner/batch-runner.ts";
-import type { BatchRunSpec } from "../runner/batch-state.ts";
 import { loadM7FormalMetricEvidence } from "../m7/formal-metric-evidence.ts";
 import { createDefaultM7FormalRunDependencies, runM7FormalRun } from "../m7/formal-runner.ts";
+import { type BatchExecutionSummary, createBatchRunSpecs, executeBatch } from "../runner/batch-runner.ts";
+import type { BatchRunSpec } from "../runner/batch-state.ts";
 
 export const M9_PROTOCOL_REVISION = "repofixlab-m9-v1";
 export const M9_ARTIFACT_DIRECTORY = "m9-v1";
@@ -44,7 +44,8 @@ function assertM9Plan(plan: ExperimentPlan): void {
 		plan.budget.per_run_accounted_admission_cap_tokens !== M9_PER_RUN_ADMISSION_CAP_TOKENS ||
 		plan.budget.total_accounted_admission_cap_tokens !== M9_EXPECTED_RUN_COUNT * M9_PER_RUN_ADMISSION_CAP_TOKENS ||
 		plan.matrix.length !== 2
-	) throw new Error("M9 plan binding is invalid");
+	)
+		throw new Error("M9 plan binding is invalid");
 	const [newMainPairs, recovery] = plan.matrix;
 	if (
 		newMainPairs === undefined ||
@@ -57,7 +58,8 @@ function assertM9Plan(plan: ExperimentPlan): void {
 		recovery.task_count !== M9_REPOFIX_RECOVERY_INSTANCE_IDS.length ||
 		!sameOrderedValues(recovery.config_ids, ["repofix-full"]) ||
 		recovery.replicates !== 1
-	) throw new Error("M9 matrix binding is invalid");
+	)
+		throw new Error("M9 matrix binding is invalid");
 	const selected = new Set(plan.task_selection.instance_ids);
 	for (const instanceId of [...M9_NEW_MAIN_PAIR_INSTANCE_IDS, ...M9_REPOFIX_RECOVERY_INSTANCE_IDS]) {
 		if (!selected.has(instanceId)) throw new Error(`M9 selected task is not frozen: ${instanceId}`);
@@ -70,7 +72,8 @@ export function createM9RunSpecs(plan: ExperimentPlan): readonly BatchRunSpec[] 
 		{ group_id: "m9-new-main-pairs", instance_ids: M9_NEW_MAIN_PAIR_INSTANCE_IDS },
 		{ group_id: "m9-repofix-controlled-recovery", instance_ids: M9_REPOFIX_RECOVERY_INSTANCE_IDS },
 	]);
-	if (specs.length !== M9_EXPECTED_RUN_COUNT) throw new Error("M9 run matrix must contain exactly 21 new logical runs");
+	if (specs.length !== M9_EXPECTED_RUN_COUNT)
+		throw new Error("M9 run matrix must contain exactly 21 new logical runs");
 	return specs;
 }
 
@@ -92,18 +95,22 @@ export async function runM9Batch(
 		batchRoot,
 		specs,
 		{
-			execute: (spec, attemptId, hooks) => runM7FormalRun({
-				artifactsRoot,
-				formalRunsRoot: join(batchRoot, "runs"),
-				experimentId: plan.experiment_id,
-				runId: spec.run_id,
-				attemptId,
-				instanceId: spec.instance_id,
-				configId: spec.config_id,
-				replicate: spec.replicate,
-				maxModelTurns: M9_MAX_MODEL_TURNS,
-				hooks,
-			}, dependencies),
+			execute: (spec, attemptId, hooks) =>
+				runM7FormalRun(
+					{
+						artifactsRoot,
+						formalRunsRoot: join(batchRoot, "runs"),
+						experimentId: plan.experiment_id,
+						runId: spec.run_id,
+						attemptId,
+						instanceId: spec.instance_id,
+						configId: spec.config_id,
+						replicate: spec.replicate,
+						maxModelTurns: M9_MAX_MODEL_TURNS,
+						hooks,
+					},
+					dependencies,
+				),
 		},
 		{
 			budget_admission: {

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { verifyEvaluationResult, type RunResult } from "../contracts/run-contracts.ts";
+import { type RunResult, verifyEvaluationResult } from "../contracts/run-contracts.ts";
 import type { RunMetricEvidence } from "../metrics/experiment-metrics.ts";
 import type { BatchRunSpec } from "../runner/batch-state.ts";
 

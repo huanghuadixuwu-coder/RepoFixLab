@@ -67,7 +67,10 @@ function score(seed: string, record: M3SamplingMetadata): string {
 	return canonicalHash({ seed, repo: record.repo, instance_id: record.instance_id });
 }
 
-function allocationForTarget(groups: ReadonlyMap<string, readonly M3SamplingMetadata[]>, target: number): Map<string, number> {
+function allocationForTarget(
+	groups: ReadonlyMap<string, readonly M3SamplingMetadata[]>,
+	target: number,
+): Map<string, number> {
 	const orderedGroups = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
 	const total = orderedGroups.reduce((sum, [, records]) => sum + records.length, 0);
 	if (!Number.isSafeInteger(target) || target < 1 || target > total) {
@@ -136,12 +139,16 @@ function assertM3TestPopulation(
 	split: M3SplitManifest,
 	metadata: readonly M3SamplingMetadata[],
 ): readonly M3SamplingMetadata[] {
-	const testInstanceIds = split.assignments.filter((assignment) => assignment.split === "test").map((assignment) => assignment.instance_id);
-	if (!isCanonicalInstanceIds(testInstanceIds, 17)) throw new Error("M3 Test assignments are not a canonical 17-task set");
+	const testInstanceIds = split.assignments
+		.filter((assignment) => assignment.split === "test")
+		.map((assignment) => assignment.instance_id);
+	if (!isCanonicalInstanceIds(testInstanceIds, 17))
+		throw new Error("M3 Test assignments are not a canonical 17-task set");
 	const byInstanceId = new Map(metadata.map((record) => [record.instance_id, record]));
 	if (byInstanceId.size !== metadata.length) throw new Error("M6 sampling metadata contains duplicate instance IDs");
 	const testRecords = testInstanceIds.map((instanceId) => byInstanceId.get(instanceId));
-	if (testRecords.some((record) => record === undefined)) throw new Error("M6 sampling metadata is missing a frozen Test task");
+	if (testRecords.some((record) => record === undefined))
+		throw new Error("M6 sampling metadata is missing a frozen Test task");
 	return testRecords as M3SamplingMetadata[];
 }
 
@@ -158,9 +165,17 @@ export function createM6EvaluationCohorts(
 		sampling_metadata_sha256: split.sampling_metadata_sha256,
 		selection_policy: M6_COHORT_SELECTION_POLICY,
 		main_test_instance_ids: mainTestInstanceIds,
-		ablation_instance_ids: selectRepositoryStratified(testRecords, M6_ABLATION_TASK_COUNT, M6_ABLATION_SELECTION_SEED),
+		ablation_instance_ids: selectRepositoryStratified(
+			testRecords,
+			M6_ABLATION_TASK_COUNT,
+			M6_ABLATION_SELECTION_SEED,
+		),
 		ablation_selection_seed: M6_ABLATION_SELECTION_SEED,
-		stability_instance_ids: selectRepositoryStratified(testRecords, M6_STABILITY_TASK_COUNT, M6_STABILITY_SELECTION_SEED),
+		stability_instance_ids: selectRepositoryStratified(
+			testRecords,
+			M6_STABILITY_TASK_COUNT,
+			M6_STABILITY_SELECTION_SEED,
+		),
 		stability_selection_seed: M6_STABILITY_SELECTION_SEED,
 	};
 	return verifyM6EvaluationCohorts({ ...draft, cohort_sha256: canonicalHash(draft) });

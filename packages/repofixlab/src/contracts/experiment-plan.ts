@@ -39,10 +39,7 @@ const ExperimentGroupSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const NullableAdmissionCapSchema = Type.Union([
-	Type.Integer({ minimum: 1, maximum: 10_000_000 }),
-	Type.Null(),
-]);
+const NullableAdmissionCapSchema = Type.Union([Type.Integer({ minimum: 1, maximum: 10_000_000 }), Type.Null()]);
 
 export const ExperimentPlanSchema = Type.Object(
 	{
@@ -61,7 +58,11 @@ export const ExperimentPlanSchema = Type.Object(
 			},
 			{ additionalProperties: false },
 		),
-		runtime_status: Type.Union([Type.Literal("m1_single_run_available"), Type.Literal("m7_formal_available"), Type.Literal("lifecycle_unavailable")]),
+		runtime_status: Type.Union([
+			Type.Literal("m1_single_run_available"),
+			Type.Literal("m7_formal_available"),
+			Type.Literal("lifecycle_unavailable"),
+		]),
 	},
 	{
 		$id: "urn:repofixlab:schema:v1:experiment-plan",
@@ -183,6 +184,7 @@ export function createExperimentDryRunSummary(plan: ExperimentPlan): ExperimentD
 		total_accounted_admission_cap_tokens: plan.budget.total_accounted_admission_cap_tokens,
 		groups,
 		runtime_status: plan.runtime_status,
-		lifecycle_available: plan.runtime_status === "m1_single_run_available" || plan.runtime_status === "m7_formal_available",
+		lifecycle_available:
+			plan.runtime_status === "m1_single_run_available" || plan.runtime_status === "m7_formal_available",
 	};
 }

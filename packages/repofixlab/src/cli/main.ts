@@ -1,4 +1,19 @@
 #!/usr/bin/env node
+/**
+ * RepoFixLab CLI entry point for validated experiment execution.
+ *
+ * This module:
+ * - Dispatches commands and confines all artifact paths.
+ * - Parses frozen experiment plans and produces dry-run admission summaries.
+ * - Starts formal batches through Orchestrator-owned runners.
+ * - Publishes command reports atomically for machine and human consumers.
+ *
+ * Trust boundary:
+ * - The CLI and Node Orchestrator own experiment selection, state, and reports.
+ * - Docker, repository, snapshot, and evaluator operations remain behind the
+ *   trusted Controller protocol.
+ */
+
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { link, lstat, mkdir, open, readFile, realpath, statfs, unlink } from "node:fs/promises";
@@ -122,6 +137,7 @@ export function imageProvenanceLockPath(environment: NodeJS.ProcessEnv = process
 	return configured;
 }
 
+/** Read the installed package version reported by the version command. */
 function readPackageVersion(): string {
 	const value: unknown = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 	if (typeof value !== "object" || value === null || !("version" in value) || typeof value.version !== "string") {
@@ -206,16 +222,19 @@ export interface CliRuntime {
 	readonly writeOutput: (path: string, content: string, mode: ArtifactOutputMode) => Promise<void>;
 }
 
+/** Identify the only filesystem error treated as an absent path. */
 function isMissingPathError(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+/** Accept JSON and structured JSON media types from Controller responses. */
 function isJsonContentType(value: string | null): boolean {
 	if (value === null) return false;
 	const mediaType = value.split(";", 1)[0]?.trim().toLowerCase();
 	return mediaType === "application/json" || mediaType?.endsWith("+json") === true;
 }
 
+/** Validate a polling record against the exact image-resolution request. */
 function parseM3ImageResolutionStatusRecord(
 	value: unknown,
 	request: M3ImageResolutionControllerRequest,
@@ -256,6 +275,7 @@ function parseM3ImageResolutionStatusRecord(
 	};
 }
 
+/** Send one bounded task-role factory probe and preserve protocol headers. */
 async function requestFactoryProbe(
 	controllerUrl: string,
 	request: FactoryProbeControllerRequest,
@@ -290,6 +310,7 @@ async function requestFactoryProbe(
 	};
 }
 
+/** Send one bounded official-image resolution request and preserve protocol headers. */
 async function requestM3ImageResolution(
 	controllerUrl: string,
 	request: M3ImageResolutionControllerRequest,
@@ -324,6 +345,7 @@ async function requestM3ImageResolution(
 	};
 }
 
+/** Reject a resolved path that names the root itself or escapes beneath it. */
 function assertPathWithin(root: string, candidate: string): void {
 	const relativePath = relative(root, candidate);
 	if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
@@ -331,6 +353,7 @@ function assertPathWithin(root: string, candidate: string): void {
 	}
 }
 
+/** Resolve a new non-symlink output file beneath the artifact root. */
 export async function resolveArtifactOutputPath(artifactsRoot: string, requestedPath: string): Promise<string> {
 	const root = resolve(artifactsRoot);
 	const candidate = isAbsolute(requestedPath) ? resolve(requestedPath) : resolve(root, requestedPath);
@@ -362,6 +385,7 @@ export async function resolveArtifactOutputPath(artifactsRoot: string, requested
 	return candidate;
 }
 
+/** Resolve an existing regular input file without symlink traversal. */
 export async function resolveArtifactInputPath(artifactsRoot: string, requestedPath: string): Promise<string> {
 	const root = resolve(artifactsRoot);
 	const candidate = isAbsolute(requestedPath) ? resolve(requestedPath) : resolve(root, requestedPath);
@@ -407,6 +431,7 @@ export async function resolveArtifactInputDirectory(artifactsRoot: string, reque
 	return candidate;
 }
 
+/** Resolve a run config from artifacts or the versioned package config set. */
 export async function resolveRunConfigPath(artifactsRoot: string, requestedPath: string): Promise<string> {
 	const normalizedPath = requestedPath.replaceAll("\\", "/");
 	const repositoryConfigMatch =
@@ -437,6 +462,7 @@ export async function resolveRunConfigPath(artifactsRoot: string, requestedPath:
 	return candidate;
 }
 
+/** Publish a new artifact through an fsynced, exclusive temporary file. */
 export async function writeArtifactReportAtomically(
 	path: string,
 	content: string,
@@ -471,6 +497,7 @@ export async function writeArtifactReportAtomically(
 	}
 }
 
+/** Bind CLI I/O, Controller requests, and formal runners to process state. */
 function defaultRuntime(): CliRuntime {
 	const artifactsRoot = process.env.REPOFIX_ARTIFACTS_PATH ?? DEFAULT_ARTIFACTS_ROOT;
 	const controllerUrl = process.env.REPOFIX_CONTROLLER_URL ?? DEFAULT_CONTROLLER_URL;
@@ -516,6 +543,13 @@ function defaultRuntime(): CliRuntime {
 	};
 }
 
+/**
+ * Parse and execute one CLI command without terminating the process.
+ *
+ * The formal run branch selects the available frozen lifecycle, delegates
+ * experiment execution to its runner, and returns a nonzero status when the
+ * requested operation or any batch run fails.
+ */
 export async function runCli(args: readonly string[], runtime: CliRuntime = defaultRuntime()): Promise<number> {
 	const parsed = parseCliArgs(args);
 	if (!parsed.ok) {
@@ -770,6 +804,7 @@ export async function runCli(args: readonly string[], runtime: CliRuntime = defa
 		const contentByRequestedPath = new Map(
 			requestedTopLevelPaths.map((path, index) => [path, topLevelContents[index]!] as const),
 		);
+		/** Return only evidence loaded from already confined manifest paths. */
 		const contentFor = (path: string): string => {
 			const content = contentByRequestedPath.get(path);
 			if (content === undefined) {

@@ -3,27 +3,27 @@ import { open, readFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stableStringify } from "../contracts/canonical-json.ts";
-import { ArtifactStore } from "../storage/artifact-store.ts";
+import { GlobalBudgetLedger, type GlobalBudgetState } from "../runner/global-budget-ledger.ts";
 import {
 	createDefaultM4DevWorkflowDependencies,
+	type M4DevWorkflowSummary,
 	M4PreProviderInputError,
 	runM4DevWorkflow,
-	type M4DevWorkflowSummary,
 } from "../runner/m4-dev-workflow.ts";
-import { GlobalBudgetLedger, type GlobalBudgetState } from "../runner/global-budget-ledger.ts";
 import { createDeepSeekV4FlashRuntime } from "../runner/runtime-factory.ts";
 import { DirectoryTaskEnvironmentLockSource, FilePublicTaskSource } from "../runner/task-source.ts";
-import type { RepoToolOutputBudgetSnapshot } from "../sandbox/repo-tools.ts";
 import type { TokenAdmissionEstimatorSpec } from "../runner/token-supervisor.ts";
+import type { RepoToolOutputBudgetSnapshot } from "../sandbox/repo-tools.ts";
+import { ArtifactStore } from "../storage/artifact-store.ts";
 import {
 	M6_CALIBRATION_PER_RUN_CAP_TOKENS,
 	M6_CALIBRATION_PROJECT_CAP_TOKENS,
 	M6_CALIBRATION_PROTOCOL_REVISION,
 	M6_CALIBRATION_RUN_COUNT,
 	M6_PROVIDER_SMOKE_CAP_TOKENS,
-	verifyM6DevCalibrationBatch,
 	type M6CalibrationRun,
 	type M6DevCalibrationBatch,
+	verifyM6DevCalibrationBatch,
 } from "./calibration-cohort.ts";
 import { runM6ProviderSmoke } from "./provider-smoke.ts";
 
@@ -115,7 +115,11 @@ export interface M6DevCalibrationReport {
 	readonly finished_at: string;
 	readonly status: "pass" | "fail";
 	readonly cost_admission: "enforced";
-	readonly budget_caps: { readonly per_logical_run_tokens: number; readonly project_tokens: number; readonly provider_smoke_tokens: number };
+	readonly budget_caps: {
+		readonly per_logical_run_tokens: number;
+		readonly project_tokens: number;
+		readonly provider_smoke_tokens: number;
+	};
 	readonly provider_smoke: M6ProviderSmokeReceipt | null;
 	readonly provisional_estimator: typeof M6_DEV_CALIBRATION_PROVISIONAL_ESTIMATOR;
 	readonly calibrated_estimator: M6CalibratedTokenEstimator | null;
@@ -160,7 +164,10 @@ export interface M6DevCalibrationDependencies {
 		readonly accounted_admission_cap_tokens: number;
 		readonly token_admission_estimator: TokenAdmissionEstimatorSpec;
 	}) => Promise<M4DevWorkflowSummary>;
-	readonly runProviderSmoke: (input: { readonly artifacts_root: string; readonly project_cap_tokens: number }) => Promise<M6ProviderSmokeResult>;
+	readonly runProviderSmoke: (input: {
+		readonly artifacts_root: string;
+		readonly project_cap_tokens: number;
+	}) => Promise<M6ProviderSmokeResult>;
 	readonly readFile: (path: string) => Promise<Uint8Array>;
 	readonly now: () => Date;
 	readonly randomId: () => string;
@@ -188,7 +195,9 @@ interface JournalState {
 
 function canonicalHash(value: unknown): string {
 	const normalized: unknown = JSON.parse(stableStringify(value));
-	return createHash("sha256").update(`${JSON.stringify(normalized)}\n`).digest("hex");
+	return createHash("sha256")
+		.update(`${JSON.stringify(normalized)}\n`)
+		.digest("hex");
 }
 
 function canonicalJsonLine(value: unknown): string {
@@ -200,13 +209,15 @@ function bytesSha256(value: Uint8Array): string {
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${label} must be an object`);
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new Error(`${label} must be an object`);
 	return value as Record<string, unknown>;
 }
 
 function nullableSafeInteger(value: unknown, label: string): number | null {
 	if (value === null) return null;
-	if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${label} must be a non-negative safe integer or null`);
+	if (!Number.isSafeInteger(value) || (value as number) < 0)
+		throw new Error(`${label} must be a non-negative safe integer or null`);
 	return value as number;
 }
 
@@ -228,11 +239,13 @@ export function parseM6TokenLedger(content: Uint8Array): readonly ParsedM6TokenL
 			eventType !== "reservation_charged_unverified" &&
 			eventType !== "budget_protocol_invalid" &&
 			eventType !== "admission_rejected"
-		) throw new Error(`Token ledger line ${String(index + 1)} has an unknown event type`);
+		)
+			throw new Error(`Token ledger line ${String(index + 1)} has an unknown event type`);
 		if (typeof record.request_id !== "string" || record.request_id.length === 0) {
 			throw new Error(`Token ledger line ${String(index + 1)} has an invalid request ID`);
 		}
-		if (record.reason !== null && typeof record.reason !== "string") throw new Error(`Token ledger line ${String(index + 1)} has an invalid reason`);
+		if (record.reason !== null && typeof record.reason !== "string")
+			throw new Error(`Token ledger line ${String(index + 1)} has an invalid reason`);
 		return {
 			event_type: eventType,
 			request_id: record.request_id,
@@ -241,7 +254,10 @@ export function parseM6TokenLedger(content: Uint8Array): readonly ParsedM6TokenL
 			base_input_tokens: nullableSafeInteger(record.base_input_tokens, "base_input_tokens"),
 			estimated_input_tokens: nullableSafeInteger(record.estimated_input_tokens, "estimated_input_tokens"),
 			provider_prompt_tokens: nullableSafeInteger(record.provider_prompt_tokens, "provider_prompt_tokens"),
-			provider_completion_tokens: nullableSafeInteger(record.provider_completion_tokens, "provider_completion_tokens"),
+			provider_completion_tokens: nullableSafeInteger(
+				record.provider_completion_tokens,
+				"provider_completion_tokens",
+			),
 			provider_total_tokens: nullableSafeInteger(record.provider_total_tokens, "provider_total_tokens"),
 			reason: record.reason,
 		};
@@ -263,7 +279,17 @@ export function inspectM6TokenLedger(events: readonly ParsedM6TokenLedgerEvent[]
 	let requiresReconciliation = false;
 	for (const event of events) {
 		if (event.event_type === "reservation_open") {
-			if (opened.has(event.request_id) || event.reservation_tokens === null || event.reservation_tokens < 1 || event.base_input_tokens === null || event.base_input_tokens < 1 || event.estimated_input_tokens === null || event.estimated_input_tokens < 1 || event.accounted_tokens !== null) failures.push("reservation_open_invalid");
+			if (
+				opened.has(event.request_id) ||
+				event.reservation_tokens === null ||
+				event.reservation_tokens < 1 ||
+				event.base_input_tokens === null ||
+				event.base_input_tokens < 1 ||
+				event.estimated_input_tokens === null ||
+				event.estimated_input_tokens < 1 ||
+				event.accounted_tokens !== null
+			)
+				failures.push("reservation_open_invalid");
 			else opened.set(event.request_id, event);
 			continue;
 		}
@@ -289,17 +315,41 @@ export function inspectM6TokenLedger(events: readonly ParsedM6TokenLedgerEvent[]
 			continue;
 		}
 		if (event.event_type === "reservation_settled") {
-			if (event.accounted_tokens === null || event.base_input_tokens !== openingBaseInputTokens || event.estimated_input_tokens !== openingEstimatedInputTokens || event.reservation_tokens !== openingReservationTokens || event.provider_prompt_tokens === null || event.provider_completion_tokens === null || event.provider_total_tokens === null || event.provider_total_tokens !== event.provider_prompt_tokens + event.provider_completion_tokens || event.accounted_tokens !== event.provider_total_tokens || event.provider_prompt_tokens > openingEstimatedInputTokens || event.provider_total_tokens > openingReservationTokens) failures.push("reservation_settlement_invalid");
+			if (
+				event.accounted_tokens === null ||
+				event.base_input_tokens !== openingBaseInputTokens ||
+				event.estimated_input_tokens !== openingEstimatedInputTokens ||
+				event.reservation_tokens !== openingReservationTokens ||
+				event.provider_prompt_tokens === null ||
+				event.provider_completion_tokens === null ||
+				event.provider_total_tokens === null ||
+				event.provider_total_tokens !== event.provider_prompt_tokens + event.provider_completion_tokens ||
+				event.accounted_tokens !== event.provider_total_tokens ||
+				event.provider_prompt_tokens > openingEstimatedInputTokens ||
+				event.provider_total_tokens > openingReservationTokens
+			)
+				failures.push("reservation_settlement_invalid");
 			else {
 				accountedTokens += event.accounted_tokens;
-				observations.push({ request_id: event.request_id, base_input_tokens: openingBaseInputTokens, reserved_input_tokens: openingEstimatedInputTokens, reservation_tokens: openingReservationTokens, provider_prompt_tokens: event.provider_prompt_tokens, provider_completion_tokens: event.provider_completion_tokens, provider_total_tokens: event.provider_total_tokens });
+				observations.push({
+					request_id: event.request_id,
+					base_input_tokens: openingBaseInputTokens,
+					reserved_input_tokens: openingEstimatedInputTokens,
+					reservation_tokens: openingReservationTokens,
+					provider_prompt_tokens: event.provider_prompt_tokens,
+					provider_completion_tokens: event.provider_completion_tokens,
+					provider_total_tokens: event.provider_total_tokens,
+				});
 			}
 			continue;
 		}
-		if (event.accounted_tokens === null || event.accounted_tokens !== openingReservationTokens) failures.push("unverified_charge_invalid");
+		if (event.accounted_tokens === null || event.accounted_tokens !== openingReservationTokens)
+			failures.push("unverified_charge_invalid");
 		else accountedTokens += event.accounted_tokens;
 		requiresReconciliation = true;
-		failures.push(event.event_type === "budget_protocol_invalid" ? "budget_protocol_invalid" : "provider_usage_unverified");
+		failures.push(
+			event.event_type === "budget_protocol_invalid" ? "budget_protocol_invalid" : "provider_usage_unverified",
+		);
 	}
 	for (const requestId of opened.keys()) {
 		if (!terminal.has(requestId)) {
@@ -307,7 +357,13 @@ export function inspectM6TokenLedger(events: readonly ParsedM6TokenLedgerEvent[]
 			failures.push("open_reservation");
 		}
 	}
-	return { accounted_tokens: accountedTokens, observations, budget_protocol_valid: failures.length === 0, requires_reconciliation: requiresReconciliation, failure_reasons: [...new Set(failures)].sort() };
+	return {
+		accounted_tokens: accountedTokens,
+		observations,
+		budget_protocol_valid: failures.length === 0,
+		requires_reconciliation: requiresReconciliation,
+		failure_reasons: [...new Set(failures)].sort(),
+	};
 }
 
 export function createM6CalibratedTokenEstimator(
@@ -316,10 +372,19 @@ export function createM6CalibratedTokenEstimator(
 	if (observations.length === 0) return null;
 	const maximumRatio = Math.max(...observations.map((item) => item.provider_prompt_tokens / item.base_input_tokens));
 	const multiplier = Math.max(1, Math.ceil((maximumRatio + FINAL_ESTIMATOR_MULTIPLIER_SAFETY) * 1_000) / 1_000);
-	const estimator: M6CalibratedTokenEstimator = { version: "m6-deepseek-v4-flash-calibrated-v1", multiplier, framing_margin_tokens: FINAL_ESTIMATOR_MARGIN_TOKENS, maximum_request_actual_tokens: M6_MAXIMUM_REQUEST_ACTUAL_TOKENS };
+	const estimator: M6CalibratedTokenEstimator = {
+		version: "m6-deepseek-v4-flash-calibrated-v1",
+		multiplier,
+		framing_margin_tokens: FINAL_ESTIMATOR_MARGIN_TOKENS,
+		maximum_request_actual_tokens: M6_MAXIMUM_REQUEST_ACTUAL_TOKENS,
+	};
 	for (const observation of observations) {
-		const estimated = Math.ceil(observation.base_input_tokens * estimator.multiplier) + estimator.framing_margin_tokens;
-		if (estimated < observation.provider_prompt_tokens || observation.provider_total_tokens > estimator.maximum_request_actual_tokens) {
+		const estimated =
+			Math.ceil(observation.base_input_tokens * estimator.multiplier) + estimator.framing_margin_tokens;
+		if (
+			estimated < observation.provider_prompt_tokens ||
+			observation.provider_total_tokens > estimator.maximum_request_actual_tokens
+		) {
 			throw new Error("M6 calibrated token estimator does not cover sealed calibration evidence");
 		}
 	}
@@ -331,7 +396,20 @@ function receiptPath(logicalRun: M6CalibrationRun): string {
 }
 
 function emptyReceipt(logicalRun: M6CalibrationRun, reason: string): M6CalibrationRunReceipt {
-	return { logical_run: logicalRun, m4_run_id: null, m4_artifact_relative_path: null, terminal_status: "failed", accounted_tokens: 0, token_ledger_sha256: null, request_count: 0, observations: [], budget_protocol_valid: false, requires_reconciliation: reason === "interrupted_unreconciled", failure_reasons: [reason], repofix_context_budget: null };
+	return {
+		logical_run: logicalRun,
+		m4_run_id: null,
+		m4_artifact_relative_path: null,
+		terminal_status: "failed",
+		accounted_tokens: 0,
+		token_ledger_sha256: null,
+		request_count: 0,
+		observations: [],
+		budget_protocol_valid: false,
+		requires_reconciliation: reason === "interrupted_unreconciled",
+		failure_reasons: [reason],
+		repofix_context_budget: null,
+	};
 }
 
 function semanticReportSubset(value: M6DevCalibrationReport): Omit<M6DevCalibrationReport, "report_sha256"> {
@@ -342,11 +420,7 @@ function semanticReportSubset(value: M6DevCalibrationReport): Omit<M6DevCalibrat
 function calibrationEvidenceSubset(
 	value: M6DevCalibrationReport,
 ): Omit<M6DevCalibrationReport, "calibration_evidence_sha256" | "report_sha256"> {
-	const {
-		calibration_evidence_sha256: _calibrationEvidenceSha256,
-		report_sha256: _reportSha256,
-		...semantic
-	} = value;
+	const { calibration_evidence_sha256: _calibrationEvidenceSha256, report_sha256: _reportSha256, ...semantic } = value;
 	return semantic;
 }
 
@@ -358,7 +432,7 @@ export function verifyM6DevCalibrationReport(value: unknown): M6DevCalibrationRe
 		typed.schema_version !== "v2" ||
 		typed.report_type !== "m6_dev_calibration" ||
 		typed.protocol_revision !== M6_CALIBRATION_PROTOCOL_REVISION ||
-		typed.status !== "pass" && typed.status !== "fail" ||
+		(typed.status !== "pass" && typed.status !== "fail") ||
 		typed.cost_admission !== "enforced" ||
 		typeof typed.calibration_batch_sha256 !== "string" ||
 		!/^[a-f0-9]{64}$/.test(typed.calibration_batch_sha256) ||
@@ -385,7 +459,14 @@ function unsignedJournalEvent(value: Omit<JournalEvent, "event_sha256">): Journa
 
 function verifyJournalEvent(value: unknown, batch: M6DevCalibrationBatch): JournalEvent {
 	const event = asRecord(value, "M6 journal event") as Partial<JournalEvent>;
-	if (event.schema_version !== "v2" || typeof event.event_type !== "string" || typeof event.run_id !== "string" || event.calibration_batch_sha256 !== batch.calibration_batch_sha256 || typeof event.event_sha256 !== "string") throw new Error("M6 journal event is malformed");
+	if (
+		event.schema_version !== "v2" ||
+		typeof event.event_type !== "string" ||
+		typeof event.run_id !== "string" ||
+		event.calibration_batch_sha256 !== batch.calibration_batch_sha256 ||
+		typeof event.event_sha256 !== "string"
+	)
+		throw new Error("M6 journal event is malformed");
 	const { event_sha256: actual, ...unsigned } = event as JournalEvent;
 	if (actual !== canonicalHash(unsigned)) throw new Error("M6 journal event hash is invalid");
 	return event as JournalEvent;
@@ -407,9 +488,13 @@ async function readJournal(store: ArtifactStore, batch: M6DevCalibrationBatch): 
 		throw error;
 	});
 	if (raw === null || raw.trim().length === 0) return null;
-	const events = raw.trim().split("\n").map((line) => verifyJournalEvent(JSON.parse(line), batch));
+	const events = raw
+		.trim()
+		.split("\n")
+		.map((line) => verifyJournalEvent(JSON.parse(line), batch));
 	const initial = events[0];
-	if (initial?.event_type !== "initialized" || initial.logical_run_id !== null || initial.smoke !== null) throw new Error("M6 journal lacks a valid initialization event");
+	if (initial?.event_type !== "initialized" || initial.logical_run_id !== null || initial.smoke !== null)
+		throw new Error("M6 journal lacks a valid initialization event");
 	let smokeStarted = false;
 	let smoke: M6ProviderSmokeReceipt | null = null;
 	const started = new Set<string>();
@@ -433,7 +518,13 @@ async function readJournal(store: ArtifactStore, batch: M6DevCalibrationBatch): 
 			continue;
 		}
 		if (event.event_type === "run_terminal") {
-			if (!started.has(event.logical_run_id) || terminal.has(event.logical_run_id) || event.receipt_path === null || event.receipt_sha256 === null) throw new Error("M6 logical run terminal event is invalid");
+			if (
+				!started.has(event.logical_run_id) ||
+				terminal.has(event.logical_run_id) ||
+				event.receipt_path === null ||
+				event.receipt_sha256 === null
+			)
+				throw new Error("M6 logical run terminal event is invalid");
 			terminal.set(event.logical_run_id, { receipt_path: event.receipt_path, receipt_sha256: event.receipt_sha256 });
 			continue;
 		}
@@ -443,20 +534,37 @@ async function readJournal(store: ArtifactStore, batch: M6DevCalibrationBatch): 
 }
 
 function smokeReceipt(report: M6ProviderSmokeResult): M6ProviderSmokeReceipt {
-	return { run_id: report.run_id, status: report.status, accounted_tokens: report.accounted_tokens, token_ledger_sha256: report.token_ledger_sha256 };
+	return {
+		run_id: report.run_id,
+		status: report.status,
+		accounted_tokens: report.accounted_tokens,
+		token_ledger_sha256: report.token_ledger_sha256,
+	};
 }
 
-async function readReceipt(store: ArtifactStore, path: string, expectedSha256: string): Promise<M6CalibrationRunReceipt> {
+async function readReceipt(
+	store: ArtifactStore,
+	path: string,
+	expectedSha256: string,
+): Promise<M6CalibrationRunReceipt> {
 	const content = await readFile(store.resolvePath(path));
 	if (bytesSha256(content) !== expectedSha256) throw new Error("M6 receipt SHA-256 drifted during resume");
 	const receipt = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(content)) as M6CalibrationRunReceipt;
-	if (typeof receipt !== "object" || receipt === null || !Array.isArray(receipt.failure_reasons)) throw new Error("M6 receipt is malformed during resume");
+	if (typeof receipt !== "object" || receipt === null || !Array.isArray(receipt.failure_reasons))
+		throw new Error("M6 receipt is malformed during resume");
 	return receipt;
 }
 
-async function writeReceipt(store: ArtifactStore, receipt: M6CalibrationRunReceipt): Promise<{ readonly path: string; readonly sha256: string }> {
+async function writeReceipt(
+	store: ArtifactStore,
+	receipt: M6CalibrationRunReceipt,
+): Promise<{ readonly path: string; readonly sha256: string }> {
 	const path = receiptPath(receipt.logical_run);
-	const artifact = await store.writeNew(path, stableStringify(receipt), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
+	const artifact = await store.writeNew(path, stableStringify(receipt), {
+		mediaType: "application/json",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
 	return { path, sha256: artifact.sha256 };
 }
 
@@ -468,7 +576,8 @@ export function createM6M4Receipt(
 	root: string,
 ): M6CalibrationRunReceipt {
 	const m4RelativeDirectory = relative(root, resolve(m4.run_directory));
-	if (m4RelativeDirectory.length === 0 || m4RelativeDirectory.startsWith("..") || m4RelativeDirectory.includes("\\")) throw new Error("M6 calibration M4 artifact escaped its run directory");
+	if (m4RelativeDirectory.length === 0 || m4RelativeDirectory.startsWith("..") || m4RelativeDirectory.includes("\\"))
+		throw new Error("M6 calibration M4 artifact escaped its run directory");
 	return {
 		logical_run: logicalRun,
 		m4_run_id: m4.run_id,
@@ -480,13 +589,20 @@ export function createM6M4Receipt(
 		observations: ledger.observations,
 		budget_protocol_valid: ledger.budget_protocol_valid,
 		requires_reconciliation: ledger.requires_reconciliation,
-		failure_reasons: [...(m4.terminal_status === "completed" ? [] : ["m4_terminal_failure"]), ...ledger.failure_reasons].sort(),
+		failure_reasons: [
+			...(m4.terminal_status === "completed" ? [] : ["m4_terminal_failure"]),
+			...ledger.failure_reasons,
+		].sort(),
 		repofix_context_budget: m4.repofix_context_budget ?? null,
 	};
 }
 
 export async function runM6DevCalibration(
-	options: { readonly artifacts_root: string; readonly calibration_batch: M6DevCalibrationBatch; readonly resume_directory?: string },
+	options: {
+		readonly artifacts_root: string;
+		readonly calibration_batch: M6DevCalibrationBatch;
+		readonly resume_directory?: string;
+	},
 	dependencies: M6DevCalibrationDependencies,
 ): Promise<M6DevCalibrationSummary> {
 	const batch = verifyM6DevCalibrationBatch(options.calibration_batch);
@@ -498,10 +614,28 @@ export async function runM6DevCalibration(
 	if (options.resume_directory === undefined) {
 		runId = `m6-calibration-run-${dependencies.randomId()}`;
 		runDirectory = resolve(options.artifacts_root, "m6-deepseek-flash-calibration", "runs", runId);
-		store = await ArtifactStore.createNew(resolve(options.artifacts_root, "m6-deepseek-flash-calibration", "runs", `.staging-${runId}`));
+		store = await ArtifactStore.createNew(
+			resolve(options.artifacts_root, "m6-deepseek-flash-calibration", "runs", `.staging-${runId}`),
+		);
 		startedAt = dependencies.now().toISOString();
-		await store.writeNew("calibration-batch.json", stableStringify(batch), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
-		await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "initialized", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: null, receipt_path: null, receipt_sha256: null, smoke: null }));
+		await store.writeNew("calibration-batch.json", stableStringify(batch), {
+			mediaType: "application/json",
+			sensitivity: "internal",
+			generatedBy: "orchestrator",
+		});
+		await appendJournal(
+			store,
+			unsignedJournalEvent({
+				schema_version: "v2",
+				event_type: "initialized",
+				run_id: runId,
+				calibration_batch_sha256: batch.calibration_batch_sha256,
+				logical_run_id: null,
+				receipt_path: null,
+				receipt_sha256: null,
+				smoke: null,
+			}),
+		);
 		state = await readJournal(store, batch);
 	} else {
 		store = await ArtifactStore.openExisting(options.resume_directory);
@@ -518,10 +652,14 @@ export async function runM6DevCalibration(
 		startedAt = dependencies.now().toISOString();
 	}
 	if (state === null) throw new Error("M6 journal initialization failed");
-	const budget = await GlobalBudgetLedger.open(store.resolvePath("global-budget.json"), M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS);
+	const budget = await GlobalBudgetLedger.open(
+		store.resolvePath("global-budget.json"),
+		M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS,
+	);
 	let smoke = state.smoke;
 	const receipts = new Map<string, M6CalibrationRunReceipt>();
-	for (const [logicalRunId, terminal] of state.terminal) receipts.set(logicalRunId, await readReceipt(store, terminal.receipt_path, terminal.receipt_sha256));
+	for (const [logicalRunId, terminal] of state.terminal)
+		receipts.set(logicalRunId, await readReceipt(store, terminal.receipt_path, terminal.receipt_sha256));
 	const batchFailureReasons = new Set<string>();
 	let failed = [...receipts.values()].some(
 		(receipt) =>
@@ -536,7 +674,19 @@ export async function runM6DevCalibration(
 			if (state.started.has(logicalRun.run_id) && !state.terminal.has(logicalRun.run_id)) {
 				const receipt = emptyReceipt(logicalRun, "interrupted_unreconciled");
 				const saved = await writeReceipt(store, receipt);
-				await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "run_terminal", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: logicalRun.run_id, receipt_path: saved.path, receipt_sha256: saved.sha256, smoke: null }));
+				await appendJournal(
+					store,
+					unsignedJournalEvent({
+						schema_version: "v2",
+						event_type: "run_terminal",
+						run_id: runId,
+						calibration_batch_sha256: batch.calibration_batch_sha256,
+						logical_run_id: logicalRun.run_id,
+						receipt_path: saved.path,
+						receipt_sha256: saved.sha256,
+						smoke: null,
+					}),
+				);
 				receipts.set(logicalRun.run_id, receipt);
 				failed = true;
 				stopBatch = true;
@@ -550,16 +700,47 @@ export async function runM6DevCalibration(
 		batchFailureReasons.add("provider_smoke_interrupted_unreconciled");
 	}
 	if (smoke === null && !stopBatch) {
-		await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "smoke_started", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: null, receipt_path: null, receipt_sha256: null, smoke: null }));
-		const report = await dependencies.runProviderSmoke({ artifacts_root: store.rootPath, project_cap_tokens: M6_PROVIDER_SMOKE_CAP_TOKENS });
+		await appendJournal(
+			store,
+			unsignedJournalEvent({
+				schema_version: "v2",
+				event_type: "smoke_started",
+				run_id: runId,
+				calibration_batch_sha256: batch.calibration_batch_sha256,
+				logical_run_id: null,
+				receipt_path: null,
+				receipt_sha256: null,
+				smoke: null,
+			}),
+		);
+		const report = await dependencies.runProviderSmoke({
+			artifacts_root: store.rootPath,
+			project_cap_tokens: M6_PROVIDER_SMOKE_CAP_TOKENS,
+		});
 		smoke = smokeReceipt(report);
-		await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "smoke_completed", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: null, receipt_path: null, receipt_sha256: null, smoke }));
+		await appendJournal(
+			store,
+			unsignedJournalEvent({
+				schema_version: "v2",
+				event_type: "smoke_completed",
+				run_id: runId,
+				calibration_batch_sha256: batch.calibration_batch_sha256,
+				logical_run_id: null,
+				receipt_path: null,
+				receipt_sha256: null,
+				smoke,
+			}),
+		);
 	}
 	if (smoke === null) {
 		failed = true;
 		stopBatch = true;
 		batchFailureReasons.add("provider_smoke_missing");
-	} else if (smoke.status !== "pass" || smoke.accounted_tokens < 1 || smoke.accounted_tokens > M6_PROVIDER_SMOKE_CAP_TOKENS) {
+	} else if (
+		smoke.status !== "pass" ||
+		smoke.accounted_tokens < 1 ||
+		smoke.accounted_tokens > M6_PROVIDER_SMOKE_CAP_TOKENS
+	) {
 		failed = true;
 		stopBatch = true;
 		batchFailureReasons.add(
@@ -570,29 +751,81 @@ export async function runM6DevCalibration(
 					: "provider_smoke_budget_exceeded",
 		);
 	}
-	if (smoke !== null && !budget.snapshot.reconciliation_required && budget.snapshot.accounted_tokens === 0 && smoke.accounted_tokens > 0) {
+	if (
+		smoke !== null &&
+		!budget.snapshot.reconciliation_required &&
+		budget.snapshot.accounted_tokens === 0 &&
+		smoke.accounted_tokens > 0
+	) {
 		await budget.recordObserved(smoke.accounted_tokens);
 	}
 	for (const logicalRun of batch.logical_runs) {
 		if (receipts.has(logicalRun.run_id)) continue;
 		if (stopBatch) break;
-		const remaining = M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS - budget.snapshot.accounted_tokens - budget.snapshot.reserved_tokens;
+		const remaining =
+			M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS -
+			budget.snapshot.accounted_tokens -
+			budget.snapshot.reserved_tokens;
 		const effectiveCap = Math.min(M6_DEV_CALIBRATION_PER_RUN_ADMISSION_CAP_TOKENS, remaining);
 		if (effectiveCap < 16_385 || budget.snapshot.reconciliation_required) {
-			const receipt = emptyReceipt(logicalRun, budget.snapshot.reconciliation_required ? "reconciliation_required" : "budget_exhausted");
+			const receipt = emptyReceipt(
+				logicalRun,
+				budget.snapshot.reconciliation_required ? "reconciliation_required" : "budget_exhausted",
+			);
 			const saved = await writeReceipt(store, receipt);
-			await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "run_started", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: logicalRun.run_id, receipt_path: null, receipt_sha256: null, smoke: null }));
-			await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "run_terminal", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: logicalRun.run_id, receipt_path: saved.path, receipt_sha256: saved.sha256, smoke: null }));
+			await appendJournal(
+				store,
+				unsignedJournalEvent({
+					schema_version: "v2",
+					event_type: "run_started",
+					run_id: runId,
+					calibration_batch_sha256: batch.calibration_batch_sha256,
+					logical_run_id: logicalRun.run_id,
+					receipt_path: null,
+					receipt_sha256: null,
+					smoke: null,
+				}),
+			);
+			await appendJournal(
+				store,
+				unsignedJournalEvent({
+					schema_version: "v2",
+					event_type: "run_terminal",
+					run_id: runId,
+					calibration_batch_sha256: batch.calibration_batch_sha256,
+					logical_run_id: logicalRun.run_id,
+					receipt_path: saved.path,
+					receipt_sha256: saved.sha256,
+					smoke: null,
+				}),
+			);
 			receipts.set(logicalRun.run_id, receipt);
 			failed = true;
 			stopBatch = true;
 			batchFailureReasons.add(receipt.failure_reasons[0]!);
 			break;
 		}
-		await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "run_started", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: logicalRun.run_id, receipt_path: null, receipt_sha256: null, smoke: null }));
+		await appendJournal(
+			store,
+			unsignedJournalEvent({
+				schema_version: "v2",
+				event_type: "run_started",
+				run_id: runId,
+				calibration_batch_sha256: batch.calibration_batch_sha256,
+				logical_run_id: logicalRun.run_id,
+				receipt_path: null,
+				receipt_sha256: null,
+				smoke: null,
+			}),
+		);
 		let receipt: M6CalibrationRunReceipt;
 		try {
-			const m4 = await dependencies.runM4({ artifacts_root: store.rootPath, logical_run: logicalRun, accounted_admission_cap_tokens: effectiveCap, token_admission_estimator: M6_DEV_CALIBRATION_PROVISIONAL_ESTIMATOR });
+			const m4 = await dependencies.runM4({
+				artifacts_root: store.rootPath,
+				logical_run: logicalRun,
+				accounted_admission_cap_tokens: effectiveCap,
+				token_admission_estimator: M6_DEV_CALIBRATION_PROVISIONAL_ESTIMATOR,
+			});
 			const ledgerBytes = await dependencies.readFile(resolve(m4.run_directory, "token-ledger.jsonl"));
 			const ledger = inspectM6TokenLedger(parseM6TokenLedger(ledgerBytes));
 			if (ledger.requires_reconciliation) await budget.markReconciliationRequired();
@@ -607,10 +840,33 @@ export async function runM6DevCalibration(
 			}
 		}
 		const saved = await writeReceipt(store, receipt);
-		await appendJournal(store, unsignedJournalEvent({ schema_version: "v2", event_type: "run_terminal", run_id: runId, calibration_batch_sha256: batch.calibration_batch_sha256, logical_run_id: logicalRun.run_id, receipt_path: saved.path, receipt_sha256: saved.sha256, smoke: null }));
+		await appendJournal(
+			store,
+			unsignedJournalEvent({
+				schema_version: "v2",
+				event_type: "run_terminal",
+				run_id: runId,
+				calibration_batch_sha256: batch.calibration_batch_sha256,
+				logical_run_id: logicalRun.run_id,
+				receipt_path: saved.path,
+				receipt_sha256: saved.sha256,
+				smoke: null,
+			}),
+		);
 		receipts.set(logicalRun.run_id, receipt);
-		if (receipt.terminal_status !== "completed" || !receipt.budget_protocol_valid || receipt.requires_reconciliation || receipt.observations.length === 0) failed = true;
-		if (receipt.terminal_status !== "completed" || !receipt.budget_protocol_valid || receipt.requires_reconciliation || receipt.observations.length === 0) {
+		if (
+			receipt.terminal_status !== "completed" ||
+			!receipt.budget_protocol_valid ||
+			receipt.requires_reconciliation ||
+			receipt.observations.length === 0
+		)
+			failed = true;
+		if (
+			receipt.terminal_status !== "completed" ||
+			!receipt.budget_protocol_valid ||
+			receipt.requires_reconciliation ||
+			receipt.observations.length === 0
+		) {
 			stopBatch = true;
 			for (const reason of receipt.failure_reasons) batchFailureReasons.add(reason);
 		}
@@ -620,8 +876,16 @@ export async function runM6DevCalibration(
 		return receipt === undefined ? [] : [receipt];
 	});
 	const observations = orderedReceipts.flatMap((receipt) => receipt.observations);
-	const completedRuns = orderedReceipts.filter((receipt) => receipt.terminal_status === "completed" && receipt.budget_protocol_valid && !receipt.requires_reconciliation && receipt.observations.length > 0).length;
-	const budgetExhaustedRuns = orderedReceipts.filter((receipt) => receipt.failure_reasons.includes("budget_exhausted")).length;
+	const completedRuns = orderedReceipts.filter(
+		(receipt) =>
+			receipt.terminal_status === "completed" &&
+			receipt.budget_protocol_valid &&
+			!receipt.requires_reconciliation &&
+			receipt.observations.length > 0,
+	).length;
+	const budgetExhaustedRuns = orderedReceipts.filter((receipt) =>
+		receipt.failure_reasons.includes("budget_exhausted"),
+	).length;
 	const contextBudgets = orderedReceipts.flatMap((receipt) =>
 		receipt.repofix_context_budget === null ? [] : [receipt.repofix_context_budget],
 	);
@@ -638,9 +902,18 @@ export async function runM6DevCalibration(
 		run_id: runId,
 		started_at: startedAt,
 		finished_at: dependencies.now().toISOString(),
-		status: (!failed && completedRuns === M6_CALIBRATION_RUN_COUNT && calibrated !== null && budget.snapshot.accounted_tokens <= M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS ? "pass" : "fail") as "pass" | "fail",
+		status: (!failed &&
+		completedRuns === M6_CALIBRATION_RUN_COUNT &&
+		calibrated !== null &&
+		budget.snapshot.accounted_tokens <= M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS
+			? "pass"
+			: "fail") as "pass" | "fail",
 		cost_admission: "enforced" as const,
-		budget_caps: { per_logical_run_tokens: M6_DEV_CALIBRATION_PER_RUN_ADMISSION_CAP_TOKENS, project_tokens: M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS, provider_smoke_tokens: M6_PROVIDER_SMOKE_CAP_TOKENS },
+		budget_caps: {
+			per_logical_run_tokens: M6_DEV_CALIBRATION_PER_RUN_ADMISSION_CAP_TOKENS,
+			project_tokens: M6_DEV_CALIBRATION_PROJECT_ADMISSION_CAP_TOKENS,
+			provider_smoke_tokens: M6_PROVIDER_SMOKE_CAP_TOKENS,
+		},
 		provider_smoke: smoke,
 		provisional_estimator: M6_DEV_CALIBRATION_PROVISIONAL_ESTIMATOR,
 		calibrated_estimator: calibrated,
@@ -653,25 +926,63 @@ export async function runM6DevCalibration(
 			budget_exhausted_runs: budgetExhaustedRuns,
 			request_count: observations.length,
 			accounted_tokens: budget.snapshot.accounted_tokens,
-			maximum_base_input_tokens: observations.length === 0 ? null : Math.max(...observations.map((item) => item.base_input_tokens)),
-			maximum_provider_prompt_tokens: observations.length === 0 ? null : Math.max(...observations.map((item) => item.provider_prompt_tokens)),
-			maximum_provider_total_tokens: observations.length === 0 ? null : Math.max(...observations.map((item) => item.provider_total_tokens)),
-			maximum_prompt_residual_tokens: observations.length === 0 ? null : Math.max(...observations.map((item) => item.provider_prompt_tokens - item.base_input_tokens)),
+			maximum_base_input_tokens:
+				observations.length === 0 ? null : Math.max(...observations.map((item) => item.base_input_tokens)),
+			maximum_provider_prompt_tokens:
+				observations.length === 0 ? null : Math.max(...observations.map((item) => item.provider_prompt_tokens)),
+			maximum_provider_total_tokens:
+				observations.length === 0 ? null : Math.max(...observations.map((item) => item.provider_total_tokens)),
+			maximum_prompt_residual_tokens:
+				observations.length === 0
+					? null
+					: Math.max(...observations.map((item) => item.provider_prompt_tokens - item.base_input_tokens)),
 			context_truncation: {
 				repofix_run_count: contextBudgets.length,
 				truncated_calls: contextBudgets.reduce((total, item) => total + item.truncated_calls, 0),
-				maximum_visible_chars: contextBudgets.length === 0 ? 0 : Math.max(...contextBudgets.map((item) => item.visible_chars)),
+				maximum_visible_chars:
+					contextBudgets.length === 0 ? 0 : Math.max(...contextBudgets.map((item) => item.visible_chars)),
 			},
 			global_budget: budget.snapshot,
 		},
 	};
-	const report: M6DevCalibrationReport = { ...unsignedReport, calibration_evidence_sha256: canonicalHash(unsignedReport), report_sha256: "" };
-	const sealedReport: M6DevCalibrationReport = { ...report, report_sha256: canonicalHash(semanticReportSubset(report)) };
-	await store.registerClosedFile("global-budget.json", { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
-	await store.registerClosedFile(JOURNAL_PATH, { mediaType: "application/x-ndjson", sensitivity: "internal", generatedBy: "orchestrator" });
-	await store.writeNew("calibration-report.json", stableStringify(sealedReport), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
-	const summary: M6DevCalibrationSummary = { schema_version: "v2", summary_type: "m6_dev_calibration", run_id: runId, terminal_status: sealedReport.status === "pass" ? "completed" : "failed", run_directory: runDirectory, calibration_evidence_sha256: sealedReport.calibration_evidence_sha256, report_sha256: sealedReport.report_sha256 };
-	await store.writeNew("m6-calibration-summary.json", stableStringify(summary), { mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" });
+	const report: M6DevCalibrationReport = {
+		...unsignedReport,
+		calibration_evidence_sha256: canonicalHash(unsignedReport),
+		report_sha256: "",
+	};
+	const sealedReport: M6DevCalibrationReport = {
+		...report,
+		report_sha256: canonicalHash(semanticReportSubset(report)),
+	};
+	await store.registerClosedFile("global-budget.json", {
+		mediaType: "application/json",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
+	await store.registerClosedFile(JOURNAL_PATH, {
+		mediaType: "application/x-ndjson",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
+	await store.writeNew("calibration-report.json", stableStringify(sealedReport), {
+		mediaType: "application/json",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
+	const summary: M6DevCalibrationSummary = {
+		schema_version: "v2",
+		summary_type: "m6_dev_calibration",
+		run_id: runId,
+		terminal_status: sealedReport.status === "pass" ? "completed" : "failed",
+		run_directory: runDirectory,
+		calibration_evidence_sha256: sealedReport.calibration_evidence_sha256,
+		report_sha256: sealedReport.report_sha256,
+	};
+	await store.writeNew("m6-calibration-summary.json", stableStringify(summary), {
+		mediaType: "application/json",
+		sensitivity: "internal",
+		generatedBy: "orchestrator",
+	});
 	if (basename(store.rootPath).startsWith(".staging-")) await store.publishTo(runDirectory);
 	return summary;
 }
@@ -680,10 +991,24 @@ export function createDefaultM6DevCalibrationDependencies(controllerUrl: string)
 	const runtime = createDeepSeekV4FlashRuntime();
 	const m4Dependencies = createDefaultM4DevWorkflowDependencies(controllerUrl, runtime);
 	const publicTaskSource = new FilePublicTaskSource();
-	const environmentLockSource = new DirectoryTaskEnvironmentLockSource(process.env.REPOFIX_M6_TASK_ENVIRONMENT_LOCK_ROOT ?? M6_TASK_ENVIRONMENT_LOCK_ROOT, { root_path: M6_RUNTIME_CONFIG_ROOT, relative_path: "axios-5892/dataset-lock.json" });
+	const environmentLockSource = new DirectoryTaskEnvironmentLockSource(
+		process.env.REPOFIX_M6_TASK_ENVIRONMENT_LOCK_ROOT ?? M6_TASK_ENVIRONMENT_LOCK_ROOT,
+		{ root_path: M6_RUNTIME_CONFIG_ROOT, relative_path: "axios-5892/dataset-lock.json" },
+	);
 	return {
-		runM4: ({ artifacts_root, logical_run, accounted_admission_cap_tokens, token_admission_estimator }) => runM4DevWorkflow({ artifactsRoot: artifacts_root, instanceId: logical_run.instance_id, configId: logical_run.config_id, accountedAdmissionCapTokens: accounted_admission_cap_tokens, tokenAdmissionEstimator: token_admission_estimator }, { ...m4Dependencies, publicTaskSource, environmentLockSource }),
-		runProviderSmoke: ({ artifacts_root, project_cap_tokens }) => runM6ProviderSmoke({ artifacts_root, project_cap_tokens, runtime }),
+		runM4: ({ artifacts_root, logical_run, accounted_admission_cap_tokens, token_admission_estimator }) =>
+			runM4DevWorkflow(
+				{
+					artifactsRoot: artifacts_root,
+					instanceId: logical_run.instance_id,
+					configId: logical_run.config_id,
+					accountedAdmissionCapTokens: accounted_admission_cap_tokens,
+					tokenAdmissionEstimator: token_admission_estimator,
+				},
+				{ ...m4Dependencies, publicTaskSource, environmentLockSource },
+			),
+		runProviderSmoke: ({ artifacts_root, project_cap_tokens }) =>
+			runM6ProviderSmoke({ artifacts_root, project_cap_tokens, runtime }),
 		readFile,
 		now: () => new Date(),
 		randomId: randomUUID,

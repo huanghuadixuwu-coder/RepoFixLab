@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
-import { verifyRunResult, type RunResult } from "../contracts/run-contracts.ts";
+import { type RunResult, verifyRunResult } from "../contracts/run-contracts.ts";
 import type { BatchRunSpec, BatchRunState } from "../runner/batch-state.ts";
 import { BatchStateStore } from "../runner/batch-state.ts";
 import { M7_ARTIFACT_DIRECTORY, M7_CONTINUATION_SOURCE_DIRECTORY } from "./batch-runner.ts";
@@ -78,8 +78,14 @@ async function readCompletedResult(root: string, state: BatchRunState): Promise<
 	if (state.status !== "completed" || state.result_sha256 === null || state.attempt_id === null) {
 		throw new Error(`Run ${state.run_id} is not a completed result`);
 	}
-	const result = verifyRunResult(JSON.parse(await readFile(join(root, "results", `${state.run_id}.json`), "utf8")) as unknown);
-	if (result.run_id !== state.run_id || result.attempt_id !== state.attempt_id || result.result_sha256 !== state.result_sha256) {
+	const result = verifyRunResult(
+		JSON.parse(await readFile(join(root, "results", `${state.run_id}.json`), "utf8")) as unknown,
+	);
+	if (
+		result.run_id !== state.run_id ||
+		result.attempt_id !== state.attempt_id ||
+		result.result_sha256 !== state.result_sha256
+	) {
 		throw new Error(`Completed result binding drifted for ${state.run_id}`);
 	}
 	return result;
@@ -97,7 +103,8 @@ export function createM7ContinuationReport(
 		throw new Error("M7 continuation report requires the fixed 74-run source and 61-run continuation states");
 	}
 	const continuationByKey = new Map(continuationStates.map((state) => [logicalKey(state), state]));
-	if (continuationByKey.size !== continuationStates.length) throw new Error("M7 continuation report has duplicate continuation identities");
+	if (continuationByKey.size !== continuationStates.length)
+		throw new Error("M7 continuation report has duplicate continuation identities");
 	const observations = sourceStates
 		.map((source): M7ContinuationObservation => {
 			if (source.status === "completed") {
@@ -157,7 +164,9 @@ export function createM7ContinuationReport(
 	const strata = ([64, 128] as const).flatMap((maxModelTurns) =>
 		configIds
 			.map((configId): M7ContinuationStratum | null => {
-				const members = observations.filter((value) => value.max_model_turns === maxModelTurns && value.config_id === configId);
+				const members = observations.filter(
+					(value) => value.max_model_turns === maxModelTurns && value.config_id === configId,
+				);
 				if (members.length === 0) return null;
 				const results = members.flatMap((value) => {
 					if (value.result_sha256 === null) return [];
@@ -215,7 +224,9 @@ async function writeImmutable(path: string, content: string): Promise<void> {
 	}
 }
 
-export async function publishM7ContinuationReport(artifactsRoot: string): Promise<{ readonly report: M7ContinuationReport; readonly path: string }> {
+export async function publishM7ContinuationReport(
+	artifactsRoot: string,
+): Promise<{ readonly report: M7ContinuationReport; readonly path: string }> {
 	const root = resolve(artifactsRoot);
 	const sourceRoot = join(root, M7_CONTINUATION_SOURCE_DIRECTORY);
 	const continuationRoot = join(root, M7_ARTIFACT_DIRECTORY);
@@ -231,7 +242,8 @@ export async function publishM7ContinuationReport(artifactsRoot: string): Promis
 	}
 	const continuationResults = new Map<string, RunResult>();
 	for (const state of continuationStore.values) {
-		if (state.status === "completed") continuationResults.set(state.run_id, await readCompletedResult(continuationRoot, state));
+		if (state.status === "completed")
+			continuationResults.set(state.run_id, await readCompletedResult(continuationRoot, state));
 	}
 	const report = createM7ContinuationReport(
 		sourceStore.values,

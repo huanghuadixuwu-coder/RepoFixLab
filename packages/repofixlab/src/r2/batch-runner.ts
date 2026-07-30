@@ -1,16 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { ExperimentPlan } from "../contracts/experiment-plan.ts";
-import {
-	verifyEvaluationResult,
-	verifyRunManifest,
-	verifyRunResult,
-} from "../contracts/run-contracts.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
-import { createBatchRunSpecs, executeBatch, type BatchExecutionSummary } from "../runner/batch-runner.ts";
-import type { BatchRunSpec } from "../runner/batch-state.ts";
+import type { ExperimentPlan } from "../contracts/experiment-plan.ts";
+import { verifyEvaluationResult, verifyRunManifest, verifyRunResult } from "../contracts/run-contracts.ts";
 import { createDefaultM7FormalRunDependencies, runM7FormalRun } from "../m7/formal-runner.ts";
+import { type BatchExecutionSummary, createBatchRunSpecs, executeBatch } from "../runner/batch-runner.ts";
+import type { BatchRunSpec } from "../runner/batch-state.ts";
 
 export const R2_PROTOCOL_REVISION = "repofixlab-r2-v6";
 export const R2_ARTIFACT_DIRECTORY = "r2-v6";
@@ -115,7 +111,8 @@ export function createR2RunSpecs(plan: ExperimentPlan, phase: R2Phase): readonly
 	const all = createBatchRunSpecs(plan, [
 		{ group_id: "posthoc-diagnostic", instance_ids: plan.task_selection.instance_ids },
 	]);
-	if (all.length !== R2_FULL_MATRIX_RUN_COUNT) throw new Error("R2 frozen matrix must contain exactly 78 logical runs");
+	if (all.length !== R2_FULL_MATRIX_RUN_COUNT)
+		throw new Error("R2 frozen matrix must contain exactly 78 logical runs");
 	const selected = all.filter((spec) => spec.config_id === PHASE_CONFIG[phase]);
 	if (selected.length !== R2_TASK_COUNT) throw new Error(`R2 ${phase} phase must contain exactly 26 logical runs`);
 	return selected;
@@ -144,9 +141,11 @@ export function createR2PendingRunSpecs(plan: ExperimentPlan, phase: R2Phase): r
  */
 export function createR2ControllerIdentityRecoverySpecs(plan: ExperimentPlan): readonly BatchRunSpec[] {
 	const full = createR2RunSpecs(plan, "full");
-	const selected = full.filter((spec) => R2_CONTROLLER_IDENTITY_RECOVERY_INSTANCE_IDS.includes(
-		spec.instance_id as (typeof R2_CONTROLLER_IDENTITY_RECOVERY_INSTANCE_IDS)[number],
-	));
+	const selected = full.filter((spec) =>
+		R2_CONTROLLER_IDENTITY_RECOVERY_INSTANCE_IDS.includes(
+			spec.instance_id as (typeof R2_CONTROLLER_IDENTITY_RECOVERY_INSTANCE_IDS)[number],
+		),
+	);
 	if (selected.length !== R2_CONTROLLER_IDENTITY_RECOVERY_INSTANCE_IDS.length) {
 		throw new Error("R2 Controller identity recovery cohort binding is invalid");
 	}
@@ -169,9 +168,11 @@ export function createR2ControllerIdentityRecoverySpecs(plan: ExperimentPlan): r
  */
 export function createR2SemanticWorkflowRemediationSpecs(plan: ExperimentPlan): readonly BatchRunSpec[] {
 	const full = createR2RunSpecs(plan, "full");
-	const selected = full.filter((spec) => R2_SEMANTIC_WORKFLOW_REMEDIATION_INSTANCE_IDS.includes(
-		spec.instance_id as (typeof R2_SEMANTIC_WORKFLOW_REMEDIATION_INSTANCE_IDS)[number],
-	));
+	const selected = full.filter((spec) =>
+		R2_SEMANTIC_WORKFLOW_REMEDIATION_INSTANCE_IDS.includes(
+			spec.instance_id as (typeof R2_SEMANTIC_WORKFLOW_REMEDIATION_INSTANCE_IDS)[number],
+		),
+	);
 	if (selected.length !== R2_SEMANTIC_WORKFLOW_REMEDIATION_INSTANCE_IDS.length) {
 		throw new Error("R2 semantic workflow remediation cohort binding is invalid");
 	}
@@ -193,9 +194,11 @@ export function createR2SemanticWorkflowRemediationSpecs(plan: ExperimentPlan): 
  */
 export function createR2SemanticWorkflowFollowupSpecs(plan: ExperimentPlan): readonly BatchRunSpec[] {
 	const full = createR2RunSpecs(plan, "full");
-	const selected = full.filter((spec) => R2_SEMANTIC_WORKFLOW_FOLLOWUP_INSTANCE_IDS.includes(
-		spec.instance_id as (typeof R2_SEMANTIC_WORKFLOW_FOLLOWUP_INSTANCE_IDS)[number],
-	));
+	const selected = full.filter((spec) =>
+		R2_SEMANTIC_WORKFLOW_FOLLOWUP_INSTANCE_IDS.includes(
+			spec.instance_id as (typeof R2_SEMANTIC_WORKFLOW_FOLLOWUP_INSTANCE_IDS)[number],
+		),
+	);
 	if (selected.length !== R2_SEMANTIC_WORKFLOW_FOLLOWUP_INSTANCE_IDS.length) {
 		throw new Error("R2 semantic workflow follow-up cohort binding is invalid");
 	}
@@ -216,13 +219,20 @@ export function createR2SemanticWorkflowFollowupSpecs(plan: ExperimentPlan): rea
  */
 export function createR2SelfReviewRecoverySpecs(plan: ExperimentPlan): readonly BatchRunSpec[] {
 	const full = createR2RunSpecs(plan, "full");
-	const selected = full.filter((spec) => R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS.includes(
-		spec.instance_id as (typeof R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS)[number],
-	));
+	const selected = full.filter((spec) =>
+		R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS.includes(
+			spec.instance_id as (typeof R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS)[number],
+		),
+	);
 	if (selected.length !== R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS.length) {
 		throw new Error("R2 self-review recovery cohort binding is invalid");
 	}
-	if (!sameOrderedValues(selected.map((spec) => spec.instance_id), R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS)) {
+	if (
+		!sameOrderedValues(
+			selected.map((spec) => spec.instance_id),
+			R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS,
+		)
+	) {
 		throw new Error("R2 self-review recovery cohort ordering drifted");
 	}
 	return selected;
@@ -342,15 +352,13 @@ async function writeR2SemanticWorkflowRemediationDeclaration(
 				classification: "official_unresolved_with_valid_evaluation",
 				instances: R2_SEMANTIC_WORKFLOW_REMEDIATION_INSTANCE_IDS,
 			},
-			result_handling: "report_separately_as_targeted_workflow_remediation; never overwrite_or_relabel_prior_r2_results",
+			result_handling:
+				"report_separately_as_targeted_workflow_remediation; never overwrite_or_relabel_prior_r2_results",
 		}),
 	);
 }
 
-async function writeR2SemanticWorkflowFollowupDeclaration(
-	root: string,
-	specs: readonly BatchRunSpec[],
-): Promise<void> {
+async function writeR2SemanticWorkflowFollowupDeclaration(root: string, specs: readonly BatchRunSpec[]): Promise<void> {
 	await writeImmutable(
 		join(root, "recovery-cohort.json"),
 		stableStringify({
@@ -363,15 +371,13 @@ async function writeR2SemanticWorkflowFollowupDeclaration(
 				classification: "official_unresolved_after_semantic_workflow_remediation",
 				instances: R2_SEMANTIC_WORKFLOW_FOLLOWUP_INSTANCE_IDS,
 			},
-			result_handling: "report_separately_as_targeted_workflow_followup; never overwrite_or_relabel_prior_r2_results",
+			result_handling:
+				"report_separately_as_targeted_workflow_followup; never overwrite_or_relabel_prior_r2_results",
 		}),
 	);
 }
 
-async function writeR2SelfReviewRecoveryDeclaration(
-	root: string,
-	specs: readonly BatchRunSpec[],
-): Promise<void> {
+async function writeR2SelfReviewRecoveryDeclaration(root: string, specs: readonly BatchRunSpec[]): Promise<void> {
 	await writeImmutable(
 		join(root, "recovery-cohort.json"),
 		stableStringify({
@@ -383,9 +389,11 @@ async function writeR2SelfReviewRecoveryDeclaration(
 				execution_artifact_directories: ["r2-v6-r9", "r2-v6-r10", "r2-v6-r11"],
 				classification: "workflow_completion_contract_recovery_after_schema_feedback_repair",
 				instances: R2_SELF_REVIEW_RECOVERY_INSTANCE_IDS,
-				failure_reason: "self_review_omitted_plan_invariant_is_recoverable; r10_plan_id_pattern_rejection_lacked_field_feedback; r11_completion_retry_was_short_circuited_after_budget_stop",
+				failure_reason:
+					"self_review_omitted_plan_invariant_is_recoverable; r10_plan_id_pattern_rejection_lacked_field_feedback; r11_completion_retry_was_short_circuited_after_budget_stop",
 			},
-			result_handling: "report_separately_as_single_task_workflow_recovery; never overwrite_or_relabel_prior_r2_results",
+			result_handling:
+				"report_separately_as_single_task_workflow_recovery; never overwrite_or_relabel_prior_r2_results",
 		}),
 	);
 }
@@ -406,11 +414,11 @@ export async function runR2Batch(
 			? createR2PendingRunSpecs(plan, phase)
 			: recoveryCohort === "controller-identity-3"
 				? createR2ControllerIdentityRecoverySpecs(plan)
-			: recoveryCohort === "semantic-workflow-4"
-				? createR2SemanticWorkflowRemediationSpecs(plan)
-				: recoveryCohort === "semantic-workflow-followup-3"
-					? createR2SemanticWorkflowFollowupSpecs(plan)
-					: createR2SelfReviewRecoverySpecs(plan);
+				: recoveryCohort === "semantic-workflow-4"
+					? createR2SemanticWorkflowRemediationSpecs(plan)
+					: recoveryCohort === "semantic-workflow-followup-3"
+						? createR2SemanticWorkflowFollowupSpecs(plan)
+						: createR2SelfReviewRecoverySpecs(plan);
 	const executionArtifactDirectory = r2ExecutionArtifactDirectoryFromEnvironment();
 	const executionArtifactsRoot = join(artifactsRoot, executionArtifactDirectory);
 	const dependencies = createDefaultM7FormalRunDependencies(controllerUrl);
@@ -422,7 +430,8 @@ export async function runR2Batch(
 	);
 	const batchDirectory = recoveryCohort ?? phase;
 	const root = join(executionArtifactsRoot, batchDirectory);
-	if (recoveryCohort === null && phase === "full") await writeR2CompletedTargetReference(artifactsRoot, root, fullSpecs);
+	if (recoveryCohort === null && phase === "full")
+		await writeR2CompletedTargetReference(artifactsRoot, root, fullSpecs);
 	if (recoveryCohort === "controller-identity-3") await writeR2ControllerIdentityRecoveryDeclaration(root, specs);
 	if (recoveryCohort === "semantic-workflow-4") await writeR2SemanticWorkflowRemediationDeclaration(root, specs);
 	if (recoveryCohort === "semantic-workflow-followup-3") await writeR2SemanticWorkflowFollowupDeclaration(root, specs);

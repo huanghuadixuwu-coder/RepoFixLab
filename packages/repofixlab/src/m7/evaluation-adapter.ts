@@ -1,8 +1,4 @@
-import {
-	canonicalContractSha256,
-	createEvaluationResult,
-	type EvaluationResult,
-} from "../contracts/run-contracts.ts";
+import { canonicalContractSha256, createEvaluationResult, type EvaluationResult } from "../contracts/run-contracts.ts";
 import { SWE_BENCH_HARNESS_REVISION } from "../contracts/v1.ts";
 
 interface M7EvaluationBinding {
@@ -180,7 +176,8 @@ function parseM6OfficialEvaluation(value: unknown, binding: M7EvaluationBinding)
 		(value.exit_code !== null && (!Number.isSafeInteger(value.exit_code) || typeof value.exit_code !== "number")) ||
 		typeof value.timed_out !== "boolean" ||
 		!isNonNegativeInteger(value.duration_ms) ||
-		(value.error_class !== null && (typeof value.error_class !== "string" || !/^[a-z][a-z0-9_]{0,99}$/.test(value.error_class))) ||
+		(value.error_class !== null &&
+			(typeof value.error_class !== "string" || !/^[a-z][a-z0-9_]{0,99}$/.test(value.error_class))) ||
 		!isSha256(value.evaluation_sha256)
 	) {
 		throw new Error("M6 official evaluation does not satisfy the sealed adapter contract");
@@ -204,13 +201,22 @@ function parseM6OfficialEvaluation(value: unknown, binding: M7EvaluationBinding)
 	} as M6OfficialEvaluation;
 }
 
-function privatePartition(scope: "fail_to_pass" | "pass_to_pass", counts: GradeCounts): {
+function privatePartition(
+	scope: "fail_to_pass" | "pass_to_pass",
+	counts: GradeCounts,
+): {
 	success: string[];
 	failure: string[];
 } {
 	return {
-		success: Array.from({ length: counts.passed }, (_, index) => `private::${scope}::passed::${String(index + 1).padStart(4, "0")}`),
-		failure: Array.from({ length: counts.failed }, (_, index) => `private::${scope}::failed::${String(index + 1).padStart(4, "0")}`),
+		success: Array.from(
+			{ length: counts.passed },
+			(_, index) => `private::${scope}::passed::${String(index + 1).padStart(4, "0")}`,
+		),
+		failure: Array.from(
+			{ length: counts.failed },
+			(_, index) => `private::${scope}::failed::${String(index + 1).padStart(4, "0")}`,
+		),
 	};
 }
 
@@ -240,8 +246,10 @@ export function normalizeM6OfficialEvaluation(value: unknown, binding: M7Evaluat
 		test_patch_apply_status: source.test_patch_apply_status,
 		test_executed: source.test_executed,
 		test_collected: grading?.found ?? false,
-		fail_to_pass: grading === null ? { success: [], failure: [] } : privatePartition("fail_to_pass", grading.fail_to_pass),
-		pass_to_pass: grading === null ? { success: [], failure: [] } : privatePartition("pass_to_pass", grading.pass_to_pass),
+		fail_to_pass:
+			grading === null ? { success: [], failure: [] } : privatePartition("fail_to_pass", grading.fail_to_pass),
+		pass_to_pass:
+			grading === null ? { success: [], failure: [] } : privatePartition("pass_to_pass", grading.pass_to_pass),
 		exit_code: source.exit_code,
 		timed_out: source.timed_out,
 		duration_ms: source.duration_ms,

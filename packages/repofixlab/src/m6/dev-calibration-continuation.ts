@@ -2,30 +2,30 @@ import { createHash, randomUUID } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
-import { M4PreProviderInputError, type M4DevWorkflowSummary } from "../runner/m4-dev-workflow.ts";
+import { type M4DevWorkflowSummary, M4PreProviderInputError } from "../runner/m4-dev-workflow.ts";
 import type { RepoToolOutputBudgetSnapshot } from "../sandbox/repo-tools.ts";
 import { ArtifactStore } from "../storage/artifact-store.ts";
+import {
+	M6_CALIBRATION_INSTANCE_IDS,
+	M6_CALIBRATION_RUN_COUNT,
+	M6_PROVIDER_SMOKE_CAP_TOKENS,
+	type M6CalibrationRun,
+	type M6DevCalibrationBatch,
+	verifyM6DevCalibrationBatch,
+} from "./calibration-cohort.ts";
 import {
 	createM6CalibratedTokenEstimator,
 	createM6M4Receipt,
 	inspectM6TokenLedger,
-	parseM6TokenLedger,
-	verifyM6DevCalibrationReport,
 	type M6CalibratedTokenEstimator,
 	type M6CalibrationRunReceipt,
 	type M6DevCalibrationDependencies,
 	type M6DevCalibrationReport,
 	type M6ProviderSmokeReceipt,
 	type M6ProviderSmokeResult,
+	parseM6TokenLedger,
+	verifyM6DevCalibrationReport,
 } from "./dev-calibration-runner.ts";
-import {
-	M6_CALIBRATION_INSTANCE_IDS,
-	M6_CALIBRATION_RUN_COUNT,
-	M6_PROVIDER_SMOKE_CAP_TOKENS,
-	verifyM6DevCalibrationBatch,
-	type M6CalibrationRun,
-	type M6DevCalibrationBatch,
-} from "./calibration-cohort.ts";
 
 export const M6_CONTINUATION_PROTOCOL_REVISION = "repofixlab-protocol-1.6-deepseek-v4-flash-continuation" as const;
 export const M6_CONTINUATION_PER_RUN_CAP_TOKENS = 5_000_000;
@@ -152,7 +152,9 @@ interface SourceSelection {
 
 function canonicalHash(value: unknown): string {
 	const normalized: unknown = JSON.parse(stableStringify(value));
-	return createHash("sha256").update(`${JSON.stringify(normalized)}\n`).digest("hex");
+	return createHash("sha256")
+		.update(`${JSON.stringify(normalized)}\n`)
+		.digest("hex");
 }
 
 function bytesSha256(value: Uint8Array): string {
@@ -164,7 +166,8 @@ function canonicalJsonLine(value: unknown): string {
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${label} must be an object`);
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new Error(`${label} must be an object`);
 	return value as Record<string, unknown>;
 }
 
@@ -211,11 +214,9 @@ function emptyReceipt(
 	};
 }
 
-function sourceSelection(
-	batch: M6DevCalibrationBatch,
-	sourceReport: M6DevCalibrationReport,
-): SourceSelection {
-	if (sourceReport.status !== "fail") throw new Error("M6 continuation requires a sealed failed source calibration report");
+function sourceSelection(batch: M6DevCalibrationBatch, sourceReport: M6DevCalibrationReport): SourceSelection {
+	if (sourceReport.status !== "fail")
+		throw new Error("M6 continuation requires a sealed failed source calibration report");
 	if (sourceReport.calibration_batch_sha256 !== batch.calibration_batch_sha256) {
 		throw new Error("M6 continuation source report does not bind the supplied calibration batch");
 	}
@@ -224,7 +225,8 @@ function sourceSelection(
 	}
 	const receipts = new Map<string, M6CalibrationRunReceipt>();
 	for (const receipt of sourceReport.run_receipts) {
-		if (receipts.has(receipt.logical_run.run_id)) throw new Error("M6 continuation source report has duplicate logical-run receipts");
+		if (receipts.has(receipt.logical_run.run_id))
+			throw new Error("M6 continuation source report has duplicate logical-run receipts");
 		const expected = batch.logical_runs.find((run) => run.run_id === receipt.logical_run.run_id);
 		if (
 			expected === undefined ||
@@ -244,7 +246,8 @@ function sourceSelection(
 		}
 		return receipt;
 	});
-	if (inherited.length !== 4) throw new Error("M6 continuation source report must provide exactly four clean inherited receipts");
+	if (inherited.length !== 4)
+		throw new Error("M6 continuation source report must provide exactly four clean inherited receipts");
 	const pending = batch.logical_runs
 		.filter((run) => run.instance_id === "preactjs__preact-4182")
 		.map((logicalRun) => {
@@ -364,7 +367,10 @@ async function readJournal(
 		throw error;
 	});
 	if (raw === null || raw.trim().length === 0) return null;
-	const events = raw.trim().split("\n").map((line) => verifyJournalEvent(JSON.parse(line), manifest));
+	const events = raw
+		.trim()
+		.split("\n")
+		.map((line) => verifyJournalEvent(JSON.parse(line), manifest));
 	const initial = events[0];
 	if (initial?.event_type !== "initialized" || initial.logical_run_id !== null || initial.smoke !== null) {
 		throw new Error("M6 continuation journal lacks a valid initialization event");
@@ -389,7 +395,8 @@ async function readJournal(
 		}
 		if (event.logical_run_id === null) throw new Error("M6 continuation logical-run event is missing its run ID");
 		if (event.event_type === "run_started") {
-			if (started.has(event.logical_run_id)) throw new Error("M6 continuation logical run was started more than once");
+			if (started.has(event.logical_run_id))
+				throw new Error("M6 continuation logical run was started more than once");
 			started.add(event.logical_run_id);
 			continue;
 		}
@@ -482,33 +489,35 @@ async function readUsageRecords(store: ArtifactStore): Promise<readonly M6Contin
 		throw error;
 	});
 	if (raw === null || raw.trim().length === 0) return [];
-	return raw.trim().split("\n").map((line, index) => {
-		const record = asRecord(JSON.parse(line), `M6 continuation usage record ${String(index + 1)}`) as Partial<M6ContinuationUsageRecord>;
-		if (
-			record.schema_version !== "v1" ||
-			record.ledger_type !== "m6_continuation_usage" ||
-			(record.event_type !== "provider_smoke" && record.event_type !== "logical_run") ||
-			typeof record.run_id !== "string" ||
-			(record.logical_run_id !== null && typeof record.logical_run_id !== "string") ||
-			!isSafeTokenCount(record.accounted_tokens) ||
-			typeof record.event_sha256 !== "string"
-		) {
-			throw new Error("M6 continuation usage record is malformed");
-		}
-		const { event_sha256: actual, ...unsigned } = record as M6ContinuationUsageRecord;
-		if (actual !== canonicalHash(unsigned)) throw new Error("M6 continuation usage record hash is invalid");
-		return record as M6ContinuationUsageRecord;
-	});
+	return raw
+		.trim()
+		.split("\n")
+		.map((line, index) => {
+			const record = asRecord(
+				JSON.parse(line),
+				`M6 continuation usage record ${String(index + 1)}`,
+			) as Partial<M6ContinuationUsageRecord>;
+			if (
+				record.schema_version !== "v1" ||
+				record.ledger_type !== "m6_continuation_usage" ||
+				(record.event_type !== "provider_smoke" && record.event_type !== "logical_run") ||
+				typeof record.run_id !== "string" ||
+				(record.logical_run_id !== null && typeof record.logical_run_id !== "string") ||
+				!isSafeTokenCount(record.accounted_tokens) ||
+				typeof record.event_sha256 !== "string"
+			) {
+				throw new Error("M6 continuation usage record is malformed");
+			}
+			const { event_sha256: actual, ...unsigned } = record as M6ContinuationUsageRecord;
+			if (actual !== canonicalHash(unsigned)) throw new Error("M6 continuation usage record hash is invalid");
+			return record as M6ContinuationUsageRecord;
+		});
 }
 
 function reportEvidenceSubset(
 	value: M6DevCalibrationContinuationReport,
 ): Omit<M6DevCalibrationContinuationReport, "calibration_evidence_sha256" | "report_sha256"> {
-	const {
-		calibration_evidence_sha256: _calibrationEvidenceSha256,
-		report_sha256: _reportSha256,
-		...semantic
-	} = value;
+	const { calibration_evidence_sha256: _calibrationEvidenceSha256, report_sha256: _reportSha256, ...semantic } = value;
 	return semantic;
 }
 
@@ -547,7 +556,9 @@ export async function runM6DevCalibrationContinuation(
 	if (options.resume_directory === undefined) {
 		runId = `m6-continuation-run-${dependencies.randomId()}`;
 		runDirectory = resolve(options.artifacts_root, CONTINUATION_ROOT, "runs", runId);
-		store = await ArtifactStore.createNew(resolve(options.artifacts_root, CONTINUATION_ROOT, "runs", `.staging-${runId}`));
+		store = await ArtifactStore.createNew(
+			resolve(options.artifacts_root, CONTINUATION_ROOT, "runs", `.staging-${runId}`),
+		);
 		startedAt = dependencies.now().toISOString();
 		await store.writeNew("continuation-manifest.json", stableStringify(manifest), {
 			mediaType: "application/json",
@@ -640,10 +651,7 @@ export async function runM6DevCalibrationContinuation(
 			project_cap_tokens: M6_PROVIDER_SMOKE_CAP_TOKENS,
 		});
 		smoke = smokeReceipt(smokeResult);
-		await appendUsageRecord(
-			store,
-			unsignedUsageRecord("provider_smoke", runId, null, smoke.accounted_tokens),
-		);
+		await appendUsageRecord(store, unsignedUsageRecord("provider_smoke", runId, null, smoke.accounted_tokens));
 		await appendJournal(
 			store,
 			unsignedJournalEvent({
@@ -768,9 +776,7 @@ export async function runM6DevCalibrationContinuation(
 	}
 	if (continuationReceipts.some((receipt) => receipt.requires_reconciliation)) reconciliationRequired = true;
 	const calibrated =
-		failures.size === 0 &&
-		completedRuns === M6_CALIBRATION_RUN_COUNT &&
-		!reconciliationRequired
+		failures.size === 0 && completedRuns === M6_CALIBRATION_RUN_COUNT && !reconciliationRequired
 			? createM6CalibratedTokenEstimator(observations)
 			: null;
 	const unsignedReport = {
@@ -781,14 +787,12 @@ export async function runM6DevCalibrationContinuation(
 		run_id: runId,
 		started_at: startedAt,
 		finished_at: dependencies.now().toISOString(),
-		status: (
-			failures.size === 0 &&
-			completedRuns === M6_CALIBRATION_RUN_COUNT &&
-			calibrated !== null &&
-			!reconciliationRequired
-				? "pass"
-				: "fail"
-		) as "pass" | "fail",
+		status: (failures.size === 0 &&
+		completedRuns === M6_CALIBRATION_RUN_COUNT &&
+		calibrated !== null &&
+		!reconciliationRequired
+			? "pass"
+			: "fail") as "pass" | "fail",
 		cost_admission: "per_run_enforced_no_project_cap" as const,
 		budget_policy: manifest.budget_policy,
 		source: {

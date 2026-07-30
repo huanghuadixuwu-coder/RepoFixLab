@@ -192,28 +192,52 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 		return { ok: true, command: { kind: "m3-image-resolve", input, eligibility, operationId, output } };
 	}
 	if (command === "m6-batch-create") {
-		if (extraPositionals.length > 0) return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
-		if (values.profile !== undefined || values.candidate !== undefined || values.eligibility !== undefined || values["operation-id"] !== undefined || values.resume !== undefined) {
+		if (extraPositionals.length > 0)
+			return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		if (
+			values.profile !== undefined ||
+			values.candidate !== undefined ||
+			values.eligibility !== undefined ||
+			values["operation-id"] !== undefined ||
+			values.resume !== undefined
+		) {
 			return failure("conflicting_action", `${command} only accepts --input and --output`);
 		}
 		const input = values.input;
 		const output = values.output;
-		if (typeof input !== "string" || input.trim().length === 0) return failure("invalid_input", `${command} requires a non-empty --input path`);
-		if (typeof output !== "string" || output.trim().length === 0) return failure("invalid_output", `${command} requires a non-empty --output path`);
+		if (typeof input !== "string" || input.trim().length === 0)
+			return failure("invalid_input", `${command} requires a non-empty --input path`);
+		if (typeof output !== "string" || output.trim().length === 0)
+			return failure("invalid_output", `${command} requires a non-empty --output path`);
 		return { ok: true, command: { kind: "m6-batch-create", input, output } };
 	}
 	if (command === "m6-run") {
-		if (extraPositionals.length > 0) return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
-		if (values.profile !== undefined || values.candidate !== undefined || values.eligibility !== undefined || values["operation-id"] !== undefined || values.output !== undefined || values.config !== undefined || values["dry-run"] !== undefined) {
+		if (extraPositionals.length > 0)
+			return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		if (
+			values.profile !== undefined ||
+			values.candidate !== undefined ||
+			values.eligibility !== undefined ||
+			values["operation-id"] !== undefined ||
+			values.output !== undefined ||
+			values.config !== undefined ||
+			values["dry-run"] !== undefined
+		) {
 			return failure("conflicting_action", `${command} only accepts --input and optional --resume`);
 		}
 		const input = values.input;
-		if (typeof input !== "string" || input.trim().length === 0) return failure("invalid_input", `${command} requires a non-empty --input path`);
-		if (values.resume !== undefined && (typeof values.resume !== "string" || values.resume.trim().length === 0)) return failure("invalid_resume", `${command} --resume must be a non-empty path`);
-		return { ok: true, command: { kind: "m6-run", input, ...(typeof values.resume === "string" ? { resume: values.resume } : {}) } };
+		if (typeof input !== "string" || input.trim().length === 0)
+			return failure("invalid_input", `${command} requires a non-empty --input path`);
+		if (values.resume !== undefined && (typeof values.resume !== "string" || values.resume.trim().length === 0))
+			return failure("invalid_resume", `${command} --resume must be a non-empty path`);
+		return {
+			ok: true,
+			command: { kind: "m6-run", input, ...(typeof values.resume === "string" ? { resume: values.resume } : {}) },
+		};
 	}
 	if (command === "m6-continue") {
-		if (extraPositionals.length > 0) return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
+		if (extraPositionals.length > 0)
+			return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
 		if (
 			values.profile !== undefined ||
 			values.input !== undefined ||
@@ -263,11 +287,7 @@ export function parseCliArgs(args: readonly string[]): ParseCliArgsResult {
 		}
 		return { ok: true, command: { kind: "m3-split-create", input, eligibility, output } };
 	}
-	if (
-		command === "candidate-create" ||
-		command === "environment-lock-create" ||
-		command === "provenance-lock"
-	) {
+	if (command === "candidate-create" || command === "environment-lock-create" || command === "provenance-lock") {
 		if (extraPositionals.length > 0) {
 			return failure("unexpected_argument", `Unexpected ${command} argument: ${extraPositionals.join(" ")}`);
 		}

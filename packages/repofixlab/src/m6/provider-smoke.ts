@@ -1,15 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { type AssistantMessage, type Context, streamSimple } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { streamSimple, type AssistantMessage, type Context } from "@earendil-works/pi-ai/compat";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
-import { ArtifactStore } from "../storage/artifact-store.ts";
 import {
+	createDeepSeekV4FlashRuntime,
 	DEEPSEEK_V4_FLASH_MODEL_ID,
 	DEEPSEEK_V4_FLASH_MODEL_PROVIDER,
 	DEEPSEEK_V4_FLASH_MODEL_SPEC,
-	createDeepSeekV4FlashRuntime,
 	FROZEN_TEMPERATURE,
 	type FrozenModelRuntime,
 } from "../runner/runtime-factory.ts";
@@ -20,6 +19,7 @@ import {
 	TokenReservationLedger,
 	type TokenSupervisedSession,
 } from "../runner/token-supervisor.ts";
+import { ArtifactStore } from "../storage/artifact-store.ts";
 import { M6_CALIBRATION_PROTOCOL_REVISION } from "./calibration-cohort.ts";
 
 export const M6_PROVIDER_SMOKE_MAX_TOKENS = 10_000;
@@ -71,13 +71,15 @@ function usageIsComplete(message: AssistantMessage): boolean {
 	return (
 		[usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.totalTokens].every(
 			(value) => Number.isSafeInteger(value) && value >= 0,
-		) &&
-		usage.totalTokens === usage.input + usage.output + usage.cacheRead + usage.cacheWrite
+		) && usage.totalTokens === usage.input + usage.output + usage.cacheRead + usage.cacheWrite
 	);
 }
 
 function textFrom(message: AssistantMessage): string {
-	return message.content.filter((item) => item.type === "text").map((item) => item.text).join("");
+	return message.content
+		.filter((item) => item.type === "text")
+		.map((item) => item.text)
+		.join("");
 }
 
 function safeMessage(error: unknown): string {
@@ -139,7 +141,12 @@ export async function runM6ProviderSmoke(options: {
 	const runId = `m6-smoke-${randomId()}`;
 	const startedAt = now().toISOString();
 	const finalDirectory = resolve(options.artifacts_root, "m6-deepseek-flash-provider-smoke", "runs", runId);
-	const stagingDirectory = resolve(options.artifacts_root, "m6-deepseek-flash-provider-smoke", "runs", `.staging-${runId}`);
+	const stagingDirectory = resolve(
+		options.artifacts_root,
+		"m6-deepseek-flash-provider-smoke",
+		"runs",
+		`.staging-${runId}`,
+	);
 	const store = await ArtifactStore.createNew(stagingDirectory);
 	const ledgerPath = store.resolvePath("token-ledger.jsonl");
 	const ledgerSink = new FsyncTokenLedgerSink(ledgerPath);
@@ -176,11 +183,11 @@ export async function runM6ProviderSmoke(options: {
 		};
 		installTokenSupervisor(session, {
 			ledger: smokeLedger,
-				run_id: runId,
-				max_output_tokens: SMOKE_MAX_OUTPUT_TOKENS,
-				estimate_input_tokens: (context) => estimator.estimate(context),
-				estimate_base_input_tokens: (context) => estimator.baseEstimate(context),
-				next_request_id: () => `${runId}:provider:${String(requestSequence++).padStart(4, "0")}`,
+			run_id: runId,
+			max_output_tokens: SMOKE_MAX_OUTPUT_TOKENS,
+			estimate_input_tokens: (context) => estimator.estimate(context),
+			estimate_base_input_tokens: (context) => estimator.baseEstimate(context),
+			next_request_id: () => `${runId}:provider:${String(requestSequence++).padStart(4, "0")}`,
 		});
 		const textResult = await runSmokeCall(session, runtime.model, "text", {
 			systemPrompt: "RepoFixLab M6 provider compatibility smoke. Follow the user instruction exactly.",
@@ -234,7 +241,10 @@ export async function runM6ProviderSmoke(options: {
 				toolCalls.length === 1 &&
 				toolCalls[0]!.name === "m6_smoke_echo" &&
 				toolCalls[0]!.arguments.ready === true,
-			streaming_usage: checks.streaming_usage && usageIsComplete(toolResult.message) && toolResult.eventTypes.includes("toolcall_end"),
+			streaming_usage:
+				checks.streaming_usage &&
+				usageIsComplete(toolResult.message) &&
+				toolResult.eventTypes.includes("toolcall_end"),
 			timeout_control: checks.timeout_control && toolResult.responseStatus !== null,
 		};
 		if (smokeLedger.requiresReconciliation) throw new Error("M6 provider smoke has unverified provider usage");

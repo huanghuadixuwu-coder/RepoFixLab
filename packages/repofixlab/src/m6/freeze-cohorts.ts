@@ -3,10 +3,7 @@ import { link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import { verifyDatasetLockForTaskEnvironment } from "../contracts/task-environment-lock.ts";
-import {
-	parseM3SamplingMetadataJsonl,
-	verifyM3RepoStratifiedSplit,
-} from "../m3/split.ts";
+import { parseM3SamplingMetadataJsonl, verifyM3RepoStratifiedSplit } from "../m3/split.ts";
 import { createM6EvaluationCohorts, type M6EvaluationCohorts } from "./cohorts.ts";
 
 function sha256(content: Uint8Array): string {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "RepoFix 项目复习"
+  short_description: "按固定题库系统复习 RepoFixLab 核心知识与证据边界"
+  default_prompt: "使用 $project-review 按章节复习 RepoFixLab。"

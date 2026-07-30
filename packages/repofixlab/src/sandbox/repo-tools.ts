@@ -5,14 +5,14 @@ import type { RepoToolTransport } from "../controller/client.ts";
 import {
 	REPO_TOOL_NAMES,
 	RepoDiffInputSchema,
+	type RepoEditInput,
 	RepoEditInputSchema,
+	type RepoEditToolWireInput,
 	RepoEditToolWireSchema,
 	RepoExecInputSchema,
 	RepoListInputSchema,
 	RepoReadInputSchema,
 	RepoSearchInputSchema,
-	type RepoEditInput,
-	type RepoEditToolWireInput,
 	type RepoToolResponse,
 } from "./protocol.ts";
 
@@ -78,7 +78,10 @@ function formatToolResult(response: RepoToolResponse, visibleCharacterLimit: num
 }
 
 function toToolResult(response: RepoToolResponse, outputBudget: RepoToolOutputBudget | undefined) {
-	const requested = Math.min(MODEL_VISIBLE_TOOL_OUTPUT_LIMIT, Math.max(1, response.result.stdout.length + response.result.stderr.length + 512));
+	const requested = Math.min(
+		MODEL_VISIBLE_TOOL_OUTPUT_LIMIT,
+		Math.max(1, response.result.stdout.length + response.result.stderr.length + 512),
+	);
 	const visibleLimit = outputBudget?.allocate(requested) ?? requested;
 	return {
 		content: [{ type: "text" as const, text: formatToolResult(response, visibleLimit) }],
@@ -102,7 +105,11 @@ export function toolCallOperationId(toolCallId: string): string {
 	return `tool:${createHash("sha256").update(toolCallId).digest("hex")}`;
 }
 
-export function createRepoTools(leaseId: string, transport: RepoToolTransport, outputBudget?: RepoToolOutputBudget): ToolDefinition[] {
+export function createRepoTools(
+	leaseId: string,
+	transport: RepoToolTransport,
+	outputBudget?: RepoToolOutputBudget,
+): ToolDefinition[] {
 	if (leaseId.length === 0) {
 		throw new Error("leaseId must not be empty");
 	}
@@ -128,7 +135,8 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport, o
 							signal,
 						),
 						"repo_list",
-					), outputBudget,
+					),
+					outputBudget,
 				),
 		}),
 		defineTool({
@@ -151,7 +159,8 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport, o
 							signal,
 						),
 						"repo_read",
-					), outputBudget,
+					),
+					outputBudget,
 				),
 		}),
 		defineTool({
@@ -174,7 +183,8 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport, o
 							signal,
 						),
 						"repo_search",
-					), outputBudget,
+					),
+					outputBudget,
 				),
 		}),
 		defineTool({
@@ -198,14 +208,15 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport, o
 							signal,
 						),
 						"repo_edit",
-					), outputBudget,
+					),
+					outputBudget,
 				),
 		}),
 		defineTool({
 			name: REPO_TOOL_NAMES[4],
 			label: "Execute repository command",
 			description:
-				"Execute a bounded non-shell command inside the leased repository worker. argv is required and must be a JSON string array, for example [\"node\", \"test/unit/adapters/http.js\"]; never pass a shell command string.",
+				'Execute a bounded non-shell command inside the leased repository worker. argv is required and must be a JSON string array, for example ["node", "test/unit/adapters/http.js"]; never pass a shell command string.',
 			promptSnippet: "Run a command with argv as a JSON string array",
 			parameters: RepoExecInputSchema,
 			executionMode: "sequential",
@@ -222,7 +233,8 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport, o
 							signal,
 						),
 						"repo_exec",
-					), outputBudget,
+					),
+					outputBudget,
 				),
 		}),
 		defineTool({
@@ -245,7 +257,8 @@ export function createRepoTools(leaseId: string, transport: RepoToolTransport, o
 							signal,
 						),
 						"repo_diff",
-					), outputBudget,
+					),
+					outputBudget,
 				),
 		}),
 	];

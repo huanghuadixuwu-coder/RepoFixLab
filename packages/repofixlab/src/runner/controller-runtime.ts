@@ -121,11 +121,7 @@ export interface RuntimeController {
 		instanceId: string,
 	): Promise<RuntimePreparedWorker>;
 	toolTransport(attemptId: string): RepoToolTransport;
-	verificationCatalog?(
-		attemptId: string,
-		operationId: string,
-		leaseId: string,
-	): Promise<RuntimeVerificationCatalog>;
+	verificationCatalog?(attemptId: string, operationId: string, leaseId: string): Promise<RuntimeVerificationCatalog>;
 	verifyCatalogEntry?(
 		attemptId: string,
 		operationId: string,
@@ -208,7 +204,11 @@ function verificationObservation(value: JsonRecord, label: string): RuntimeVerif
 		label,
 	);
 	const status = stringField(value, "status");
-	if (!(["passed", "test_failed", "command_invalid", "environment_failure", "timed_out"] as const).includes(status as RuntimeVerificationStatus))
+	if (
+		!(["passed", "test_failed", "command_invalid", "environment_failure", "timed_out"] as const).includes(
+			status as RuntimeVerificationStatus,
+		)
+	)
 		throw new Error("Controller verification status is invalid");
 	const exitCode = value.exit_code;
 	if (exitCode !== null && (typeof exitCode !== "number" || !Number.isSafeInteger(exitCode)))
@@ -338,11 +338,13 @@ export class HttpRuntimeController implements RuntimeController {
 			{ lease_id: leaseId },
 		);
 		this.verifyWriteResponse(body, "runtime_verification_catalog", "ready");
-		if (stringField(body, "lease_id", IDENTIFIER) !== leaseId) throw new Error("Controller verification catalog lease drifted");
+		if (stringField(body, "lease_id", IDENTIFIER) !== leaseId)
+			throw new Error("Controller verification catalog lease drifted");
 		const catalog = record(body.catalog, "Verification catalog");
 		exactKeys(catalog, ["catalog_id", "source_sha256", "entries"], "Verification catalog");
 		const entriesValue = catalog.entries;
-		if (!Array.isArray(entriesValue) || entriesValue.length > 16) throw new Error("Controller verification catalog entries are invalid");
+		if (!Array.isArray(entriesValue) || entriesValue.length > 16)
+			throw new Error("Controller verification catalog entries are invalid");
 		const entries = entriesValue.map((value) => {
 			const entry = record(value, "Verification catalog entry");
 			exactKeys(entry, ["candidate_id", "description"], "Verification catalog entry");
@@ -379,7 +381,8 @@ export class HttpRuntimeController implements RuntimeController {
 			{ lease_id: leaseId, catalog_id: catalogId, candidate_id: candidateId },
 		);
 		this.verifyWriteResponse(body, "runtime_verification_result", "completed");
-		if (stringField(body, "lease_id", IDENTIFIER) !== leaseId) throw new Error("Controller verification result lease drifted");
+		if (stringField(body, "lease_id", IDENTIFIER) !== leaseId)
+			throw new Error("Controller verification result lease drifted");
 		const result = record(body.result, "Verification result");
 		exactKeys(
 			result,
@@ -399,7 +402,10 @@ export class HttpRuntimeController implements RuntimeController {
 			],
 			"Verification result",
 		);
-		if (stringField(result, "catalog_id", IDENTIFIER) !== catalogId || stringField(result, "candidate_id", IDENTIFIER) !== candidateId)
+		if (
+			stringField(result, "catalog_id", IDENTIFIER) !== catalogId ||
+			stringField(result, "candidate_id", IDENTIFIER) !== candidateId
+		)
 			throw new Error("Controller verification result identity drifted");
 		const candidate = verificationObservation(
 			{

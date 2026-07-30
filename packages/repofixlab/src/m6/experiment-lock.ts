@@ -1,14 +1,11 @@
 import { createHash } from "node:crypto";
-import { stableStringify } from "../contracts/canonical-json.ts";
-import { type ExperimentPlan } from "../contracts/experiment-plan.ts";
-import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
-import { createBatchRunSpecs, type BatchRunAssignment } from "../runner/batch-runner.ts";
+import { stableStringify } from "../contracts/canonical-json.ts";
+import type { ExperimentPlan } from "../contracts/experiment-plan.ts";
+import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
+import { type BatchRunAssignment, createBatchRunSpecs } from "../runner/batch-runner.ts";
 import type { BatchRunSpec } from "../runner/batch-state.ts";
-import {
-	type M6EvaluationCohorts,
-	verifyM6EvaluationCohorts,
-} from "./cohorts.ts";
+import { type M6EvaluationCohorts, verifyM6EvaluationCohorts } from "./cohorts.ts";
 
 export const M6_PROTOCOL_REVISION = "repofixlab-protocol-1.3" as const;
 export const M6_EXECUTION_ORDER_SEED = "repofixlab-m6-interleaved-order-v1" as const;
@@ -114,7 +111,10 @@ function isImageId(value: unknown): value is string {
 	return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
 }
 
-function isCanonicalReferences(value: unknown, expectedInstances: readonly string[]): value is readonly M6TaskEnvironmentLockReference[] {
+function isCanonicalReferences(
+	value: unknown,
+	expectedInstances: readonly string[],
+): value is readonly M6TaskEnvironmentLockReference[] {
 	return (
 		Array.isArray(value) &&
 		value.length === expectedInstances.length &&
@@ -125,10 +125,18 @@ function isCanonicalReferences(value: unknown, expectedInstances: readonly strin
 				reference !== null &&
 				!Array.isArray(reference) &&
 				JSON.stringify(Object.keys(reference as object).sort()) ===
-					JSON.stringify(["evaluator_image_id", "file_sha256", "instance_id", "lock_id", "seal_sha256", "worker_image_id"]) &&
+					JSON.stringify([
+						"evaluator_image_id",
+						"file_sha256",
+						"instance_id",
+						"lock_id",
+						"seal_sha256",
+						"worker_image_id",
+					]) &&
 				isInstanceId((reference as M6TaskEnvironmentLockReference).instance_id) &&
 				(reference as M6TaskEnvironmentLockReference).instance_id === expectedInstances[index] &&
-				(previous === undefined || previous.instance_id < (reference as M6TaskEnvironmentLockReference).instance_id) &&
+				(previous === undefined ||
+					previous.instance_id < (reference as M6TaskEnvironmentLockReference).instance_id) &&
 				isIdentifier((reference as M6TaskEnvironmentLockReference).lock_id) &&
 				isSha256((reference as M6TaskEnvironmentLockReference).seal_sha256) &&
 				isSha256((reference as M6TaskEnvironmentLockReference).file_sha256) &&
@@ -161,13 +169,11 @@ function cohortAssignments(plan: ExperimentPlan, cohorts: M6EvaluationCohorts): 
 }
 
 function orderedRunSpecs(specs: readonly BatchRunSpec[]): readonly BatchRunSpec[] {
-	return specs
-		.slice()
-		.sort((left, right) => {
-			const leftScore = canonicalHash({ seed: M6_EXECUTION_ORDER_SEED, run_id: left.run_id });
-			const rightScore = canonicalHash({ seed: M6_EXECUTION_ORDER_SEED, run_id: right.run_id });
-			return leftScore.localeCompare(rightScore) || left.run_id.localeCompare(right.run_id);
-		});
+	return specs.slice().sort((left, right) => {
+		const leftScore = canonicalHash({ seed: M6_EXECUTION_ORDER_SEED, run_id: left.run_id });
+		const rightScore = canonicalHash({ seed: M6_EXECUTION_ORDER_SEED, run_id: right.run_id });
+		return leftScore.localeCompare(rightScore) || left.run_id.localeCompare(right.run_id);
+	});
 }
 
 function hasRegisteredFormalRunCounts(runs: readonly BatchRunSpec[]): boolean {
@@ -220,13 +226,19 @@ function isBatchRunSpec(value: unknown): value is BatchRunSpec {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const spec = value as BatchRunSpec;
 	return (
-		JSON.stringify(Object.keys(spec).sort()) === JSON.stringify(["config_id", "group_id", "instance_id", "replicate", "run_id"]) &&
+		JSON.stringify(Object.keys(spec).sort()) ===
+			JSON.stringify(["config_id", "group_id", "instance_id", "replicate", "run_id"]) &&
 		isIdentifier(spec.run_id) &&
 		isIdentifier(spec.group_id) &&
 		isInstanceId(spec.instance_id) &&
-		(["pi-general", "repofix-full", "repofix-no-localize", "repofix-no-verify-feedback"] as readonly RepoFixConfigId[]).includes(
-			spec.config_id,
-		) &&
+		(
+			[
+				"pi-general",
+				"repofix-full",
+				"repofix-no-localize",
+				"repofix-no-verify-feedback",
+			] as readonly RepoFixConfigId[]
+		).includes(spec.config_id) &&
 		Number.isSafeInteger(spec.replicate) &&
 		spec.replicate >= 1
 	);
@@ -234,7 +246,8 @@ function isBatchRunSpec(value: unknown): value is BatchRunSpec {
 
 export function createM6ExperimentLock(input: M6ExperimentLockInput): M6ExperimentLock {
 	const cohorts = verifyM6EvaluationCohorts(input.cohorts);
-	if (input.plan.task_selection.status !== "frozen") throw new Error("M6 experiment lock requires frozen task selection");
+	if (input.plan.task_selection.status !== "frozen")
+		throw new Error("M6 experiment lock requires frozen task selection");
 	const expectedInstances = [...input.plan.task_selection.instance_ids].sort();
 	if (
 		!isSha256(input.code_revision_sha256) ||
@@ -338,8 +351,13 @@ export function verifyM6ExperimentLock(value: unknown): M6ExperimentLock {
 		!isIdentifier(typed.official_image_source_lock.lock_id) ||
 		!isSha256(typed.official_image_source_lock.seal_sha256) ||
 		typed.task_environment_locks.length !== 26 ||
-		!isCanonicalReferences(typed.task_environment_locks, typed.task_environment_locks.map((item) => item.instance_id).sort()) ||
-		!typed.logical_runs.every((run) => typed.task_environment_locks.some((lockReference) => lockReference.instance_id === run.instance_id)) ||
+		!isCanonicalReferences(
+			typed.task_environment_locks,
+			typed.task_environment_locks.map((item) => item.instance_id).sort(),
+		) ||
+		!typed.logical_runs.every((run) =>
+			typed.task_environment_locks.some((lockReference) => lockReference.instance_id === run.instance_id),
+		) ||
 		stableStringify(orderedRunSpecs(typed.logical_runs)) !== stableStringify(typed.logical_runs)
 	) {
 		throw new Error("M6 experiment lock bindings are malformed");

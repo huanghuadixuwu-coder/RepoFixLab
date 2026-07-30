@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, utimes } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { stableStringify } from "../contracts/canonical-json.ts";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
+import { stableStringify } from "../contracts/canonical-json.ts";
 
 export const BATCH_RUN_STATUSES = [
 	"queued",
@@ -84,7 +84,8 @@ function isBatchRunStatus(value: unknown): value is BatchRunStatus {
 }
 
 function verifySpec(value: unknown): BatchRunSpec {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Batch run spec is invalid");
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new Error("Batch run spec is invalid");
 	const spec = value as Partial<BatchRunSpec>;
 	const replicate = spec.replicate;
 	if (
@@ -109,7 +110,8 @@ function createEvent(input: Omit<BatchStateEvent, "event_sha256">): BatchStateEv
 }
 
 function verifyEvent(value: unknown): BatchStateEvent {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Batch state event is invalid");
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		throw new Error("Batch state event is invalid");
 	const event = value as Partial<BatchStateEvent>;
 	if (
 		event.schema_version !== "v1" ||
@@ -143,13 +145,21 @@ function stateFromEvents(events: readonly BatchStateEvent[]): Map<string, BatchR
 				throw new Error("Batch run registration is missing immutable spec evidence");
 			}
 			const spec = verifySpec(event.spec);
-			if (spec.run_id !== event.run_id || spec.replicate < 1) throw new Error("Batch run registration identity drifted");
-			runs.set(spec.run_id, { ...spec, status: "queued", attempt_id: null, terminal_reason: null, result_sha256: null });
+			if (spec.run_id !== event.run_id || spec.replicate < 1)
+				throw new Error("Batch run registration identity drifted");
+			runs.set(spec.run_id, {
+				...spec,
+				status: "queued",
+				attempt_id: null,
+				terminal_reason: null,
+				result_sha256: null,
+			});
 			continue;
 		}
 		if (event.spec !== null) throw new Error("Batch transition must not alter its immutable spec");
 		const existing = runs.get(event.run_id);
-		if (existing === undefined || event.from_status !== existing.status) throw new Error("Batch run transition predecessor drifted");
+		if (existing === undefined || event.from_status !== existing.status)
+			throw new Error("Batch run transition predecessor drifted");
 		assertTransition(existing.status, event.to_status);
 		runs.set(event.run_id, {
 			...existing,
@@ -246,7 +256,13 @@ export class BatchStateStore {
 			if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return "";
 			throw error;
 		});
-		const events = raw.trim().length === 0 ? [] : raw.trim().split("\n").map((line) => verifyEvent(JSON.parse(line)));
+		const events =
+			raw.trim().length === 0
+				? []
+				: raw
+						.trim()
+						.split("\n")
+						.map((line) => verifyEvent(JSON.parse(line)));
 		const store = new BatchStateStore(root, events);
 		await store.writeSnapshot();
 		return store;
@@ -365,12 +381,7 @@ export interface AttemptRecoveryDecision {
  */
 export function evaluateAttemptRecovery(checkpoint: AttemptRecoveryCheckpoint): AttemptRecoveryDecision {
 	const status: unknown = checkpoint.status;
-	if (
-		!isBatchRunStatus(status) ||
-		status === "queued" ||
-		status === "completed" ||
-		status === "failed"
-	) {
+	if (!isBatchRunStatus(status) || status === "queued" || status === "completed" || status === "failed") {
 		return { action: "abort_and_create_new_attempt", reason: "checkpoint_status_invalid" };
 	}
 	try {

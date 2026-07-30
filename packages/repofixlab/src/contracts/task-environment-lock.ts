@@ -396,7 +396,9 @@ function buildLock(evidence: VerifiedTaskEnvironmentEvidence, createdAt: string)
 		throw new Error("Task environment lock created_at must be a valid timestamp");
 	}
 	const candidate = evidence.candidate;
-	const officialImage = evidence.officialImageSourceLock.images.find((image) => image.image_key === candidate.instance_id);
+	const officialImage = evidence.officialImageSourceLock.images.find(
+		(image) => image.image_key === candidate.instance_id,
+	);
 	if (officialImage === undefined) {
 		throw new Error("Official image source lock is missing the candidate task image");
 	}
