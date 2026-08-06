@@ -1,6 +1,15 @@
 /**
- * Agent loop that works with AgentMessage throughout.
- * Transforms to Message[] only at the LLM call boundary.
+ * Low-level Pi model, tool, and multi-turn execution loop.
+ *
+ * This module:
+ * - Streams one assistant response for each model turn
+ * - Validates and executes tool calls in deterministic batch order
+ * - Invokes before/after-tool hooks around actual tool execution
+ * - Invokes the stop hook after the completed turn and tool results
+ * - Emits lifecycle events while retaining AgentMessage session history
+ *
+ * Policy is supplied by callers through `AgentLoopConfig`; this loop provides
+ * execution mechanics and does not contain RepoFix stage semantics.
  */
 
 import {
@@ -92,6 +101,7 @@ export function agentLoopContinue(
 	return stream;
 }
 
+/** Execute a new prompt batch and append all generated messages to the run result. */
 export async function runAgentLoop(
 	prompts: AgentMessage[],
 	context: AgentContext,
@@ -117,6 +127,7 @@ export async function runAgentLoop(
 	return newMessages;
 }
 
+/** Continue an existing transcript without injecting a new initial prompt. */
 export async function runAgentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
@@ -142,6 +153,7 @@ export async function runAgentLoopContinue(
 	return newMessages;
 }
 
+/** Adapt lifecycle events into the public stream that ends on `agent_end`. */
 function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	return new EventStream<AgentEvent, AgentMessage[]>(
 		(event: AgentEvent) => event.type === "agent_end",
@@ -150,7 +162,10 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 }
 
 /**
- * Main loop logic shared by agentLoop and agentLoopContinue.
+ * Run model turns, tool batches, steering, and follow-ups until the loop has no
+ * more work or `shouldStopAfterTurn` requests a clean stop. The stop hook runs
+ * only after tool results and `turn_end`, so it never cancels an in-flight
+ * Provider request or partially executed tool batch.
  */
 async function runLoop(
 	initialContext: AgentContext,
@@ -269,8 +284,8 @@ async function runLoop(
 }
 
 /**
- * Stream an assistant response from the LLM.
- * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ * Transform the current Agent transcript at the model boundary, stream one
+ * assistant response, and append its finalized message to context.
  */
 async function streamAssistantResponse(
 	context: AgentContext,
@@ -367,9 +382,7 @@ async function streamAssistantResponse(
 	return finalMessage;
 }
 
-/**
- * Execute tool calls from an assistant message.
- */
+/** Select sequential or parallel execution without changing assistant call order. */
 async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -392,6 +405,7 @@ type ExecutedToolCallBatch = {
 	terminate: boolean;
 };
 
+/** Execute and finalize tool calls one at a time, preserving message order. */
 async function executeToolCallsSequential(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -448,6 +462,7 @@ async function executeToolCallsSequential(
 	};
 }
 
+/** Prepare calls in order, execute eligible calls concurrently, and emit ordered results. */
 async function executeToolCallsParallel(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -541,10 +556,12 @@ type FinalizedToolCallOutcome = {
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
+/** End the native tool loop only when every finalized call requests termination. */
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }
 
+/** Apply an optional argument normalizer before schema validation and policy hooks. */
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
 	if (!tool.prepareArguments) {
 		return toolCall;
@@ -559,6 +576,11 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
+/**
+ * Resolve a tool, normalize and validate arguments, then invoke
+ * `beforeToolCall`. Missing, invalid, aborted, or policy-blocked calls become
+ * immediate error results and never reach the tool implementation.
+ */
 async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -625,6 +647,7 @@ async function prepareToolCall(
 	}
 }
 
+/** Execute one validated tool while serializing accepted progress updates. */
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	signal: AbortSignal | undefined,
@@ -668,6 +691,10 @@ async function executePreparedToolCall(
 	}
 }
 
+/**
+ * Invoke `afterToolCall` for an executed tool and apply any content, detail,
+ * error, or termination override. Hook failures are converted to tool errors.
+ */
 async function finalizeExecutedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -713,6 +740,7 @@ async function finalizeExecutedToolCall(
 	};
 }
 
+/** Create the normalized text result used for rejected or failed tool calls. */
 function createErrorToolResult(message: string): AgentToolResult<any> {
 	return {
 		content: [{ type: "text", text: message }],
@@ -720,6 +748,7 @@ function createErrorToolResult(message: string): AgentToolResult<any> {
 	};
 }
 
+/** Emit the final execution result for lifecycle observers. */
 async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: AgentEventSink): Promise<void> {
 	await emit({
 		type: "tool_execution_end",
@@ -730,6 +759,7 @@ async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: A
 	});
 }
 
+/** Convert a finalized tool outcome into the session-history message shape. */
 function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResultMessage {
 	return {
 		role: "toolResult",
@@ -744,6 +774,7 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 	};
 }
 
+/** Emit one tool-result message through the normal message lifecycle. */
 async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink): Promise<void> {
 	await emit({ type: "message_start", message: toolResultMessage });
 	await emit({ type: "message_end", message: toolResultMessage });

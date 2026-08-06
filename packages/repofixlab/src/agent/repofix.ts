@@ -1,6 +1,26 @@
+/**
+ * RepoFix Agent session and seven-stage workflow orchestrator.
+ *
+ * This module:
+ * - Creates an isolated Pi session with only RepoFix repository tools
+ * - Prompts each configured stage in strict order
+ * - Enforces stage-specific tools and structured `stage_complete` artifacts
+ * - Runs controlled verification checkpoints between implementation refinements
+ * - Returns completion, patch, and verification identities to the outer runner
+ *
+ * It does not perform official evaluation or allow the model to declare
+ * `resolved`; those decisions remain outside the Agent session.
+ */
+
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
+import type {
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	SimpleStreamOptions,
+} from "@earendil-works/pi-ai/compat";
 import {
 	type AuthStorage,
 	type CreateAgentSessionOptions,
@@ -11,6 +31,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { RepoToolTransport } from "../controller/client.ts";
+import type { RepoFixMemoryRuntime } from "../memory/assembler.ts";
 import { createRepoTools, MODEL_VISIBLE_STAGE_OUTPUT_LIMIT, RepoToolOutputBudget } from "../sandbox/repo-tools.ts";
 import {
 	assertRepoFixWorkflowConfig,
@@ -29,6 +50,7 @@ import {
 	stageCompletionWireSchema,
 } from "./repofix-fsm.ts";
 
+/** Dependencies and isolation controls required to create one RepoFix Agent session. */
 export interface RepoFixSessionOptions {
 	readonly leaseId: string;
 	readonly attemptDirectory: string;
@@ -41,7 +63,15 @@ export interface RepoFixSessionOptions {
 	readonly thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
 	/** Some providers reject tool_choice while thinking is enabled. */
 	readonly forceStageCompletionToolChoice?: boolean;
+	readonly memory?: RepoFixMemoryRuntime;
 }
+
+/** Live session objects and workflow controls owned by one RepoFix attempt. */
+export type RepoFixProviderStream = (
+	model: Model<Api>,
+	context: Context,
+	streamOptions?: SimpleStreamOptions,
+) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
 export interface RepoFixSessionResult {
 	readonly session: Awaited<ReturnType<typeof createAgentSession>>["session"];
@@ -50,8 +80,12 @@ export interface RepoFixSessionResult {
 	readonly stageMachine: RepoFixStageMachine;
 	readonly stageCompletionControl: RepoFixStageCompletionControl;
 	readonly repoToolOutputBudget: RepoToolOutputBudget;
+	/** Direct Provider stream captured before RepoFix stage-control wrapping. */
+	readonly providerStream: RepoFixProviderStream;
+	readonly memory?: RepoFixMemoryRuntime;
 }
 
+/** Sanitized Controller-owned verification result that may be shown to refinement stages. */
 export interface ControlledVerificationFeedback {
 	readonly catalog_id: string;
 	readonly candidate_id: string;
@@ -66,11 +100,13 @@ export interface ControlledVerificationFeedback {
 	readonly output: string;
 }
 
+/** Frozen verification candidates the PLAN stage may select by ID. */
 export interface ControlledVerificationCatalog {
 	readonly catalog_id: string;
 	readonly candidates: readonly { readonly candidate_id: string; readonly description: string }[];
 }
 
+/** Bounded completion-only recovery event for an unfinished stage. */
 export interface StageRecovery {
 	readonly stage: RepoFixStage;
 	readonly trigger:
@@ -101,6 +137,7 @@ export type RepoFixTrajectoryEvent =
 			readonly schema_version: "v1";
 			readonly event_type: "provider_request";
 			readonly stage: RepoFixStage;
+			readonly request_id: string | null;
 			readonly stage_model_turn: number;
 			readonly completion_only: boolean;
 			readonly allowed_tools: readonly string[];
@@ -136,22 +173,33 @@ export type RepoFixTrajectoryEvent =
 			readonly event_type: "stage_completed";
 			readonly stage: RepoFixStage;
 			readonly completion_sha256: string;
+			readonly stage_wall_ms: number;
 	  };
 
 interface RepoFixStageCompletionControl {
+	/** Begin accounting and tool control for one active stage. */
 	start(
 		stage: RepoFixStage,
 		onStageRecovery: RepoFixWorkflowCallbacks["onStageRecovery"],
 		onTrajectoryEvent: RepoFixWorkflowCallbacks["onTrajectoryEvent"],
 	): void;
+	/** Enter completion-only mode after a supported recovery trigger. */
 	forceCompletion(stage: RepoFixStage, trigger: StageRecovery["trigger"]): Promise<void>;
+	/** Record a repository-tool request and emit checkpoint evidence when reached. */
 	registerRepositoryToolCall(stage: RepoFixStage, toolName: string): Promise<void>;
+	/** Mark that a `stage_complete` call failed strict artifact validation. */
 	recordRejectedCompletion(stage: RepoFixStage): void;
+	/** Consume the active stage's rejected-completion marker once. */
 	consumeRejectedCompletion(stage: RepoFixStage): boolean;
+	/** Consume the request to stop after the current model turn once. */
 	consumeStopAfterTurn(): boolean;
+	/** Bind the next Provider request to token-ledger and trajectory evidence. */
+	setProviderRequestId(requestId: string): void;
+	/** Release completion control after the active stage finishes or aborts. */
 	finish(stage: RepoFixStage): void;
 }
 
+/** Outer-runner callbacks for snapshots, controlled verification, and forensic evidence. */
 export interface RepoFixWorkflowCallbacks {
 	readonly verificationCatalog: ControlledVerificationCatalog;
 	readonly capturePatch: (checkpoint: "P0" | "V1" | "V2" | "P1") => Promise<{ readonly patch_sha256: string }>;
@@ -164,6 +212,7 @@ export interface RepoFixWorkflowCallbacks {
 	readonly onTrajectoryEvent?: (event: RepoFixTrajectoryEvent) => Promise<void>;
 }
 
+/** Stable identities and stage artifacts returned by one complete RepoFix workflow. */
 export interface RepoFixWorkflowResult {
 	readonly config_id: RepoFixConfigId;
 	readonly completions: readonly StageCompletion[];
@@ -175,10 +224,12 @@ export interface RepoFixWorkflowResult {
 	readonly verification_feedback_delivered: boolean;
 }
 
+/** Checkpoint thresholds that record evidence without imposing hard stage limits. */
 const STAGE_MODEL_TURN_CHECKPOINT = 8;
 const STAGE_REPOSITORY_TOOL_CALL_CHECKPOINT = 8;
 const MAX_STAGE_COMPLETION_ONLY_ATTEMPTS = 2;
 
+/** Provider stream options used only when recovery forces the completion tool. */
 type CompletionOnlyStreamOptions = SimpleStreamOptions & {
 	readonly toolChoice?: {
 		readonly type: "function";
@@ -186,6 +237,7 @@ type CompletionOnlyStreamOptions = SimpleStreamOptions & {
 	};
 };
 
+/** Verify the session exposes each fixed RepoFix tool exactly once. */
 function hasExactRepoFixToolSet(actualNames: string[]): boolean {
 	return (
 		actualNames.length === REPOFIX_TOOL_NAMES.length &&
@@ -193,6 +245,7 @@ function hasExactRepoFixToolSet(actualNames: string[]): boolean {
 	);
 }
 
+/** Build the invariant system prompt shared by all RepoFix stages. */
 function systemPrompt(config: RepoFixWorkflowConfig): string {
 	return [
 		"You are RepoFix Agent. Repair the reported defect with the smallest reviewable change.",
@@ -212,6 +265,7 @@ function systemPrompt(config: RepoFixWorkflowConfig): string {
 	].join("\n");
 }
 
+/** Build one stage prompt with its artifact contract and optional verification feedback. */
 function stagePrompt(
 	stage: RepoFixStage,
 	problemStatement: string,
@@ -258,6 +312,7 @@ const MAX_STAGE_HANDOFF_CHARS = 12 * 1_024;
 const MAX_HANDOFF_TEXT_CHARS = 240;
 const MAX_HANDOFF_ARRAY_ITEMS = 3;
 
+/** Bounded prior-stage artifact summary carried into the next stage. */
 type HandoffEntry = {
 	readonly stage: RepoFixStage;
 	readonly artifact_sha256: string;
@@ -265,10 +320,12 @@ type HandoffEntry = {
 	readonly truncated: boolean;
 };
 
+/** Truncate one handoff string without exceeding its field budget. */
 function truncateHandoffText(value: string): string {
 	return value.length <= MAX_HANDOFF_TEXT_CHARS ? value : `${value.slice(0, MAX_HANDOFF_TEXT_CHARS - 1)}…`;
 }
 
+/** Recursively summarize artifact fields for a bounded inter-stage handoff. */
 function summarizeHandoffValue(value: unknown): unknown {
 	if (typeof value === "string") return truncateHandoffText(value);
 	if (Array.isArray(value)) {
@@ -286,6 +343,7 @@ function summarizeHandoffValue(value: unknown): unknown {
 	);
 }
 
+/** Serialize prior validated artifacts into a bounded, hash-bound stage handoff. */
 function stageHandoff(machine: RepoFixStageMachine): string | undefined {
 	const entries: HandoffEntry[] = machine.completedStages.map((stage) => {
 		const completion = machine.assertComplete(stage);
@@ -320,10 +378,12 @@ function stageHandoff(machine: RepoFixStageMachine): string | undefined {
 	return `Sealed prior-stage artifacts (use these summaries; do not repeat prior repository exploration):\n${serialize()}`;
 }
 
+/** Compute a UTF-8 SHA-256 identity for prompts, handoffs, and artifacts. */
 function sha256(value: string): string {
 	return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+/** Emit forensic trajectory evidence without allowing observer failure to alter execution. */
 async function emitTrajectory(
 	callback: RepoFixWorkflowCallbacks["onTrajectoryEvent"] | undefined,
 	event: RepoFixTrajectoryEvent,
@@ -335,6 +395,7 @@ async function emitTrajectory(
 	}
 }
 
+/** Count sealed prior-stage and current-stage repository tool results in model context. */
 function countRepositoryToolResults(
 	context: Context,
 	historyMessageCount: number,
@@ -352,6 +413,7 @@ function countRepositoryToolResults(
 	return { sealed, currentStage };
 }
 
+/** Format bounded Controller verification feedback for a refinement prompt. */
 function verificationPrompt(config: RepoFixWorkflowConfig, feedback: ControlledVerificationFeedback): string {
 	if (!config.deliver_verification_feedback) {
 		return "A controller-owned verification step completed. This configuration intentionally withholds its output; do not infer that it passed or failed.";
@@ -379,6 +441,7 @@ function verificationPrompt(config: RepoFixWorkflowConfig, feedback: ControlledV
 		.join("\n");
 }
 
+/** Build the completion-only prompt for one bounded stage recovery attempt. */
 function stageRecoveryPrompt(stage: RepoFixStage, trigger: StageRecovery["trigger"], attempt: number): string {
 	const cause =
 		trigger === "provider_output_length"
@@ -398,6 +461,7 @@ function stageRecoveryPrompt(stage: RepoFixStage, trigger: StageRecovery["trigge
 	].join("\n\n");
 }
 
+/** Return the most recent assistant stop reason from the Pi session. */
 function lastAssistantStopReason(result: RepoFixSessionResult): string | null {
 	for (let index = result.session.messages.length - 1; index >= 0; index -= 1) {
 		const message = result.session.messages[index];
@@ -406,6 +470,7 @@ function lastAssistantStopReason(result: RepoFixSessionResult): string | null {
 	return null;
 }
 
+/** Optionally force provider tool choice to the sole completion tool. */
 function completionOnlyStreamOptions(
 	streamOptions: SimpleStreamOptions | undefined,
 	forceToolChoice: boolean,
@@ -417,6 +482,7 @@ function completionOnlyStreamOptions(
 	};
 }
 
+/** Seal prior repository output and narrow tools for the current provider request. */
 function stageCompletionContext(
 	context: Context,
 	stage: RepoFixStage,
@@ -450,10 +516,12 @@ function stageCompletionContext(
 			};
 }
 
+/** Wrap the Pi stream with per-stage accounting and completion-only recovery control. */
 function createStageCompletionControl(
 	session: RepoFixSessionResult["session"],
 	stageMachine: RepoFixStageMachine,
 	forceToolChoice: boolean,
+	memory: RepoFixMemoryRuntime | undefined,
 ): RepoFixStageCompletionControl {
 	type ActiveStage = {
 		readonly stage: RepoFixStage;
@@ -467,6 +535,7 @@ function createStageCompletionControl(
 		stop_after_current_turn: boolean;
 		completion_rejected: boolean;
 		history_message_count: number;
+		request_id: string | null;
 	};
 	const originalStream = session.agent.streamFn;
 	let active: ActiveStage | null = null;
@@ -514,6 +583,7 @@ function createStageCompletionControl(
 				schema_version: "v1",
 				event_type: "provider_request",
 				stage: active.stage,
+				request_id: active.request_id,
 				stage_model_turn: active.model_turns,
 				completion_only: active.completion_forced,
 				allowed_tools: [...stageMachine.allowedTools()],
@@ -544,7 +614,8 @@ function createStageCompletionControl(
 				completion_forced: false,
 				stop_after_current_turn: false,
 				completion_rejected: false,
-				history_message_count: session.messages.length,
+				history_message_count: memory === undefined ? session.messages.length : 0,
+				request_id: null,
 			};
 		},
 		async forceCompletion(stage, trigger): Promise<void> {
@@ -590,6 +661,10 @@ function createStageCompletionControl(
 			active.stop_after_current_turn = false;
 			return true;
 		},
+		setProviderRequestId(requestId): void {
+			if (active === null) throw new Error("RepoFix provider request identity requires an active stage");
+			active.request_id = requestId;
+		},
 		finish(stage): void {
 			if (active?.stage !== stage) throw new Error(`RepoFix stage completion control cannot finish ${stage}`);
 			active = null;
@@ -597,6 +672,7 @@ function createStageCompletionControl(
 	};
 }
 
+/** Install hooks that enforce the active stage's tools, budgets, and stop conditions. */
 function installStageHooks(result: RepoFixSessionResult): void {
 	const originalBeforeToolCall = result.session.agent.beforeToolCall;
 	const originalAfterToolCall = result.session.agent.afterToolCall;
@@ -625,6 +701,14 @@ function installStageHooks(result: RepoFixSessionResult): void {
 	};
 	result.session.agent.afterToolCall = async (context, signal) => {
 		const upstream = await originalAfterToolCall?.(context, signal);
+		if (context.toolCall.name.startsWith("repo_") && result.stageMachine.activeStage !== null) {
+			await result.memory?.appendToolEvidence({
+				tool_call_id: context.toolCall.id,
+				tool_name: context.toolCall.name,
+				normalized_input: context.args,
+				controller_result: context.result.details,
+			});
+		}
 		if (
 			context.toolCall.name.startsWith("repo_") &&
 			result.stageMachine.activeStage !== null &&
@@ -647,6 +731,7 @@ function installStageHooks(result: RepoFixSessionResult): void {
 	};
 }
 
+/** Create an isolated Pi session exposing exactly the fixed RepoFix tool registry. */
 export async function createRepoFixSession(options: RepoFixSessionOptions): Promise<RepoFixSessionResult> {
 	assertRepoFixWorkflowConfig(options.config);
 	if (options.config.workflow_kind !== "repofix") {
@@ -697,10 +782,12 @@ export async function createRepoFixSession(options: RepoFixSessionOptions): Prom
 		throw new Error(`RepoFix tool registry mismatch: received ${actualToolNames.join(",")}`);
 	}
 	session.setActiveToolsByName([...REPOFIX_TOOL_NAMES]);
+	const providerStream = session.agent.streamFn;
 	const stageCompletionControl = createStageCompletionControl(
 		session,
 		stageMachine,
 		options.forceStageCompletionToolChoice ?? true,
+		options.memory,
 	);
 	const result: RepoFixSessionResult = {
 		session,
@@ -709,11 +796,14 @@ export async function createRepoFixSession(options: RepoFixSessionOptions): Prom
 		stageMachine,
 		stageCompletionControl,
 		repoToolOutputBudget,
+		providerStream,
+		memory: options.memory,
 	};
 	installStageHooks(result);
 	return result;
 }
 
+/** Execute configured stages, snapshots, and controlled verification in strict order. */
 export async function runRepoFixWorkflow(
 	result: RepoFixSessionResult,
 	problemStatement: string,
@@ -726,9 +816,11 @@ export async function runRepoFixWorkflow(
 	let p1PatchSha256: string | null = null;
 	const verificationFeedback: ControlledVerificationFeedback[] = [];
 	let planCompletion: Extract<StageCompletion, { stage: "PLAN" }> | null = null;
-	for (const stage of config.stages) {
+	for (const [stageIndex, stage] of config.stages.entries()) {
+		const stageStarted = performance.now();
 		result.stageMachine.start(stage);
 		result.repoToolOutputBudget.startStage(stage);
+		result.memory?.startStage(stage, stageIndex + 1, result.session.messages.length);
 		const feedback =
 			stage === "REFINE_1" && verificationFeedback[0] !== undefined
 				? verificationPrompt(config, verificationFeedback[0])
@@ -741,7 +833,7 @@ export async function runRepoFixWorkflow(
 		let completion: StageCompletion | null = null;
 		let rejectedCompletion = false;
 		try {
-			const handoff = stageHandoff(result.stageMachine);
+			const handoff = result.memory === undefined ? stageHandoff(result.stageMachine) : undefined;
 			const prompt = [
 				stagePrompt(
 					stage,
@@ -794,11 +886,13 @@ export async function runRepoFixWorkflow(
 			result.stageCompletionControl.finish(stage);
 		}
 		if (completion === null) throw new Error(`RepoFix stage ${stage} did not complete`);
+		await result.memory?.completeStage(result.session.messages, completion);
 		await emitTrajectory(callbacks.onTrajectoryEvent, {
 			schema_version: "v1",
 			event_type: "stage_completed",
 			stage,
 			completion_sha256: sha256(JSON.stringify(completion)),
+			stage_wall_ms: Math.max(0, Math.ceil(performance.now() - stageStarted)),
 		});
 		await callbacks.onStageComplete?.(completion);
 		if (completion.stage === "PLAN") planCompletion = completion;

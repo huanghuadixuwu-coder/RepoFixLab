@@ -7,6 +7,7 @@ import type { RunResult } from "../contracts/run-contracts.ts";
 import {
 	createExperimentMetrics,
 	type ExperimentMetrics,
+	type MemoryPolicyComparison,
 	type RunMetricEvidence,
 } from "../metrics/experiment-metrics.ts";
 import type { BatchRunSpec } from "../runner/batch-state.ts";
@@ -130,6 +131,34 @@ export function createStaticExperimentReport(aggregate: ExperimentAggregate): st
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>RepoFixLab experiment report</title></head><body><main><h1>RepoFixLab experiment aggregate</h1><p>Expected runs: ${aggregate.expected_run_count}; observed: ${aggregate.observed_run_count}; missing: ${aggregate.missing_run_ids.length}</p><table><thead><tr><th>Configuration</th><th>Resolved</th><th>Rate</th><th>Accounted tokens</th><th>P50 ms</th><th>P90 ms</th><th>Terminal counts</th></tr></thead><tbody>${rows}</tbody></table><h2>Evaluation evidence</h2><p>F2P: ${f2p.passed}/${f2p.total}${f2p.rate === null ? " (evidence unavailable)" : ` (${(f2p.rate * 100).toFixed(1)}%)`}; P2P: ${p2p.passed}/${p2p.total}${p2p.rate === null ? " (evidence unavailable)" : ` (${(p2p.rate * 100).toFixed(1)}%)`}; evaluation evidence: ${aggregate.metrics.tests.evaluation_evidence_run_count}/${aggregate.expected_run_count}.</p><h2>Reliability and safety evidence</h2><p>Failure categories: ${escapeHtml(JSON.stringify(aggregate.metrics.failure_categories))}; complete replicate groups: ${aggregate.metrics.stability.reduce((total, value) => total + value.complete_replicate_group_count, 0)}; unstable replicate groups: ${aggregate.metrics.stability.reduce((total, value) => total + value.unstable_replicate_group_count, 0)}; blocked operations: ${aggregate.metrics.security.blocked_operation_count}; policy violations: ${aggregate.metrics.security.policy_violation_count}; sandbox escape attempts: ${aggregate.metrics.security.sandbox_escape_attempt_count}; security evidence: ${aggregate.metrics.security.evidence_run_count}/${aggregate.expected_run_count}.</p><p>Aggregate SHA-256: <code>${aggregate.aggregate_sha256}</code></p></main></body></html>`;
 }
 
+function comparisonValue(value: number | null): string {
+	return value === null ? "unavailable" : String(value);
+}
+
+/** Render the fixed five-row memory-policy comparison without extrapolation. */
+export function createMemoryPolicyComparisonReport(comparison: MemoryPolicyComparison): string {
+	const rows = comparison.rows
+		.map(
+			(row) =>
+				`| ${row.instance_id} | ${comparisonValue(row.legacy_tokens)} | ${comparisonValue(row.memory_tokens)} | ${comparisonValue(row.token_difference)} | ${row.legacy_time_ms} | ${row.memory_time_ms} | ${row.time_difference_ms} | ${String(row.legacy_resolved)} | ${String(row.memory_resolved)} |`,
+		)
+		.join("\n");
+	const total = comparison.total;
+	return `# RepoFixLab memory-policy comparison
+
+| Task | legacy tokens | memory tokens | token difference | legacy time ms | memory time ms | time difference ms | legacy resolved | memory resolved |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+${rows}
+| Total | ${comparisonValue(total.legacy_tokens)} | ${comparisonValue(total.memory_tokens)} | ${comparisonValue(total.token_difference)} | ${total.legacy_time_ms} | ${total.memory_time_ms} | ${total.time_difference_ms} | ${total.legacy_resolved_count}/5 | ${total.memory_resolved_count}/5 |
+
+- Memory local time: ${total.memory_local_ms} ms
+- Memory L2 bytes: ${total.memory_l2_bytes}
+- Compression triggers: ${total.compression_trigger_count}
+- Scope: five frozen Dev tasks only; no extrapolation to SWE-bench.
+- Comparison SHA-256: \`${comparison.comparison_sha256}\`
+`;
+}
+
 async function writeImmutable(path: string, content: string): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
 	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -164,4 +193,17 @@ export async function publishExperimentReport(
 	await writeImmutable(jsonPath, stableStringify(aggregate));
 	await writeImmutable(htmlPath, createStaticExperimentReport(aggregate));
 	return { aggregate, json_path: jsonPath, html_path: htmlPath };
+}
+
+/** Publish immutable JSON and Markdown for the approved paired memory experiment. */
+export async function publishMemoryPolicyComparisonReport(
+	root: string,
+	comparison: MemoryPolicyComparison,
+): Promise<{ readonly json_path: string; readonly markdown_path: string }> {
+	const reportRoot = resolve(root, "report");
+	const jsonPath = join(reportRoot, `memory-comparison-${comparison.comparison_sha256}.json`);
+	const markdownPath = join(reportRoot, `memory-comparison-${comparison.comparison_sha256}.md`);
+	await writeImmutable(jsonPath, stableStringify(comparison));
+	await writeImmutable(markdownPath, createMemoryPolicyComparisonReport(comparison));
+	return { json_path: jsonPath, markdown_path: markdownPath };
 }

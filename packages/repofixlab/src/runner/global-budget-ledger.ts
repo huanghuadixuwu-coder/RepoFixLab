@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { type FileHandle, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
 
@@ -24,7 +24,7 @@ export class GlobalBudgetWriterLease {
 	static async acquire(ledgerPath: string): Promise<GlobalBudgetWriterLease> {
 		const path = `${resolve(ledgerPath)}.lease`;
 		await mkdir(dirname(path), { recursive: true });
-		let file;
+		let file: FileHandle;
 		try {
 			file = await open(path, "wx", 0o600);
 		} catch (error) {

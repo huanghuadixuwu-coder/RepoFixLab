@@ -1,3 +1,16 @@
+/**
+ * Active role probe for sealed Worker and Evaluator task images.
+ *
+ * This script verifies:
+ * - The runtime role, base commit, and probe hash match trusted inputs.
+ * - `/testbed` is writable without leaving repository changes.
+ * - Docker socket paths are absent.
+ * - Provider credentials and Docker connection variables are absent.
+ *
+ * It reports observations as JSON and exits nonzero when a boundary check
+ * fails; it does not grant trust to code running inside the task image.
+ */
+
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -25,6 +38,7 @@ const probeSha256 = createHash("sha256")
 	.update(readFileSync(fileURLToPath(import.meta.url)))
 	.digest("hex");
 
+/** Read one required environment binding and validate its exact syntax. */
 function requiredEnvironment(name, pattern) {
 	const value = process.env[name];
 	if (typeof value !== "string" || !pattern.test(value)) {
@@ -33,6 +47,7 @@ function requiredEnvironment(name, pattern) {
 	return value;
 }
 
+/** Execute a non-shell Git command against the sealed `/testbed` checkout. */
 function git(...arguments_) {
 	return execFileSync(
 		"git",

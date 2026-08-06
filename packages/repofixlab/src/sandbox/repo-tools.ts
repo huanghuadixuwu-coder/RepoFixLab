@@ -1,3 +1,17 @@
+/**
+ * Model-facing repository tools for RepoFix Agent sessions.
+ *
+ * This module:
+ * - Defines the fixed repository-tool registry exposed through Pi
+ * - Converts each tool call into an identity-bound Controller request
+ * - Validates edit inputs before they cross the trusted RPC boundary
+ * - Bounds model-visible output while retaining full Controller details
+ *
+ * Stage authorization is owned by the RepoFix state machine. These wrappers
+ * only dispatch tools that the active stage has already made visible; the
+ * Controller independently revalidates every request before Worker execution.
+ */
+
 import { createHash } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
@@ -16,29 +30,35 @@ import {
 	type RepoToolResponse,
 } from "./protocol.ts";
 
+/** Maximum characters from one repository result shown to the model. */
 export const MODEL_VISIBLE_TOOL_OUTPUT_LIMIT = 12 * 1_024;
+
+/** Maximum cumulative repository-result characters shown within one stage. */
 export const MODEL_VISIBLE_STAGE_OUTPUT_LIMIT = 48 * 1_024;
 
 const repoEditInputValidator = Compile(RepoEditInputSchema);
 
+/** Observable per-stage accounting for model-visible repository output. */
 export interface RepoToolOutputBudgetSnapshot {
 	readonly stage: string | null;
 	readonly visible_chars: number;
 	readonly truncated_calls: number;
 }
 
-/** Mutable per-session accounting. Raw Controller results remain in details. */
+/** Owns per-session visible-output accounting while preserving raw details. */
 export class RepoToolOutputBudget {
 	private activeStage: string | null = null;
 	private visibleChars = 0;
 	private truncatedCalls = 0;
 
+	/** Reset visible-output accounting when a new RepoFix stage starts. */
 	startStage(stage: string): void {
 		this.activeStage = stage;
 		this.visibleChars = 0;
 		this.truncatedCalls = 0;
 	}
 
+	/** Reserve visible characters up to the remaining fixed stage allowance. */
 	allocate(requestedChars: number): number {
 		const allowance = Math.max(0, Math.min(requestedChars, MODEL_VISIBLE_STAGE_OUTPUT_LIMIT - this.visibleChars));
 		this.visibleChars += allowance;
@@ -46,11 +66,13 @@ export class RepoToolOutputBudget {
 		return allowance;
 	}
 
+	/** Return the current stage, visible-character total, and truncation count. */
 	get snapshot(): RepoToolOutputBudgetSnapshot {
 		return { stage: this.activeStage, visible_chars: this.visibleChars, truncated_calls: this.truncatedCalls };
 	}
 }
 
+/** Reject a transport response whose tool identity differs from the request. */
 function assertExpectedTool(response: RepoToolResponse, expectedTool: RepoToolResponse["tool"]): RepoToolResponse {
 	if (response.tool !== expectedTool) {
 		throw new Error(`Repo tool transport returned ${response.tool} for ${expectedTool}`);
@@ -58,6 +80,7 @@ function assertExpectedTool(response: RepoToolResponse, expectedTool: RepoToolRe
 	return response;
 }
 
+/** Format bounded model-visible execution evidence from a Controller result. */
 function formatToolResult(response: RepoToolResponse, visibleCharacterLimit: number): string {
 	const raw = [
 		`tool: ${response.result.tool}`,
@@ -77,6 +100,7 @@ function formatToolResult(response: RepoToolResponse, visibleCharacterLimit: num
 	return `${raw.slice(0, visibleCharacterLimit - marker.length)}${marker}`;
 }
 
+/** Build Pi tool content while retaining the complete Controller result in details. */
 function toToolResult(response: RepoToolResponse, outputBudget: RepoToolOutputBudget | undefined) {
 	const requested = Math.min(
 		MODEL_VISIBLE_TOOL_OUTPUT_LIMIT,
@@ -89,6 +113,7 @@ function toToolResult(response: RepoToolResponse, outputBudget: RepoToolOutputBu
 	};
 }
 
+/** Enforce the exact create-or-replace shape accepted by `repo_edit`. */
 function normalizeRepoEditInput(input: RepoEditToolWireInput): RepoEditInput {
 	if (!repoEditInputValidator.Check(input)) {
 		throw new Error(
@@ -98,6 +123,7 @@ function normalizeRepoEditInput(input: RepoEditToolWireInput): RepoEditInput {
 	return input;
 }
 
+/** Derive a stable, bounded Controller operation ID from a Pi tool-call ID. */
 export function toolCallOperationId(toolCallId: string): string {
 	if (/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,154}$/.test(toolCallId)) {
 		return `tool:${toolCallId}`;
@@ -105,6 +131,7 @@ export function toolCallOperationId(toolCallId: string): string {
 	return `tool:${createHash("sha256").update(toolCallId).digest("hex")}`;
 }
 
+/** Create the fixed Pi tool wrappers that dispatch through one leased Controller transport. */
 export function createRepoTools(
 	leaseId: string,
 	transport: RepoToolTransport,

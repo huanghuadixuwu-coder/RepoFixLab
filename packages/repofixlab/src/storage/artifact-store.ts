@@ -1,10 +1,24 @@
+/**
+ * Artifact Store for durable, immutable RepoFixLab run evidence.
+ *
+ * This module owns the run output directory and provides:
+ * - Safe relative-path resolution below a single artifact root
+ * - Exclusive creation with byte count, SHA-256, producer, and sensitivity metadata
+ * - Fsynced append-only streams for journals and event logs
+ * - Atomic publication of a completed staging directory
+ */
+
 import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, mkdir, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+/** Component identities allowed to claim authorship of a stored artifact. */
 export type ArtifactProducer = "orchestrator" | "agent" | "controller" | "evaluator";
+
+/** Visibility classification recorded with every stored artifact. */
 export type ArtifactSensitivity = "public" | "internal" | "private";
 
+/** Immutable metadata describing one registered run artifact. */
 export interface StoredArtifact {
 	readonly path: string;
 	readonly bytes: number;
@@ -14,16 +28,19 @@ export interface StoredArtifact {
 	readonly generatedBy: ArtifactProducer;
 }
 
+/** Provenance and media metadata supplied when an artifact is registered. */
 export interface StoreArtifactOptions {
 	readonly mediaType: string;
 	readonly sensitivity: ArtifactSensitivity;
 	readonly generatedBy: ArtifactProducer;
 }
 
+/** Identify the expected missing-path error without hiding other I/O failures. */
 function isMissingPathError(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+/** Reject absolute, empty, Windows-style, NUL-containing, and traversing paths. */
 function assertSafeRelativePath(path: string): void {
 	if (
 		path.length === 0 ||
@@ -36,6 +53,7 @@ function assertSafeRelativePath(path: string): void {
 	}
 }
 
+/** Require a candidate to name a descendant file rather than the root itself. */
 function assertWithin(root: string, candidate: string): void {
 	const relativePath = relative(root, candidate);
 	if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
@@ -43,25 +61,30 @@ function assertWithin(root: string, candidate: string): void {
 	}
 }
 
+/** Convert text to stable UTF-8 bytes while preserving binary content. */
 function contentBytes(content: string | Uint8Array): Uint8Array {
 	return typeof content === "string" ? Buffer.from(content, "utf8") : content;
 }
 
+/** Compute the lowercase SHA-256 identity recorded in artifact metadata. */
 function sha256(content: Uint8Array): string {
 	return createHash("sha256").update(content).digest("hex");
 }
 
+/** Owns exclusive artifact creation and atomic publication for one run directory. */
 export class ArtifactStore {
 	private root: string;
 	private realRoot: string;
 	private readonly artifacts = new Map<string, StoredArtifact>();
 	private openAppendOnlyFiles = 0;
 
+	/** Bind the logical and canonical roots after their safety checks succeed. */
 	private constructor(root: string, realRoot: string) {
 		this.root = root;
 		this.realRoot = realRoot;
 	}
 
+	/** Create a fresh staging root and refuse to reuse existing run evidence. */
 	static async createNew(root: string): Promise<ArtifactStore> {
 		const resolvedRoot = resolve(root);
 		await mkdir(dirname(resolvedRoot), { recursive: true });
@@ -79,7 +102,7 @@ export class ArtifactStore {
 		return new ArtifactStore(resolvedRoot, await realpath(resolvedRoot));
 	}
 
-	/** Opens an interrupted staging directory without altering existing evidence. */
+	/** Open an interrupted staging directory without altering existing evidence. */
 	static async openExisting(root: string): Promise<ArtifactStore> {
 		const resolvedRoot = resolve(root);
 		const rootStats = await lstat(resolvedRoot);
@@ -89,10 +112,12 @@ export class ArtifactStore {
 		return new ArtifactStore(resolvedRoot, await realpath(resolvedRoot));
 	}
 
+	/** Return the current staging or published artifact root. */
 	get rootPath(): string {
 		return this.root;
 	}
 
+	/** Atomically rename a closed staging directory to its final sibling path. */
 	async publishTo(root: string): Promise<void> {
 		if (this.openAppendOnlyFiles !== 0)
 			throw new Error("Artifact store publication requires all append-only files to be closed");
@@ -113,6 +138,7 @@ export class ArtifactStore {
 		this.realRoot = await realpath(publishedRoot);
 	}
 
+	/** Resolve a safe artifact-relative path below the owned root. */
 	resolvePath(path: string): string {
 		assertSafeRelativePath(path);
 		const candidate = resolve(this.root, path);
@@ -120,6 +146,7 @@ export class ArtifactStore {
 		return candidate;
 	}
 
+	/** Durably create and register one immutable artifact without overwriting. */
 	async writeNew(path: string, content: string | Uint8Array, options: StoreArtifactOptions): Promise<StoredArtifact> {
 		if (this.artifacts.has(path)) throw new Error(`Artifact is already registered: ${path}`);
 		const candidate = this.resolvePath(path);
@@ -158,6 +185,7 @@ export class ArtifactStore {
 		return artifact;
 	}
 
+	/** Create an exclusive append-only artifact that must close before publication. */
 	async createAppendOnlyFile(path: string): Promise<AppendOnlyArtifactFile> {
 		if (this.artifacts.has(path)) throw new Error(`Artifact is already registered: ${path}`);
 		const candidate = this.resolvePath(path);
@@ -171,14 +199,17 @@ export class ArtifactStore {
 		});
 	}
 
+	/** Return registered artifact metadata in deterministic path order. */
 	listArtifacts(): readonly StoredArtifact[] {
 		return [...this.artifacts.values()].sort((left, right) => left.path.localeCompare(right.path));
 	}
 
+	/** Read bytes from a safely resolved artifact path. */
 	async read(path: string): Promise<Uint8Array> {
 		return readFile(this.resolvePath(path));
 	}
 
+	/** Hash and register a closed regular file that remains under the real root. */
 	async registerClosedFile(path: string, options: StoreArtifactOptions): Promise<StoredArtifact> {
 		if (this.artifacts.has(path)) throw new Error(`Artifact is already registered: ${path}`);
 		const candidate = this.resolvePath(path);
@@ -200,6 +231,7 @@ export class ArtifactStore {
 		return artifact;
 	}
 
+	/** Create safe parent directories while rejecting symlink traversal. */
 	private async ensureParent(parent: string): Promise<void> {
 		if (parent !== this.root) assertWithin(this.root, parent);
 		let current = this.root;
@@ -221,6 +253,7 @@ export class ArtifactStore {
 		if (realParent !== this.realRoot) assertWithin(this.realRoot, realParent);
 	}
 
+	/** Fsync a directory so its entry changes survive a crash. */
 	private async syncDirectory(path: string): Promise<void> {
 		const directory = await open(path, "r");
 		try {
@@ -233,6 +266,7 @@ export class ArtifactStore {
 
 type AppendFileHandle = Awaited<ReturnType<typeof open>>;
 
+/** Owns one fsynced append-only evidence stream until it is closed and registered. */
 export class AppendOnlyArtifactFile {
 	private readonly store: ArtifactStore;
 	private readonly relativePath: string;
@@ -240,6 +274,7 @@ export class AppendOnlyArtifactFile {
 	private readonly file: AppendFileHandle;
 	private closed = false;
 
+	/** Bind the open file to its store and publication-accounting release callback. */
 	constructor(store: ArtifactStore, relativePath: string, file: AppendFileHandle, release: () => void) {
 		this.store = store;
 		this.relativePath = relativePath;
@@ -247,12 +282,14 @@ export class AppendOnlyArtifactFile {
 		this.file = file;
 	}
 
+	/** Append UTF-8 evidence and fsync it before reporting success. */
 	async append(content: string): Promise<void> {
 		if (this.closed) throw new Error(`Append-only artifact is closed: ${this.relativePath}`);
 		await this.file.write(content, null, "utf8");
 		await this.file.sync();
 	}
 
+	/** Close, release publication accounting, and register final metadata. */
 	async close(options: StoreArtifactOptions): Promise<StoredArtifact> {
 		if (this.closed) throw new Error(`Append-only artifact is already closed: ${this.relativePath}`);
 		let syncError: unknown = null;

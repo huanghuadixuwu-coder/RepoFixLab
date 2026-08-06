@@ -1,3 +1,16 @@
+"""Fail-closed command entry point installed inside an Agent Worker.
+
+This module:
+- Accepts only the fixed self-check, repository-tool, snapshot, catalog, and
+  verification subcommands used by the trusted Controller.
+- Decodes exact request envelopes before dispatching RepositoryToolExecutor.
+- Pins all repository operations to the writable `/testbed` checkout.
+- Emits canonical JSON on success and a bounded generic error on failure.
+
+The Worker receives no Provider credentials or Docker control. It is treated
+as untrusted because model-directed repository inputs are executed here.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -19,6 +32,8 @@ _FILES = ("runtime_tools.py", "runtime_worker_entry.py")
 
 
 def _canonical_bytes(value: object) -> bytes:
+    """Serialize one response deterministically for Controller verification."""
+
     return (
         json.dumps(
             value,
@@ -32,6 +47,8 @@ def _canonical_bytes(value: object) -> bytes:
 
 
 def _aggregate() -> str:
+    """Hash the exact Worker entry point and repository-tool implementation."""
+
     files: list[dict[str, object]] = []
     for name in _FILES:
         content = (_ROOT / name).read_bytes()
@@ -46,6 +63,8 @@ def _aggregate() -> str:
 
 
 def _decode_request(value: str) -> dict[str, object]:
+    """Decode and validate the exact tool request envelope."""
+
     try:
         raw = base64.b64decode(value, validate=True)
         request = json.loads(raw.decode("utf-8"))
@@ -61,6 +80,8 @@ def _decode_request(value: str) -> dict[str, object]:
 
 
 def _tool(encoded: str) -> dict[str, object]:
+    """Execute one allowlisted repository tool against `/testbed`."""
+
     request = _decode_request(encoded)
     result = RepositoryToolExecutor(Path("/testbed")).execute(
         request["tool"],
@@ -74,6 +95,8 @@ def _tool(encoded: str) -> dict[str, object]:
 
 
 def _snapshot() -> dict[str, object]:
+    """Return policy evidence and patch bytes for the current checkout."""
+
     snapshot = RepositoryToolExecutor(Path("/testbed")).snapshot_evidence()
     return {
         "schema_version": "v1",
@@ -94,6 +117,8 @@ def _snapshot() -> dict[str, object]:
 
 
 def _verification_catalog() -> dict[str, object]:
+    """Return the bounded verification choices derived inside the Worker."""
+
     catalog = RepositoryToolExecutor(Path("/testbed")).verification_catalog()
     return {
         "schema_version": "v1",
@@ -103,6 +128,8 @@ def _verification_catalog() -> dict[str, object]:
 
 
 def _verification(encoded: str) -> dict[str, object]:
+    """Run one catalog-selected verification against the supplied patch."""
+
     try:
         raw = base64.b64decode(encoded, validate=True)
         request = json.loads(raw.decode("utf-8"))
@@ -156,6 +183,8 @@ def _verification(encoded: str) -> dict[str, object]:
 
 
 def main() -> int:
+    """Dispatch only fixed Worker subcommands and fail closed for all others."""
+
     try:
         if sys.argv[1:] == ["self-check"]:
             response: dict[str, object] = {

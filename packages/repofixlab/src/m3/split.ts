@@ -78,6 +78,14 @@ interface RepositoryAllocation {
 	readonly remainder: number;
 }
 
+function observedSplitCounts(assignments: readonly M3SplitAssignment[]): Record<M3SplitName, number> {
+	const counts: Record<M3SplitName, number> = { dev: 0, validation: 0, test: 0 };
+	for (const assignment of assignments) {
+		counts[assignment.split] += 1;
+	}
+	return counts;
+}
+
 function canonicalHash(value: unknown): string {
 	const normalized: unknown = JSON.parse(stableStringify(value));
 	return createHash("sha256")
@@ -357,10 +365,7 @@ export function verifyM3RepoStratifiedSplit(value: unknown, eligibilityValue?: u
 	) {
 		throw new Error("M3 split assignments are not a canonical frozen 26-task set");
 	}
-	const observed = assignments.reduce<Record<M3SplitName, number>>(
-		(counts, assignment) => ({ ...counts, [assignment.split]: counts[assignment.split] + 1 }),
-		{ dev: 0, validation: 0, test: 0 },
-	);
+	const observed = observedSplitCounts(assignments);
 	if (stableStringify(observed) !== stableStringify(M3_SPLIT_TARGETS)) {
 		throw new Error("M3 split assignments do not satisfy 5/4/17 targets");
 	}
@@ -451,10 +456,7 @@ export function createM3RepoStratifiedSplit(
 		}
 	}
 	assignments.sort((left, right) => left.instance_id.localeCompare(right.instance_id));
-	const observed = assignments.reduce<Record<M3SplitName, number>>(
-		(counts, assignment) => ({ ...counts, [assignment.split]: counts[assignment.split] + 1 }),
-		{ dev: 0, validation: 0, test: 0 },
-	);
+	const observed = observedSplitCounts(assignments);
 	if (stableStringify(observed) !== stableStringify(M3_SPLIT_TARGETS)) {
 		throw new Error("Repository-stratified allocation does not satisfy M3 split targets");
 	}

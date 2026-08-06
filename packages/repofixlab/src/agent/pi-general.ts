@@ -1,3 +1,17 @@
+/**
+ * Isolated Pi-general baseline session construction for RepoFixLab runs.
+ *
+ * This module:
+ * - Creates one attempt-scoped Pi session and resource directory
+ * - Disables host-discovered extensions, skills, prompts, themes, and context
+ * - Disables Pi built-in host tools and exposes only Controller-backed tools
+ * - Verifies that the effective tool registry exactly matches the frozen set
+ *
+ * The session remains a general Pi model/tool loop without RepoFix stage
+ * gates. Model credentials stay in the Orchestrator, while repository effects
+ * cross only the leased Controller transport into the Worker.
+ */
+
 import { join, resolve } from "node:path";
 import {
 	type AuthStorage,
@@ -12,6 +26,7 @@ import type { RepoToolTransport } from "../controller/client.ts";
 import { REPO_TOOL_NAMES } from "../sandbox/protocol.ts";
 import { createRepoTools } from "../sandbox/repo-tools.ts";
 
+/** Attempt identity, model runtime, and Controller transport required by one baseline session. */
 export interface PiGeneralSessionOptions {
 	leaseId: string;
 	attemptDirectory: string;
@@ -23,12 +38,14 @@ export interface PiGeneralSessionOptions {
 	thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
 }
 
+/** Live attempt-scoped Pi session and its in-memory settings/session owners. */
 export interface PiGeneralSessionResult {
 	session: Awaited<ReturnType<typeof createAgentSession>>["session"];
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 }
 
+/** Frozen baseline instructions that explain safe repository-tool use without stage gates. */
 const REPOFIX_AGENT_SYSTEM_PROMPT = [
 	"You are RepoFix Agent. Produce a minimal, reviewable repair for the user-reported defect.",
 	"Workflow: localize with targeted repo_search, read only the relevant source and existing tests, make the smallest safe change, run the closest existing test, then inspect repo_diff before concluding.",
@@ -42,6 +59,7 @@ const REPOFIX_AGENT_SYSTEM_PROMPT = [
 	"Do not claim a repair is verified until the relevant existing test command has run and repo_diff contains only intended changes.",
 ].join("\n");
 
+/** Verify that the session exposes every fixed repository tool exactly once and no extras. */
 function hasExactRepoToolSet(actualNames: string[]): boolean {
 	return (
 		actualNames.length === REPO_TOOL_NAMES.length &&
@@ -49,6 +67,14 @@ function hasExactRepoToolSet(actualNames: string[]): boolean {
 	);
 }
 
+/**
+ * Create one isolated Pi-general session for a single attempt.
+ *
+ * The function uses attempt-local settings, session storage, and agentDir;
+ * disables retries, compaction, resource discovery, and built-in host tools;
+ * then registers only leased Controller-backed repository tools. A registry
+ * mismatch disposes the session and fails closed before the model can run.
+ */
 export async function createPiGeneralSession(options: PiGeneralSessionOptions): Promise<PiGeneralSessionResult> {
 	const attemptDirectory = resolve(options.attemptDirectory);
 	const cwd = resolve(options.cwd);

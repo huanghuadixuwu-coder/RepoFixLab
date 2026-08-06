@@ -12,16 +12,16 @@
  *   Orchestrator; the Controller does not receive budget authority.
  */
 
+import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
 import {
-	createAssistantMessageEventStream,
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type Context,
+	createAssistantMessageEventStream,
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai/compat";
-import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
 
 export const TOKEN_SUPERVISOR_ERROR = "repofixlab_token_supervisor_rejected";
 
@@ -35,6 +35,10 @@ export interface TokenLedgerEvent {
 		| "admission_rejected";
 	readonly request_id: string;
 	readonly run_id: string;
+	readonly request_kind: "agent" | "condenser";
+	readonly stage_id: string | null;
+	readonly max_output_tokens: number | null;
+	readonly provider_wait_ms: number | null;
 	readonly reservation_tokens: number | null;
 	readonly accounted_tokens: number | null;
 	readonly base_input_tokens: number | null;
@@ -92,6 +96,8 @@ export interface TokenSupervisorLimits {
 export interface TokenReservation {
 	readonly request_id: string;
 	readonly run_id: string;
+	readonly request_kind: "agent" | "condenser";
+	readonly stage_id: string | null;
 	readonly base_input_tokens: number;
 	readonly reserved_input_tokens: number;
 	readonly max_output_tokens: number;
@@ -151,6 +157,8 @@ export class TokenReservationLedger {
 		readonly base_input_tokens?: number;
 		readonly estimated_input_tokens: number;
 		readonly max_output_tokens: number;
+		readonly request_kind?: "agent" | "condenser";
+		readonly stage_id?: string | null;
 	}): TokenAdmission {
 		assertPositiveSafeInteger(input.estimated_input_tokens, "estimated_input_tokens");
 		const baseInputTokens = input.base_input_tokens ?? input.estimated_input_tokens;
@@ -159,9 +167,16 @@ export class TokenReservationLedger {
 		if (input.request_id.length === 0 || input.run_id.length === 0) {
 			throw new Error("Token reservation request_id and run_id are required");
 		}
-		if (this.reservations.has(input.request_id)) throw new Error(`Duplicate token reservation request_id: ${input.request_id}`);
+		if (this.reservations.has(input.request_id))
+			throw new Error(`Duplicate token reservation request_id: ${input.request_id}`);
 		if (this.reconciliationRequired) {
-			this.reject(input.request_id, input.run_id, "reconciliation_required");
+			this.reject(
+				input.request_id,
+				input.run_id,
+				"reconciliation_required",
+				input.request_kind ?? "agent",
+				input.stage_id ?? null,
+			);
 			return { admitted: false, reason: "reconciliation_required" };
 		}
 		const reservationTokens = input.estimated_input_tokens + input.max_output_tokens;
@@ -171,12 +186,20 @@ export class TokenReservationLedger {
 			runAccounted + reservationTokens > this.limits.per_run_accounted_cap_tokens ||
 			this.projectAccountedTokens + reservationTokens > this.limits.project_accounted_cap_tokens
 		) {
-			this.reject(input.request_id, input.run_id, "budget_exhausted");
+			this.reject(
+				input.request_id,
+				input.run_id,
+				"budget_exhausted",
+				input.request_kind ?? "agent",
+				input.stage_id ?? null,
+			);
 			return { admitted: false, reason: "budget_exhausted" };
 		}
 		const reservation: TokenReservation = {
 			request_id: input.request_id,
 			run_id: input.run_id,
+			request_kind: input.request_kind ?? "agent",
+			stage_id: input.stage_id ?? null,
 			base_input_tokens: baseInputTokens,
 			reserved_input_tokens: input.estimated_input_tokens,
 			max_output_tokens: input.max_output_tokens,
@@ -190,6 +213,10 @@ export class TokenReservationLedger {
 			event_type: "reservation_open",
 			request_id: reservation.request_id,
 			run_id: reservation.run_id,
+			request_kind: reservation.request_kind,
+			stage_id: reservation.stage_id,
+			max_output_tokens: reservation.max_output_tokens,
+			provider_wait_ms: null,
 			reservation_tokens: reservation.reservation_tokens,
 			accounted_tokens: null,
 			base_input_tokens: reservation.base_input_tokens,
@@ -203,9 +230,10 @@ export class TokenReservationLedger {
 	}
 
 	/** Settle an open reservation against exact, internally consistent usage. */
-	settle(reservation: TokenReservation, usage: TokenUsage): void {
+	settle(reservation: TokenReservation, usage: TokenUsage, providerWaitMs = 0): void {
 		this.assertOpen(reservation);
 		try {
+			assertNonNegativeSafeInteger(providerWaitMs, "provider_wait_ms");
 			assertNonNegativeSafeInteger(usage.input_tokens, "usage.input_tokens");
 			assertNonNegativeSafeInteger(usage.output_tokens, "usage.output_tokens");
 			assertNonNegativeSafeInteger(usage.cache_read_tokens ?? 0, "usage.cache_read_tokens");
@@ -213,10 +241,7 @@ export class TokenReservationLedger {
 			assertNonNegativeSafeInteger(usage.total_tokens, "usage.total_tokens");
 			if (
 				usage.total_tokens !==
-				usage.input_tokens +
-					usage.output_tokens +
-					(usage.cache_read_tokens ?? 0) +
-					(usage.cache_write_tokens ?? 0)
+				usage.input_tokens + usage.output_tokens + (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0)
 			) {
 				throw new Error("Provider usage total does not equal input, output, and cache tokens");
 			}
@@ -242,6 +267,10 @@ export class TokenReservationLedger {
 			event_type: "reservation_settled",
 			request_id: reservation.request_id,
 			run_id: reservation.run_id,
+			request_kind: reservation.request_kind,
+			stage_id: reservation.stage_id,
+			max_output_tokens: reservation.max_output_tokens,
+			provider_wait_ms: providerWaitMs,
 			reservation_tokens: reservation.reservation_tokens,
 			accounted_tokens: usage.total_tokens,
 			base_input_tokens: reservation.base_input_tokens,
@@ -266,6 +295,10 @@ export class TokenReservationLedger {
 			event_type: "reservation_charged_unverified",
 			request_id: reservation.request_id,
 			run_id: reservation.run_id,
+			request_kind: reservation.request_kind,
+			stage_id: reservation.stage_id,
+			max_output_tokens: reservation.max_output_tokens,
+			provider_wait_ms: null,
 			reservation_tokens: reservation.reservation_tokens,
 			accounted_tokens: reservation.reservation_tokens,
 			base_input_tokens: reservation.base_input_tokens,
@@ -303,6 +336,10 @@ export class TokenReservationLedger {
 			event_type: "budget_protocol_invalid",
 			request_id: reservation.request_id,
 			run_id: reservation.run_id,
+			request_kind: reservation.request_kind,
+			stage_id: reservation.stage_id,
+			max_output_tokens: reservation.max_output_tokens,
+			provider_wait_ms: null,
 			reservation_tokens: reservation.reservation_tokens,
 			accounted_tokens: reservation.reservation_tokens,
 			base_input_tokens: reservation.base_input_tokens,
@@ -315,12 +352,22 @@ export class TokenReservationLedger {
 	}
 
 	/** Record a request rejected before Provider admission. */
-	private reject(requestId: string, runId: string, reason: "budget_exhausted" | "reconciliation_required"): void {
+	private reject(
+		requestId: string,
+		runId: string,
+		reason: "budget_exhausted" | "reconciliation_required",
+		requestKind: "agent" | "condenser",
+		stageId: string | null,
+	): void {
 		this.sink.append({
 			schema_version: "v1",
 			event_type: "admission_rejected",
 			request_id: requestId,
 			run_id: runId,
+			request_kind: requestKind,
+			stage_id: stageId,
+			max_output_tokens: null,
+			provider_wait_ms: null,
 			reservation_tokens: null,
 			accounted_tokens: null,
 			base_input_tokens: null,
@@ -350,6 +397,10 @@ export interface TokenSupervisorOptions {
 	readonly estimate_input_tokens: (context: Context) => number;
 	readonly estimate_base_input_tokens?: (context: Context) => number;
 	readonly next_request_id: () => string;
+	readonly request_kind?: "agent" | "condenser";
+	readonly stage_id?: string | null | (() => string | null);
+	readonly prepare_context?: (context: Context, requestId: string) => Promise<Context>;
+	readonly on_request_id?: (requestId: string) => void;
 }
 
 export interface TokenAdmissionEstimatorSpec {
@@ -408,14 +459,6 @@ function errorMessage(model: Model<Api>, message: string): AssistantMessage {
 	};
 }
 
-/** Wrap a local admission failure in Pi's assistant event-stream protocol. */
-function errorStream(model: Model<Api>, message: string): AssistantMessageEventStream {
-	const error = errorMessage(model, message);
-	const stream = createAssistantMessageEventStream();
-	stream.push({ type: "error", reason: "error", error });
-	return stream;
-}
-
 /** Convert Pi assistant usage fields into the ledger's usage contract. */
 function usageFromMessage(message: AssistantMessage): TokenUsage {
 	return {
@@ -431,36 +474,77 @@ function usageFromMessage(message: AssistantMessage): TokenUsage {
  * Wrap a session stream so every Provider request is estimated, reserved
  * before dispatch, and settled or conservatively charged on termination.
  */
-export function installTokenSupervisor(session: TokenSupervisedSession, options: TokenSupervisorOptions): void {
+export function createTokenSupervisedStream(
+	original: TokenSupervisedSession["agent"]["streamFn"],
+	options: TokenSupervisorOptions,
+): TokenSupervisedSession["agent"]["streamFn"] {
 	assertPositiveSafeInteger(options.max_output_tokens, "max_output_tokens");
-	const original = session.agent.streamFn;
-	session.agent.streamFn = (model, context, streamOptions) => {
-		let estimatedInputTokens: number;
-		let baseInputTokens: number;
-		try {
-			estimatedInputTokens = options.estimate_input_tokens(context);
-			baseInputTokens = options.estimate_base_input_tokens?.(context) ?? estimatedInputTokens;
-		} catch (error) {
-			return errorStream(model, `${TOKEN_SUPERVISOR_ERROR}: estimator_failure: ${String(error)}`);
-		}
-		const admission = options.ledger.reserve({
-			request_id: options.next_request_id(),
-			run_id: options.run_id,
-			base_input_tokens: baseInputTokens,
-			estimated_input_tokens: estimatedInputTokens,
-			max_output_tokens: options.max_output_tokens,
-		});
-		if (!admission.admitted) return errorStream(model, `${TOKEN_SUPERVISOR_ERROR}: ${admission.reason}`);
+	return (model, context, streamOptions) => {
 		const output = createAssistantMessageEventStream();
 		void (async () => {
+			const requestId = options.next_request_id();
+			let admission: Extract<TokenAdmission, { readonly admitted: true }> | null = null;
 			let terminalEventSeen = false;
 			try {
-				const source = await original(model, context, streamOptions);
+				options.on_request_id?.(requestId);
+				const stageId = typeof options.stage_id === "function" ? options.stage_id() : (options.stage_id ?? null);
+				let preparedContext: Context;
+				try {
+					preparedContext =
+						options.prepare_context === undefined ? context : await options.prepare_context(context, requestId);
+				} catch (error) {
+					output.push({
+						type: "error",
+						reason: "error",
+						error: errorMessage(
+							model,
+							`${TOKEN_SUPERVISOR_ERROR}: context_preparation_failure: ${String(error)}`,
+						),
+					});
+					return;
+				}
+				let estimatedInputTokens: number;
+				let baseInputTokens: number;
+				try {
+					estimatedInputTokens = options.estimate_input_tokens(preparedContext);
+					baseInputTokens = options.estimate_base_input_tokens?.(preparedContext) ?? estimatedInputTokens;
+				} catch (error) {
+					output.push({
+						type: "error",
+						reason: "error",
+						error: errorMessage(model, `${TOKEN_SUPERVISOR_ERROR}: estimator_failure: ${String(error)}`),
+					});
+					return;
+				}
+				const admitted = options.ledger.reserve({
+					request_id: requestId,
+					run_id: options.run_id,
+					request_kind: options.request_kind ?? "agent",
+					stage_id: stageId,
+					base_input_tokens: baseInputTokens,
+					estimated_input_tokens: estimatedInputTokens,
+					max_output_tokens: options.max_output_tokens,
+				});
+				if (!admitted.admitted) {
+					output.push({
+						type: "error",
+						reason: "error",
+						error: errorMessage(model, `${TOKEN_SUPERVISOR_ERROR}: ${admitted.reason}`),
+					});
+					return;
+				}
+				admission = admitted;
+				const providerStarted = performance.now();
+				const source = await original(model, preparedContext, streamOptions);
 				for await (const event of source) {
 					if (event.type === "done") {
 						terminalEventSeen = true;
 						try {
-							options.ledger.settle(admission.reservation, usageFromMessage(event.message));
+							options.ledger.settle(
+								admission.reservation,
+								usageFromMessage(event.message),
+								Math.max(0, Math.ceil(performance.now() - providerStarted)),
+							);
 							output.push(event);
 						} catch (error) {
 							output.push({
@@ -487,10 +571,11 @@ export function installTokenSupervisor(session: TokenSupervisedSession, options:
 				}
 			} catch (error) {
 				try {
-					options.ledger.chargeUnverified(
-						admission.reservation,
-						terminalEventSeen ? "provider_stream_exception" : "provider_preflight_failure",
-					);
+					if (admission !== null)
+						options.ledger.chargeUnverified(
+							admission.reservation,
+							terminalEventSeen ? "provider_stream_exception" : "provider_preflight_failure",
+						);
 				} catch {
 					// A prior terminal event already closed the reservation.
 				}
@@ -503,6 +588,11 @@ export function installTokenSupervisor(session: TokenSupervisedSession, options:
 		})();
 		return output;
 	};
+}
+
+/** Install the shared supervised stream on an existing Pi session. */
+export function installTokenSupervisor(session: TokenSupervisedSession, options: TokenSupervisorOptions): void {
+	session.agent.streamFn = createTokenSupervisedStream(session.agent.streamFn, options);
 }
 
 /** Estimate prompt tokens conservatively from serialized context bytes. */

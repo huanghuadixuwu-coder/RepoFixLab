@@ -1,3 +1,17 @@
+/**
+ * Stateful Pi Agent wrapper around the low-level model/tool loop.
+ *
+ * This module:
+ * - Owns the mutable transcript, active-run lifecycle, and message queues
+ * - Converts public prompt/continue calls into low-level agent-loop runs
+ * - Forwards tool, turn-preparation, and stop hooks into each loop execution
+ * - Reduces loop events back into observable Agent state
+ *
+ * The wrapper provides hook mechanics but no RepoFix stage policy. RepoFix
+ * installs its own callbacks from the outer session wrapper, while the generic
+ * Agent remains responsible only for invoking them at deterministic points.
+ */
+
 import {
 	type ImageContent,
 	type Message,
@@ -30,6 +44,7 @@ import type {
 
 export type { QueueMode } from "./types.ts";
 
+/** Keep only transcript roles that may be sent to the model by default. */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
 		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
@@ -65,6 +80,7 @@ type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "
 	errorMessage?: string;
 };
 
+/** Create copy-on-assignment mutable state without sharing caller-owned arrays. */
 function createMutableAgentState(
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>,
 ): MutableAgentState {
@@ -122,22 +138,27 @@ export interface AgentOptions {
 	toolExecution?: ToolExecutionMode;
 }
 
+/** Agent-owned steering or follow-up queue with configurable drain behavior. */
 class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
 	public mode: QueueMode;
 
+	/** Initialize an empty queue using one-at-a-time or all-at-once draining. */
 	constructor(mode: QueueMode) {
 		this.mode = mode;
 	}
 
+	/** Append one message without interrupting the active run directly. */
 	enqueue(message: AgentMessage): void {
 		this.messages.push(message);
 	}
 
+	/** Report whether the queue contains pending messages. */
 	hasItems(): boolean {
 		return this.messages.length > 0;
 	}
 
+	/** Remove and return either all messages or the next message according to mode. */
 	drain(): AgentMessage[] {
 		if (this.mode === "all") {
 			const drained = this.messages.slice();
@@ -153,6 +174,7 @@ class PendingMessageQueue {
 		return [first];
 	}
 
+	/** Discard every queued message. */
 	clear(): void {
 		this.messages = [];
 	}
@@ -213,6 +235,7 @@ export class Agent {
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
 
+	/** Bind initial state, hooks, queue modes, transport, and execution policy. */
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
 		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
@@ -381,6 +404,7 @@ export class Agent {
 		await this.runContinuation();
 	}
 
+	/** Normalize text, multimodal, or prebuilt messages into a prompt batch. */
 	private normalizePromptInput(
 		input: string | AgentMessage | AgentMessage[],
 		images?: ImageContent[],
@@ -400,6 +424,7 @@ export class Agent {
 		return [{ role: "user", content, timestamp: Date.now() }];
 	}
 
+	/** Run a new prompt batch under one active-run lifecycle and loop configuration. */
 	private async runPromptMessages(
 		messages: AgentMessage[],
 		options: { skipInitialSteeringPoll?: boolean } = {},
@@ -416,6 +441,7 @@ export class Agent {
 		});
 	}
 
+	/** Resume the existing transcript under a fresh active-run lifecycle. */
 	private async runContinuation(): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(
@@ -428,6 +454,7 @@ export class Agent {
 		});
 	}
 
+	/** Copy the current prompt, messages, and tools into an immutable loop input snapshot. */
 	private createContextSnapshot(): AgentContext {
 		return {
 			systemPrompt: this._state.systemPrompt,
@@ -436,6 +463,12 @@ export class Agent {
 		};
 	}
 
+	/**
+	 * Project the current Agent hooks and queue readers into one low-level loop
+	 * configuration. `shouldStopAfterTurn` is sampled for this run and evaluated
+	 * after a completed turn, allowing an outer workflow to end the native loop
+	 * without aborting the Provider request in flight.
+	 */
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		const shouldStopAfterTurn = this.shouldStopAfterTurn;
@@ -477,6 +510,7 @@ export class Agent {
 		};
 	}
 
+	/** Own active-run state, abort signaling, failure conversion, and final settlement. */
 	private async runWithLifecycle(executor: (signal: AbortSignal) => Promise<void>): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing.");
@@ -502,6 +536,7 @@ export class Agent {
 		}
 	}
 
+	/** Convert an uncaught loop failure into the normal terminal event sequence. */
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
 		const failureMessage = {
 			role: "assistant",
@@ -520,6 +555,7 @@ export class Agent {
 		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
 	}
 
+	/** Clear transient run state and resolve waiters after all loop work settles. */
 	private finishRun(): void {
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;

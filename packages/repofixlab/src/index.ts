@@ -16,6 +16,7 @@ export * from "./m7/formal-runner.ts";
 export * from "./m8/analysis.ts";
 export * from "./m9/analysis.ts";
 export * from "./m9/batch-runner.ts";
+export * from "./memory/index.ts";
 export * from "./metrics/index.ts";
 export * from "./r2/batch-runner.ts";
 export * from "./report/index.ts";

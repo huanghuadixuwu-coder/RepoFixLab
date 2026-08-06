@@ -1,3 +1,16 @@
+/**
+ * HTTP client for the trusted RepoFix Controller repository-tool endpoint.
+ *
+ * This module:
+ * - Converts model-selected repository operations into identity-bound requests
+ * - Applies request timeouts and hard response-size limits
+ * - Validates the complete versioned Controller response schema
+ * - Rejects mismatched attempt, lease, operation, tool, hash, or input data
+ *
+ * The client transports authorized operations; it does not execute repository
+ * commands or decide which tools are allowed in the active workflow stage.
+ */
+
 import { createHash } from "node:crypto";
 import { Compile } from "typebox/compile";
 import { stableStringify } from "../contracts/schema-generator.ts";
@@ -13,10 +26,12 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 310_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2_500_000;
 const ERROR_BODY_LIMIT = 4_096;
 
+/** Transport contract used by model-facing repository-tool wrappers. */
 export interface RepoToolTransport {
 	execute(request: RepoToolRequest, signal?: AbortSignal): Promise<RepoToolResponse>;
 }
 
+/** Configuration for one attempt-scoped HTTP Controller transport. */
 export interface HttpRepoToolTransportOptions {
 	controllerUrl: string;
 	attemptId: string;
@@ -25,9 +40,11 @@ export interface HttpRepoToolTransportOptions {
 	fetchFn?: typeof fetch;
 }
 
+/** Error raised when the Controller transport or response contract fails. */
 export class RepoToolTransportError extends Error {
 	readonly status: number | undefined;
 
+	/** Preserve the optional HTTP status alongside a stable transport error. */
 	constructor(message: string, status?: number) {
 		super(message);
 		this.name = "RepoToolTransportError";
@@ -35,6 +52,7 @@ export class RepoToolTransportError extends Error {
 	}
 }
 
+/** Validate a positive integer used for a local transport limit. */
 function requirePositiveInteger(value: number, name: string): number {
 	if (!Number.isSafeInteger(value) || value < 1) {
 		throw new Error(`${name} must be a positive safe integer`);
@@ -42,6 +60,7 @@ function requirePositiveInteger(value: number, name: string): number {
 	return value;
 }
 
+/** Remove HTTP envelope fields after the full response has been validated. */
 function toRepoToolResponse(response: RepoToolHttpResponse): RepoToolResponse {
 	return { tool: response.tool, result: response.result };
 }
@@ -61,6 +80,7 @@ export function controllerToolOperationId(attemptId: string, toolCallOperationId
 		.digest("hex")}`;
 }
 
+/** Attempt-scoped HTTP implementation of the repository-tool transport. */
 export class HttpRepoToolTransport implements RepoToolTransport {
 	private readonly controllerUrl: string;
 	private readonly attemptId: string;
@@ -68,6 +88,7 @@ export class HttpRepoToolTransport implements RepoToolTransport {
 	private readonly maxResponseBytes: number;
 	private readonly fetchFn: typeof fetch;
 
+	/** Initialize immutable endpoint, identity, timeout, and byte-limit settings. */
 	constructor(options: HttpRepoToolTransportOptions) {
 		this.controllerUrl = options.controllerUrl;
 		this.attemptId = requireIdentifier(options.attemptId, "attemptId");
@@ -82,6 +103,7 @@ export class HttpRepoToolTransport implements RepoToolTransport {
 		this.fetchFn = options.fetchFn ?? fetch;
 	}
 
+	/** Send one identity-bound tool request and validate the complete response. */
 	async execute(request: RepoToolRequest, signal?: AbortSignal): Promise<RepoToolResponse> {
 		const leaseId = requireIdentifier(request.leaseId, "leaseId");
 		const operationId = controllerToolOperationId(this.attemptId, request.operationId);
@@ -175,6 +197,7 @@ export class HttpRepoToolTransport implements RepoToolTransport {
 	}
 }
 
+/** Enforce the shared bounded identifier syntax used by runtime contracts. */
 function requireIdentifier(value: string, name: string): string {
 	if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value)) {
 		throw new Error(`${name} must satisfy the runtime identifier contract`);
@@ -182,6 +205,7 @@ function requireIdentifier(value: string, name: string): string {
 	return value;
 }
 
+/** Hash a value after canonical key ordering for cross-language comparison. */
 function canonicalSha256(value: unknown): string {
 	const normalized: unknown = JSON.parse(stableStringify(value));
 	return createHash("sha256")

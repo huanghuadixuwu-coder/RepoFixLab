@@ -1,3 +1,12 @@
+"""Adapted evaluator kernel for applying patches and grading private tests.
+
+This module performs the evaluator-side workflow:
+- Resets the isolated repository to its frozen base commit
+- Validates and applies the candidate patch and private test patch
+- Runs the fixed test command with a constrained environment
+- Produces deterministic evidence and the final resolved decision
+"""
+
 from __future__ import annotations
 
 import os
@@ -36,6 +45,8 @@ MAX_PERSISTED_EVALUATOR_LOG_BYTES = 1024 * 1024
 
 @dataclass(frozen=True)
 class ExecutionResult:
+    """Immutable outcome captured from one evaluator test process."""
+
     exit_code: int | None
     timed_out: bool
     duration_ms: int
@@ -43,19 +54,40 @@ class ExecutionResult:
 
 
 class Repository(Protocol):
-    def reset_and_verify_base(self) -> None: ...
+    """Repository operations required by the evaluation kernel."""
 
-    def apply_candidate(self, patch: bytes) -> None: ...
+    def reset_and_verify_base(self) -> None:
+        """Restore the workspace to the frozen base and verify it is clean."""
+        ...
 
-    def apply_test_patch(self, patch: bytes) -> None: ...
+    def apply_candidate(self, patch: bytes) -> None:
+        """Apply the untrusted candidate patch to the isolated workspace."""
+        ...
+
+    def apply_test_patch(self, patch: bytes) -> None:
+        """Apply the evaluator-private test patch after the candidate patch."""
+        ...
 
 
 class Executor(Protocol):
-    def execute(self, command: tuple[str, ...], workspace: Path, timeout_seconds: int) -> ExecutionResult: ...
+    """Test-process operation required by the evaluation kernel."""
+
+    def execute(
+        self,
+        command: tuple[str, ...],
+        workspace: Path,
+        timeout_seconds: int,
+    ) -> ExecutionResult:
+        """Run the fixed evaluator command and return bounded process evidence."""
+        ...
 
 
 class SubprocessExecutor:
+    """Runs the one approved test command inside the evaluator workspace."""
+
     def execute(self, command: tuple[str, ...], workspace: Path, timeout_seconds: int) -> ExecutionResult:
+        """Execute the fixed test command with no stdin and a minimal environment."""
+
         if command != TEST_COMMAND or workspace.resolve() != Path("/testbed"):
             raise EvaluationError("formal evaluator command or working directory drifted")
         environment = {
@@ -94,6 +126,8 @@ class SubprocessExecutor:
 
 
 def _confined_existing_file(path: Path, root: Path, label: str) -> Path:
+    """Resolve a regular file while rejecting symlinks and root escapes."""
+
     resolved_root = root.resolve(strict=True)
     if path.is_symlink():
         raise PatchPolicyError(f"{label} must not be a symlink")
@@ -108,6 +142,8 @@ def _confined_existing_file(path: Path, root: Path, label: str) -> Path:
 
 
 def _read_candidate(path: Path, candidate_root: Path) -> bytes:
+    """Read a candidate patch from its allowed root under fixed content limits."""
+
     resolved = _confined_existing_file(path, candidate_root, "candidate patch")
     descriptor = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -120,6 +156,8 @@ def _read_candidate(path: Path, candidate_root: Path) -> bytes:
 
 
 def _write_log_exclusive(path: Path, evidence_root: Path, content: bytes) -> None:
+    """Create a new evaluator log without following links or overwriting evidence."""
+
     resolved_root = evidence_root.resolve(strict=True)
     resolved_parent = path.parent.resolve(strict=True)
     try:
@@ -143,6 +181,8 @@ def _write_log_exclusive(path: Path, evidence_root: Path, content: bytes) -> Non
 
 
 def _persisted_log(log: bytes, maximum_bytes: int | None) -> bytes:
+    """Retain a bounded head-and-tail view when a persisted log is too large."""
+
     if maximum_bytes is None or len(log) <= maximum_bytes:
         return log
     marker = (
@@ -158,12 +198,16 @@ def _persisted_log(log: bytes, maximum_bytes: int | None) -> bytes:
 
 
 def _partition(expected: tuple[str, ...], statuses: dict[str, str]) -> dict[str, list[str]]:
+    """Split expected tests into deterministic success and failure lists."""
+
     success = sorted(name for name in expected if statuses.get(name) in {"passed", "xfailed"})
     failure = sorted(name for name in expected if name not in success)
     return {"success": success, "failure": failure}
 
 
 def _empty_partition(spec: PrivateEvaluationSpec) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Create fail-closed empty F2P and P2P partitions for an unevaluated report."""
+
     return (
         {"success": [], "failure": sorted(spec.fail_to_pass)},
         {"success": [], "failure": sorted(spec.pass_to_pass)},
@@ -171,6 +215,8 @@ def _empty_partition(spec: PrivateEvaluationSpec) -> tuple[dict[str, list[str]],
 
 
 def _report_hash(report: dict[str, object]) -> str:
+    """Hash a report using canonical JSON serialization."""
+
     return sha256_bytes(canonical_json(report))
 
 
@@ -183,6 +229,8 @@ def _base_report(
     candidate_patch_sha256: str | None,
     test_patch_sha256: str,
 ) -> dict[str, object]:
+    """Create the fail-closed report skeleton used before evaluation succeeds."""
+
     fail_to_pass, pass_to_pass = _empty_partition(spec)
     return {
         "schema_version": "v1",
@@ -217,6 +265,8 @@ def _base_report(
 
 
 class EvaluationKernel:
+    """Owns the isolated patch-application, test-execution, and grading sequence."""
+
     def __init__(
         self,
         workspace: Path,
@@ -226,6 +276,8 @@ class EvaluationKernel:
         repository: Repository | None = None,
         timeout_seconds: int = 300,
     ) -> None:
+        """Configure evaluator roots, execution adapters, and the time limit."""
+
         self.workspace = workspace
         self.candidate_root = candidate_root
         self.evidence_root = evidence_root
@@ -243,6 +295,8 @@ class EvaluationKernel:
         candidate_path: Path | None,
         log_output_path: Path,
     ) -> dict[str, object]:
+        """Evaluate one harness probe after enforcing probe-specific inputs."""
+
         if probe_kind not in {"base", "no_op", "malformed", "gold"}:
             raise ValueError("unknown probe kind")
         if len(official_source_lock_sha256) != 64 or any(character not in "0123456789abcdef" for character in official_source_lock_sha256):
@@ -281,6 +335,8 @@ class EvaluationKernel:
         candidate_patch: bytes,
         log_output_path: Path,
     ) -> dict[str, object]:
+        """Evaluate a submitted agent patch with production evidence limits."""
+
         return self._evaluate_loaded_patch(
             probe_kind="agent_patch",
             spec=spec,
@@ -304,6 +360,8 @@ class EvaluationKernel:
         candidate_patch_max_bytes: int,
         persisted_log_max_bytes: int | None,
     ) -> dict[str, object]:
+        """Run the common fail-closed evaluation pipeline for a loaded patch."""
+
         candidate_hash = None if candidate_patch is None else sha256_bytes(candidate_patch)
         test_patch_hash = sha256_bytes(spec.test_patch)
         report = _base_report(

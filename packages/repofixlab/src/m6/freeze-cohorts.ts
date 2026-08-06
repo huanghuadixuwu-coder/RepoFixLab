@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import { verifyDatasetLockForTaskEnvironment } from "../contracts/task-environment-lock.ts";

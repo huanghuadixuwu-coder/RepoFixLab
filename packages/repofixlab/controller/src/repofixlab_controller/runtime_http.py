@@ -1,3 +1,17 @@
+"""Narrow internal HTTP contract for trusted Controller runtime operations.
+
+This module:
+- Defines strict request envelopes with forbidden extra fields.
+- Exposes explicit lifecycle, repository-tool, snapshot, and evaluation routes.
+- Delegates accepted requests to RuntimeOperationService without exposing
+  generic Docker, shell, filesystem, or arbitrary-command endpoints.
+- Maps internal state and capacity failures to stable HTTP status classes.
+
+The API carries attempt, operation, lease, snapshot, job, and artifact
+identities. It does not carry Provider credentials, model configuration, token
+budgets, or experiment scheduling authority.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -25,6 +39,8 @@ _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 
 
 class _RuntimeWriteRequest(BaseModel):
+    """Define the exact identity envelope shared by mutating runtime requests."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal["v1"]
@@ -43,42 +59,58 @@ class _RuntimeWriteRequest(BaseModel):
 
 
 class RuntimePreflightRequest(_RuntimeWriteRequest):
+    """Bind an attempt to one trusted candidate and dataset instance."""
+
     request_type: Literal["runtime_preflight"]
     candidate_id: str = Field(min_length=1, max_length=160)
     instance_id: str = Field(min_length=1, max_length=160)
 
 
 class RuntimePrepareWorkerRequest(_RuntimeWriteRequest):
+    """Request a worker only after its attempt has passed preflight."""
+
     request_type: Literal["runtime_prepare_worker"]
     candidate_id: str = Field(min_length=1, max_length=160)
     instance_id: str = Field(min_length=1, max_length=160)
 
 
 class RuntimeExecuteToolRequest(_RuntimeWriteRequest):
+    """Select one named repository tool with schema-validated input."""
+
     request_type: Literal["runtime_execute_tool"]
     tool: RuntimeToolName
     input: dict[str, object]
 
 
 class RuntimeVerificationCatalogRequest(_RuntimeWriteRequest):
+    """Request the Controller-owned verification choices for an active worker."""
+
     request_type: Literal["runtime_verification_catalog"]
 
 
 class RuntimeVerifyCatalogRequest(_RuntimeWriteRequest):
+    """Select one opaque verification candidate from the active catalog."""
+
     request_type: Literal["runtime_verify_catalog"]
     catalog_id: str = Field(min_length=1, max_length=160, pattern=_IDENTIFIER_PATTERN)
     candidate_id: str = Field(min_length=1, max_length=160, pattern=_IDENTIFIER_PATTERN)
 
 
 class RuntimeSnapshotPatchRequest(_RuntimeWriteRequest):
+    """Request an immutable patch snapshot for the active worker lease."""
+
     request_type: Literal["runtime_snapshot_patch"]
 
 
 class RuntimeDestroyWorkerRequest(_RuntimeWriteRequest):
+    """Request worker destruction after a current snapshot is available."""
+
     request_type: Literal["runtime_destroy_worker"]
 
 
 class RuntimeStartEvaluationRequest(_RuntimeWriteRequest):
+    """Start fresh evaluation for one exact run and policy-passing snapshot."""
+
     request_type: Literal["runtime_start_evaluation"]
     run_id: str = Field(
         min_length=1,
@@ -93,21 +125,31 @@ class RuntimeStartEvaluationRequest(_RuntimeWriteRequest):
 
 
 class RuntimeAcknowledgeArtifactsRequest(_RuntimeWriteRequest):
+    """Acknowledge the exact artifact set before evaluator resource cleanup."""
+
     request_type: Literal["runtime_ack_artifacts"]
     artifact_set_sha256: str = Field(pattern=_SHA256_PATTERN)
 
 
 class RuntimeAbortAttemptRequest(_RuntimeWriteRequest):
+    """Abort an attempt and request cleanup of all Controller-owned resources."""
+
     request_type: Literal["runtime_abort_attempt"]
 
 
 def install_runtime_routes(application: FastAPI) -> None:
+    """Install the complete allowlisted runtime RPC surface on the Controller."""
+
     @application.post("/internal/v1/runtime/preflight")
     def runtime_preflight(request: RuntimePreflightRequest) -> JSONResponse:
+        """Validate task bindings before Controller capacity is allocated."""
+
         return _write_call(application, lambda service: service.preflight(_body(request)))
 
     @application.post("/internal/v1/runtime/workers/prepare")
     def runtime_prepare_worker(request: RuntimePrepareWorkerRequest) -> JSONResponse:
+        """Prepare one Worker and return its capability-like lease identity."""
+
         return _write_call(
             application,
             lambda service: service.prepare_worker(_body(request)),
@@ -118,6 +160,8 @@ def install_runtime_routes(application: FastAPI) -> None:
         request: RuntimeExecuteToolRequest,
         lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Execute one allowlisted repository tool against the matching lease."""
+
         return _write_call(
             application,
             lambda service: service.execute_tool(
@@ -130,6 +174,8 @@ def install_runtime_routes(application: FastAPI) -> None:
         request: RuntimeVerificationCatalogRequest,
         lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Return bounded Controller-owned verification candidate metadata."""
+
         return _write_call(
             application,
             lambda service: service.verification_catalog(
@@ -142,6 +188,8 @@ def install_runtime_routes(application: FastAPI) -> None:
         request: RuntimeVerifyCatalogRequest,
         lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Run one catalog-selected verification without accepting caller argv."""
+
         return _write_call(
             application,
             lambda service: service.verify_catalog_entry(
@@ -154,6 +202,8 @@ def install_runtime_routes(application: FastAPI) -> None:
         request: RuntimeSnapshotPatchRequest,
         lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Capture and return the policy-checked patch for the matching lease."""
+
         return _write_call(
             application,
             lambda service: service.snapshot_patch(
@@ -166,6 +216,8 @@ def install_runtime_routes(application: FastAPI) -> None:
         request: RuntimeDestroyWorkerRequest,
         lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Destroy the Worker and report residual-resource cleanup evidence."""
+
         return _write_call(
             application,
             lambda service: service.destroy_worker(
@@ -177,6 +229,8 @@ def install_runtime_routes(application: FastAPI) -> None:
     def runtime_start_evaluation(
         request: RuntimeStartEvaluationRequest,
     ) -> JSONResponse:
+        """Start an independent evaluator for the exact retained snapshot."""
+
         return _write_call(
             application,
             lambda service: service.start_evaluation(_body(request)),
@@ -186,12 +240,16 @@ def install_runtime_routes(application: FastAPI) -> None:
     def runtime_get_job(
         job_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Read the bounded status view for one known evaluation job."""
+
         return _read_call(application, lambda service: service.get_job(job_id))
 
     @application.get("/internal/v1/runtime/jobs/{job_id}/artifacts")
     def runtime_get_artifacts(
         job_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Read the immutable artifact set after an evaluation becomes terminal."""
+
         return _read_call(application, lambda service: service.get_artifacts(job_id))
 
     @application.post("/internal/v1/runtime/jobs/{job_id}/ack")
@@ -199,6 +257,8 @@ def install_runtime_routes(application: FastAPI) -> None:
         request: RuntimeAcknowledgeArtifactsRequest,
         job_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Acknowledge an exact artifact hash and release evaluator resources."""
+
         return _write_call(
             application,
             lambda service: service.acknowledge_artifacts(
@@ -211,6 +271,8 @@ def install_runtime_routes(application: FastAPI) -> None:
         request: RuntimeAbortAttemptRequest,
         attempt_id: str = Path(pattern=_IDENTIFIER_PATTERN),
     ) -> JSONResponse:
+        """Abort the matching attempt after enforcing path/body identity."""
+
         if request.attempt_id != attempt_id:
             raise HTTPException(
                 status_code=400,
@@ -223,10 +285,14 @@ def install_runtime_routes(application: FastAPI) -> None:
 
 
 def _body(request: _RuntimeWriteRequest) -> dict[str, object]:
+    """Convert a strict Pydantic request into the service's canonical mapping."""
+
     return request.model_dump(mode="python")
 
 
 def _runtime_service(application: FastAPI) -> RuntimeOperationService:
+    """Return the configured runtime service or fail closed with HTTP 503."""
+
     service = getattr(application.state, "runtime_service", None)
     if not isinstance(service, RuntimeOperationService):
         raise HTTPException(status_code=503, detail="runtime service is unavailable")
@@ -237,6 +303,8 @@ def _write_call(
     application: FastAPI,
     callback: Callable[[RuntimeOperationService], RuntimeOperationResult],
 ) -> JSONResponse:
+    """Execute a mutating service call and map trusted failure classes to HTTP."""
+
     try:
         result = callback(_runtime_service(application))
     except RuntimeRequestRejected:
@@ -271,6 +339,8 @@ def _read_call(
     application: FastAPI,
     callback: Callable[[RuntimeOperationService], Mapping[str, object]],
 ) -> JSONResponse:
+    """Execute a read-only service call and map lifecycle failures to HTTP."""
+
     try:
         response = callback(_runtime_service(application))
     except RuntimeResourceNotFound:

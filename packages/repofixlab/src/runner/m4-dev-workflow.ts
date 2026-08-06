@@ -19,10 +19,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { PiGeneralSessionResult } from "../agent/pi-general.ts";
 import {
-	runRepoFixWorkflow,
 	type ControlledVerificationFeedback,
-	type RepoFixTrajectoryEvent,
 	type RepoFixSessionResult,
+	type RepoFixTrajectoryEvent,
+	runRepoFixWorkflow,
 	type StageRecovery,
 } from "../agent/repofix.ts";
 import {
@@ -31,10 +31,13 @@ import {
 	type RepoFixConfigId,
 } from "../agent/repofix-config.ts";
 import type { StageCompletion } from "../agent/repofix-fsm.ts";
-import type { RepoToolOutputBudgetSnapshot } from "../sandbox/repo-tools.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
+import { createLayeredMemoryPolicy, type RepoFixMemoryPolicyId } from "../contracts/memory.ts";
 import { createPatchSnapshot, type PatchSnapshot } from "../contracts/run-contracts.ts";
 import type { RepoToolTransport } from "../controller/client.ts";
+import { RepoFixContextAssembler, type RepoFixMemoryMetrics, RepoFixMemoryRuntime } from "../memory/assembler.ts";
+import { RepoFixMemoryStore } from "../memory/store.ts";
+import type { RepoToolOutputBudgetSnapshot } from "../sandbox/repo-tools.ts";
 import { ArtifactStore } from "../storage/artifact-store.ts";
 import {
 	HttpRuntimeController,
@@ -46,23 +49,24 @@ import {
 	createFrozenModelRuntime,
 	createFrozenPiGeneralSession,
 	createFrozenRepoFixSession,
+	type FrozenModelRuntime,
 	installRunAdmissionGate,
 	runtimeIdentityFromSession,
-	type FrozenModelRuntime,
 } from "./runtime-factory.ts";
-import {
-	createTokenAdmissionEstimator,
-	FsyncTokenLedgerSink,
-	installTokenSupervisor,
-	TokenReservationLedger,
-	type TokenAdmissionEstimatorSpec,
-} from "./token-supervisor.ts";
 import {
 	FilePublicTaskSource,
 	FileTaskEnvironmentLockSource,
 	type PublicTaskSource,
 	type TaskEnvironmentLockSource,
 } from "./task-source.ts";
+import {
+	createTokenAdmissionEstimator,
+	createTokenSupervisedStream,
+	FsyncTokenLedgerSink,
+	installTokenSupervisor,
+	type TokenAdmissionEstimatorSpec,
+	TokenReservationLedger,
+} from "./token-supervisor.ts";
 
 const LOGICAL_AGENT_CWD = "/testbed";
 const DEFAULT_PER_RUN_ADMISSION_CAP = 200_000;
@@ -89,6 +93,7 @@ type RepoFixSessionFactory = (options: {
 	readonly cwd: string;
 	readonly transport: RepoToolTransport;
 	readonly configId: Exclude<RepoFixConfigId, "pi-general">;
+	readonly memory?: RepoFixMemoryRuntime;
 }) => Promise<RepoFixSessionResult>;
 
 export interface M4DevWorkflowDependencies {
@@ -108,6 +113,7 @@ export interface M4DevWorkflowOptions {
 	readonly configId: RepoFixConfigId;
 	readonly accountedAdmissionCapTokens?: number;
 	readonly tokenAdmissionEstimator?: TokenAdmissionEstimatorSpec;
+	readonly memoryPolicy?: RepoFixMemoryPolicyId;
 	/** Formal continuations may raise this uniformly for their own frozen cohort. */
 	readonly maxModelTurns?: number;
 	/** M7 supplies its immutable logical identities instead of allocating Dev-only IDs. */
@@ -140,6 +146,10 @@ export interface M4DevWorkflowSummary {
 	readonly controlled_verification_sha256s: readonly string[];
 	/** Present only for the RepoFix configuration; pi-general has no RepoFix context controller. */
 	readonly repofix_context_budget?: RepoToolOutputBudgetSnapshot;
+	/** Emitted by memory-aware M4 runs; absent from older v1 summaries. */
+	readonly memory_policy?: RepoFixMemoryPolicyId;
+	readonly repofix_memory_metrics?: RepoFixMemoryMetrics;
+	readonly agent_wall_ms?: number;
 }
 
 /** A failure before the first Provider reservation is safe to report without token reconciliation. */
@@ -196,7 +206,10 @@ async function persistSnapshot(
 		patch_sha256: raw.patchSha256,
 		patch_bytes: raw.patch.byteLength,
 		files: [...raw.files],
-		policy: { status: raw.policy.status, violations: [...raw.policy.violations] },
+		policy: {
+			status: raw.policy.status,
+			violations: [...raw.policy.violations],
+		},
 		created_at: raw.createdAt,
 	});
 	await store.writeNew(`${label.toLowerCase()}-snapshot.json`, stableStringify(snapshot), {
@@ -234,7 +247,8 @@ function assertCap(value: number): void {
 
 /** Validate the run-level model-turn termination limit. */
 function assertModelTurnLimit(value: number): void {
-	if (!Number.isSafeInteger(value) || value < 1) throw new Error("M4 Dev max model turns must be a positive safe integer");
+	if (!Number.isSafeInteger(value) || value < 1)
+		throw new Error("M4 Dev max model turns must be a positive safe integer");
 }
 
 /** Persist a completed RepoFix stage and its repository-output budget snapshot. */
@@ -248,11 +262,15 @@ async function writeStageEvidence(
 		sensitivity: "internal",
 		generatedBy: "agent",
 	});
-	await store.writeNew(`stages/${completion.stage.toLowerCase()}.context-budget.json`, stableStringify(contextBudget), {
-		mediaType: "application/json",
-		sensitivity: "internal",
-		generatedBy: "orchestrator",
-	});
+	await store.writeNew(
+		`stages/${completion.stage.toLowerCase()}.context-budget.json`,
+		stableStringify(contextBudget),
+		{
+			mediaType: "application/json",
+			sensitivity: "internal",
+			generatedBy: "orchestrator",
+		},
+	);
 }
 
 /** Persist evidence that the workflow recovered a missing stage-completion call. */
@@ -285,6 +303,12 @@ export async function runM4DevWorkflow(
 	const maxModelTurns = options.maxModelTurns ?? FROZEN_MAX_MODEL_TURNS;
 	assertModelTurnLimit(maxModelTurns);
 	getRepoFixWorkflowConfig(options.configId);
+	const memoryPolicyId = options.memoryPolicy ?? "legacy-context-v1";
+	if (options.configId === "pi-general" && memoryPolicyId !== "legacy-context-v1") {
+		throw new M4PreProviderInputError("Layered RepoFix memory cannot be enabled for pi-general");
+	}
+	const layeredMemoryPolicy =
+		memoryPolicyId === "layered-memory-v1" ? createLayeredMemoryPolicy(dependencies.modelSpecSha256) : null;
 	const runId = options.runId ?? `m4-dev-${dependencies.randomId()}`;
 	const attemptId = options.attemptId ?? `attempt-${dependencies.randomId()}`;
 	let environment: Awaited<ReturnType<TaskEnvironmentLockSource["load"]>>;
@@ -304,6 +328,7 @@ export async function runM4DevWorkflow(
 	let sessionDirectory: string | null = null;
 	let piSession: PiGeneralSessionResult | null = null;
 	let repoFixSession: RepoFixSessionResult | null = null;
+	let memoryRuntime: RepoFixMemoryRuntime | null = null;
 	let p0PatchSha256: string | null = null;
 	let v1PatchSha256: string | null = null;
 	let v2PatchSha256: string | null = null;
@@ -314,6 +339,8 @@ export async function runM4DevWorkflow(
 	const repofixTrajectoryEvents: RepoFixTrajectoryEvent[] = [];
 	let repofixTrajectoryPersisted = false;
 	let terminalStatus: "completed" | "failed" = "failed";
+	let agentStarted: number | null = null;
+	let agentWallMs: number | null = null;
 	/** Write the RepoFix control trajectory once after at least one event exists. */
 	const persistRepoFixTrajectory = async (): Promise<void> => {
 		if (repofixTrajectoryPersisted || repofixTrajectoryEvents.length === 0) return;
@@ -325,13 +352,33 @@ export async function runM4DevWorkflow(
 				run_id: runId,
 				attempt_id: attemptId,
 				instance_id: options.instanceId,
-				events: repofixTrajectoryEvents.map((event, index) => ({ sequence: index + 1, ...event })),
+				events: repofixTrajectoryEvents.map((event, index) => ({
+					sequence: index + 1,
+					...event,
+				})),
 			}),
-			{ mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" },
+			{
+				mediaType: "application/json",
+				sensitivity: "internal",
+				generatedBy: "orchestrator",
+			},
 		);
 		repofixTrajectoryPersisted = true;
 	};
 	try {
+		await store.writeNew(
+			"memory-policy.json",
+			stableStringify({
+				schema_version: "v1",
+				memory_policy: memoryPolicyId,
+				l3_enabled: false,
+			}),
+			{
+				mediaType: "application/json",
+				sensitivity: "internal",
+				generatedBy: "orchestrator",
+			},
+		);
 		await store.writeNew("public-task.json", stableStringify(publicTask.manifest), {
 			mediaType: "application/json",
 			sensitivity: "public",
@@ -383,18 +430,22 @@ export async function runM4DevWorkflow(
 				input: {},
 			});
 			if (probe.tool !== "repo_list") throw new Error("Controller worker probe returned the wrong tool result");
-			await store.writeNew("controller-worker-probe.json", stableStringify({
-				schema_version: "v1",
-				evidence_type: "controller_worker_probe",
-				attempt_id: attemptId,
-				lease_id: leaseId,
-				tool: probe.tool,
-				status: "ready",
-			}), {
-				mediaType: "application/json",
-				sensitivity: "internal",
-				generatedBy: "controller",
-			});
+			await store.writeNew(
+				"controller-worker-probe.json",
+				stableStringify({
+					schema_version: "v1",
+					evidence_type: "controller_worker_probe",
+					attempt_id: attemptId,
+					lease_id: leaseId,
+					tool: probe.tool,
+					status: "ready",
+				}),
+				{
+					mediaType: "application/json",
+					sensitivity: "internal",
+					generatedBy: "controller",
+				},
+			);
 		} catch (error) {
 			throw new M4PreProviderInputError(`Controller worker probe failed: ${safeMessage(error)}`);
 		}
@@ -412,14 +463,29 @@ export async function runM4DevWorkflow(
 			const estimator = createTokenAdmissionEstimator(options.tokenAdmissionEstimator ?? M4_DEV_TOKEN_ESTIMATOR);
 			let requestSequence = 0;
 			/** Install reservation-based Provider admission on the active Pi session. */
-			const installSupervisor = (session: PiGeneralSessionResult["session"] | RepoFixSessionResult["session"]): void => {
+			const installSupervisor = (
+				session: PiGeneralSessionResult["session"] | RepoFixSessionResult["session"],
+				memory?: RepoFixMemoryRuntime,
+				stageId?: () => string | null,
+				onRequestId?: (requestId: string) => void,
+			): void => {
 				installTokenSupervisor(session, {
 					ledger,
 					run_id: runId,
 					max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-					estimate_input_tokens: (context) => estimator.estimate(context),
+					estimate_input_tokens:
+						layeredMemoryPolicy === null
+							? (context) => estimator.estimate(context)
+							: () => layeredMemoryPolicy.context_window - DEFAULT_MAX_OUTPUT_TOKENS,
 					estimate_base_input_tokens: (context) => estimator.baseEstimate(context),
 					next_request_id: () => `${attemptId}:provider:${String(requestSequence++).padStart(4, "0")}`,
+					request_kind: "agent",
+					stage_id: stageId,
+					prepare_context:
+						memory === undefined
+							? undefined
+							: (context, requestId) => memory.prepareProviderContext(context, requestId),
+					on_request_id: onRequestId,
 				});
 			};
 			if (options.configId === "pi-general") {
@@ -435,6 +501,7 @@ export async function runM4DevWorkflow(
 					modelTurns: maxModelTurns,
 					toolCalls: null,
 				});
+				agentStarted = performance.now();
 				await piSession.session.prompt(publicTask.task.problem_statement);
 			} else {
 				const repoFixConfigId = options.configId;
@@ -448,27 +515,75 @@ export async function runM4DevWorkflow(
 					`${attemptId}:verification-catalog`,
 					leaseId,
 				);
-				await store.writeNew("verification-catalog.json", stableStringify({
-					schema_version: "v2" as const,
-					evidence_type: "verification_catalog",
-					catalog_id: verificationCatalog.catalogId,
-					source_sha256: verificationCatalog.sourceSha256,
-					entries: verificationCatalog.entries.map((entry) => ({
-						candidate_id: entry.candidateId,
-						description: entry.description,
-					})),
-				}), {
-					mediaType: "application/json",
-					sensitivity: "internal",
-					generatedBy: "controller",
-				});
+				await store.writeNew(
+					"verification-catalog.json",
+					stableStringify({
+						schema_version: "v2" as const,
+						evidence_type: "verification_catalog",
+						catalog_id: verificationCatalog.catalogId,
+						source_sha256: verificationCatalog.sourceSha256,
+						entries: verificationCatalog.entries.map((entry) => ({
+							candidate_id: entry.candidateId,
+							description: entry.description,
+						})),
+					}),
+					{
+						mediaType: "application/json",
+						sensitivity: "internal",
+						generatedBy: "controller",
+					},
+				);
+				if (layeredMemoryPolicy !== null) {
+					const memoryStore = new RepoFixMemoryStore(store, options.instanceId, attemptId);
+					memoryRuntime = new RepoFixMemoryRuntime(
+						memoryStore,
+						new RepoFixContextAssembler(memoryStore, layeredMemoryPolicy),
+					);
+					await memoryRuntime.initialize(publicTask.task.problem_statement);
+				}
 				repoFixSession = await dependencies.createRepoFixSession({
 					leaseId,
 					attemptDirectory: join(sessionDirectory, "session"),
 					cwd: LOGICAL_AGENT_CWD,
 					transport,
 					configId: repoFixConfigId,
+					memory: memoryRuntime ?? undefined,
 				});
+				if (memoryRuntime !== null && layeredMemoryPolicy !== null) {
+					const activeLayeredMemoryPolicy = layeredMemoryPolicy;
+					const activeRepoFixSession = repoFixSession;
+					const model = activeRepoFixSession.session.model;
+					if (model === undefined) throw new Error("RepoFix memory condenser requires the active frozen model");
+					memoryRuntime.setCondenser(async (request) => {
+						const stream = createTokenSupervisedStream(activeRepoFixSession.providerStream, {
+							ledger,
+							run_id: runId,
+							max_output_tokens: request.summary_max_tokens,
+							estimate_input_tokens: () => activeLayeredMemoryPolicy.context_window - request.summary_max_tokens,
+							estimate_base_input_tokens: (context) => estimator.baseEstimate(context),
+							next_request_id: () => `${attemptId}:provider:${String(requestSequence++).padStart(4, "0")}`,
+							request_kind: "condenser",
+							stage_id: request.stage_id,
+						});
+						const output = await stream(model, request.context, {
+							maxTokens: request.summary_max_tokens,
+						});
+						const message = await output.result();
+						if (message.stopReason === "error" || message.stopReason === "aborted") {
+							throw new Error(message.errorMessage ?? "Condenser Provider request failed");
+						}
+						if (message.content.some((item) => item.type === "toolCall")) {
+							throw new Error("Condenser returned a tool call");
+						}
+						const summary = message.content
+							.filter((item) => item.type === "text")
+							.map((item) => item.text)
+							.join("\n")
+							.trim();
+						if (summary.length === 0) throw new Error("Condenser returned no summary text");
+						return summary;
+					});
+				}
 				const identity = runtimeIdentityFromSession(repoFixSession.session, dependencies.modelSpecSha256);
 				await store.writeNew(
 					"configuration-diff.json",
@@ -479,14 +594,24 @@ export async function runM4DevWorkflow(
 							tool_schema_sha256: identity.toolSchemaSha256,
 						}),
 					),
-					{ mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" },
+					{
+						mediaType: "application/json",
+						sensitivity: "internal",
+						generatedBy: "orchestrator",
+					},
 				);
-				installSupervisor(repoFixSession.session);
+				installSupervisor(
+					repoFixSession.session,
+					memoryRuntime ?? undefined,
+					() => repoFixSession?.stageMachine.activeStage ?? null,
+					(requestId) => repoFixSession?.stageCompletionControl.setProviderRequestId(requestId),
+				);
 				installRunAdmissionGate(repoFixSession.session, {
 					accountedTokens: null,
 					modelTurns: maxModelTurns,
 					toolCalls: null,
 				});
+				agentStarted = performance.now();
 				await runRepoFixWorkflow(repoFixSession, publicTask.task.problem_statement, {
 					verificationCatalog: {
 						catalog_id: verificationCatalog.catalogId,
@@ -496,7 +621,8 @@ export async function runM4DevWorkflow(
 						})),
 					},
 					onStageComplete: (completion) => {
-						if (repoFixSession === null) throw new Error("RepoFix session is unavailable while recording stage evidence");
+						if (repoFixSession === null)
+							throw new Error("RepoFix session is unavailable while recording stage evidence");
 						return writeStageEvidence(store, completion, repoFixSession.repoToolOutputBudget.snapshot);
 					},
 					onStageRecovery: (recovery) => writeStageRecoveryEvidence(store, recovery),
@@ -528,7 +654,8 @@ export async function runM4DevWorkflow(
 					},
 					controlledVerify: async (plan, checkpoint) => {
 						const activeLeaseId = leaseId;
-						if (activeLeaseId === null) throw new Error("M4 Dev worker lease disappeared before controlled verification");
+						if (activeLeaseId === null)
+							throw new Error("M4 Dev worker lease disappeared before controlled verification");
 						const response = await runCatalogVerification(
 							attemptId,
 							`${attemptId}:controlled-verify-${checkpoint.toLowerCase()}`,
@@ -568,11 +695,15 @@ export async function runM4DevWorkflow(
 								},
 							},
 						};
-						const artifact = await store.writeNew(`controlled-verify-${checkpoint.toLowerCase()}.json`, stableStringify(evidence), {
-							mediaType: "application/json",
-							sensitivity: "internal",
-							generatedBy: "controller",
-						});
+						const artifact = await store.writeNew(
+							`controlled-verify-${checkpoint.toLowerCase()}.json`,
+							stableStringify(evidence),
+							{
+								mediaType: "application/json",
+								sensitivity: "internal",
+								generatedBy: "controller",
+							},
+						);
 						if (checkpoint === "V0") controlledVerificationSha256 = artifact.sha256;
 						controlledVerificationSha256s.push(artifact.sha256);
 						return feedback;
@@ -630,13 +761,21 @@ export async function runM4DevWorkflow(
 					message: safeMessage(error),
 					at: dependencies.now().toISOString(),
 				}),
-				{ mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" },
+				{
+					mediaType: "application/json",
+					sensitivity: "internal",
+					generatedBy: "orchestrator",
+				},
 			)
 			.catch(() => undefined);
 	} finally {
+		if (agentStarted !== null && agentWallMs === null) {
+			agentWallMs = Math.max(0, Math.ceil(performance.now() - agentStarted));
+		}
 		piSession?.session.dispose();
 		repoFixSession?.session.dispose();
-		if (sessionDirectory !== null) await rm(sessionDirectory, { recursive: true, force: true }).catch(() => undefined);
+		if (sessionDirectory !== null)
+			await rm(sessionDirectory, { recursive: true, force: true }).catch(() => undefined);
 		const retainForFormalEvaluation =
 			options.retainWorkerForFormalEvaluation === true &&
 			terminalStatus === "completed" &&
@@ -673,8 +812,22 @@ export async function runM4DevWorkflow(
 		worker_lease_id: options.retainWorkerForFormalEvaluation === true && finalSnapshotId !== null ? leaseId : null,
 		controlled_verification_sha256: controlledVerificationSha256,
 		controlled_verification_sha256s: controlledVerificationSha256s,
-		...(repoFixSession === null ? {} : { repofix_context_budget: repoFixSession.repoToolOutputBudget.snapshot }),
+		memory_policy: memoryPolicyId,
+		...(agentWallMs === null ? {} : { agent_wall_ms: agentWallMs }),
+		...(repoFixSession === null
+			? {}
+			: {
+					repofix_context_budget: repoFixSession.repoToolOutputBudget.snapshot,
+				}),
+		...(memoryRuntime === null ? {} : { repofix_memory_metrics: memoryRuntime.metrics }),
 	};
+	if (memoryRuntime !== null) {
+		await store.writeNew("memory-metrics.json", stableStringify(memoryRuntime.metrics), {
+			mediaType: "application/json",
+			sensitivity: "internal",
+			generatedBy: "orchestrator",
+		});
+	}
 	await store.writeNew("m4-dev-summary.json", stableStringify(summary), {
 		mediaType: "application/json",
 		sensitivity: "internal",
@@ -704,6 +857,7 @@ export function createDefaultM4DevWorkflowDependencies(
 				cwd: options.cwd,
 				transport: options.transport,
 				config: getRepoFixWorkflowConfig(options.configId),
+				memory: options.memory,
 			}),
 		modelSpecSha256: runtime.modelSpecSha256,
 		now: () => new Date(),

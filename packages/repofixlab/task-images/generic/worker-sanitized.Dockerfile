@@ -1,3 +1,14 @@
+# Sanitized Agent Worker image derived from the sealed official task image.
+#
+# This image:
+# - Verifies hashes for the sanitizer, probe, Dockerfile, and audit script.
+# - Audits that `/testbed` exposes only the exact shallow base commit.
+# - Uses a temporary HOME and records immutable provenance labels.
+#
+# Runtime resource limits, dropped capabilities, network isolation, read-only
+# root filesystem, and credential-free environment are applied by Controller
+# when the container is created rather than by this build recipe.
+
 ARG SOURCE_IMAGE=repofixlab/invalid-source:never
 FROM ${SOURCE_IMAGE}
 

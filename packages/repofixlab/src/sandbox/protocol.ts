@@ -1,3 +1,16 @@
+/**
+ * Repository tool protocol shared by the Orchestrator and Controller client.
+ *
+ * This module defines:
+ * - The fixed names and strict input schemas for repository tools
+ * - Pagination fields for bounded file reads and text searches
+ * - Result and HTTP response schemas returned by the Controller
+ * - TypeScript request and response types derived from those schemas
+ *
+ * These contracts reject unknown fields and unsafe repository-relative paths
+ * before a request is sent across the trusted Controller boundary.
+ */
+
 import type { Static } from "typebox";
 import { Type } from "typebox";
 
@@ -38,6 +51,7 @@ export const RepoListInputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** Input contract for a bounded, line-oriented repository file read. */
 export const RepoReadInputSchema = Type.Object(
 	{
 		path: FilePathSchema,
@@ -47,6 +61,7 @@ export const RepoReadInputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** Input contract for a bounded repository search page. */
 export const RepoSearchInputSchema = Type.Object(
 	{
 		query: Type.String({ minLength: 1, maxLength: 1_024 }),

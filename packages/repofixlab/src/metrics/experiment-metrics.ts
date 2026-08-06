@@ -1,5 +1,12 @@
-import { type EvaluationResult, type RunResult, verifyEvaluationResult } from "../contracts/run-contracts.ts";
+import type { RepoFixMemoryPolicyId } from "../contracts/memory.ts";
+import {
+	canonicalContractSha256,
+	type EvaluationResult,
+	type RunResult,
+	verifyEvaluationResult,
+} from "../contracts/run-contracts.ts";
 import type { BatchRunSpec } from "../runner/batch-state.ts";
+import type { M4DevWorkflowSummary } from "../runner/m4-dev-workflow.ts";
 
 export interface SecurityMetricEvidence {
 	readonly blocked_operation_count: number;
@@ -38,8 +45,209 @@ export interface ExperimentMetrics {
 	};
 }
 
+export interface MemoryPolicyProviderUsage {
+	readonly complete: boolean;
+	readonly agent: { readonly input_tokens: number; readonly output_tokens: number; readonly total_tokens: number };
+	readonly condenser: { readonly input_tokens: number; readonly output_tokens: number; readonly total_tokens: number };
+}
+
+export interface MemoryPolicyRunObservation {
+	readonly run_id: string;
+	readonly instance_id: string;
+	readonly memory_policy: RepoFixMemoryPolicyId;
+	readonly usage: MemoryPolicyProviderUsage;
+	readonly agent_wall_ms: number | null;
+	readonly task_wall_ms: number;
+	readonly resolved: boolean;
+	readonly memory_local_ms: number;
+	readonly l2_bytes: number;
+	readonly compression_trigger_count: number;
+}
+
+export interface MemoryPolicyComparison {
+	readonly schema_version: "v1";
+	readonly metric_type: "memory_policy_comparison";
+	readonly rows: readonly {
+		readonly instance_id: string;
+		readonly legacy_tokens: number | null;
+		readonly memory_tokens: number | null;
+		readonly token_difference: number | null;
+		readonly legacy_time_ms: number;
+		readonly memory_time_ms: number;
+		readonly time_difference_ms: number;
+		readonly legacy_resolved: boolean;
+		readonly memory_resolved: boolean;
+		readonly memory_local_ms: number;
+		readonly memory_l2_bytes: number;
+		readonly compression_trigger_count: number;
+	}[];
+	readonly total: {
+		readonly legacy_tokens: number | null;
+		readonly memory_tokens: number | null;
+		readonly token_difference: number | null;
+		readonly legacy_time_ms: number;
+		readonly memory_time_ms: number;
+		readonly time_difference_ms: number;
+		readonly legacy_resolved_count: number;
+		readonly memory_resolved_count: number;
+		readonly memory_local_ms: number;
+		readonly memory_l2_bytes: number;
+		readonly compression_trigger_count: number;
+	};
+	readonly comparison_sha256: string;
+}
+
 function assertCount(value: number, name: string): void {
 	if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative safe integer`);
+}
+
+/** Reconcile actual Provider tokens by request kind without double counting. */
+export function parseMemoryPolicyTokenLedger(content: string): MemoryPolicyProviderUsage {
+	const totals = {
+		agent: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+		condenser: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+	};
+	const open = new Map<string, "agent" | "condenser">();
+	let complete = true;
+	for (const line of content.split("\n")) {
+		if (line.length === 0) continue;
+		const event = JSON.parse(line) as {
+			readonly event_type?: string;
+			readonly request_id?: string;
+			readonly request_kind?: "agent" | "condenser";
+			readonly provider_prompt_tokens?: number | null;
+			readonly provider_completion_tokens?: number | null;
+			readonly provider_total_tokens?: number | null;
+		};
+		if (typeof event.request_id !== "string") throw new Error("Memory comparison ledger event lacks request_id");
+		const kind = event.request_kind ?? "agent";
+		if (event.event_type === "reservation_open") {
+			if (open.has(event.request_id))
+				throw new Error("Memory comparison ledger contains a duplicate open reservation");
+			open.set(event.request_id, kind);
+		} else if (event.event_type === "reservation_settled") {
+			if (open.get(event.request_id) !== kind) throw new Error("Memory comparison ledger settlement is not paired");
+			open.delete(event.request_id);
+			const input = event.provider_prompt_tokens;
+			const output = event.provider_completion_tokens;
+			const total = event.provider_total_tokens;
+			if (
+				input === null ||
+				input === undefined ||
+				output === null ||
+				output === undefined ||
+				total === null ||
+				total === undefined ||
+				input + output !== total
+			) {
+				throw new Error("Memory comparison ledger settlement has invalid Provider usage");
+			}
+			totals[kind].input_tokens += input;
+			totals[kind].output_tokens += output;
+			totals[kind].total_tokens += total;
+		} else if (
+			event.event_type === "reservation_charged_unverified" ||
+			event.event_type === "budget_protocol_invalid"
+		) {
+			if (open.get(event.request_id) !== kind) throw new Error("Memory comparison ledger charge is not paired");
+			open.delete(event.request_id);
+			complete = false;
+		}
+	}
+	if (open.size > 0) complete = false;
+	return { complete, ...totals };
+}
+
+/** Join one formal result, its M4 summary, and its exact token ledger. */
+export function createMemoryPolicyRunObservation(
+	result: RunResult,
+	m4: M4DevWorkflowSummary,
+	tokenLedger: string,
+): MemoryPolicyRunObservation {
+	if (result.run_id !== m4.run_id) throw new Error("Memory comparison result and M4 summary run IDs differ");
+	const memoryPolicy = m4.memory_policy;
+	if (memoryPolicy === undefined) throw new Error("Memory comparison M4 summary lacks memory_policy");
+	const memory = m4.repofix_memory_metrics;
+	return {
+		run_id: result.run_id,
+		instance_id: m4.instance_id,
+		memory_policy: memoryPolicy,
+		usage: parseMemoryPolicyTokenLedger(tokenLedger),
+		agent_wall_ms: m4.agent_wall_ms ?? null,
+		task_wall_ms: result.wall_time_ms,
+		resolved: result.resolved,
+		memory_local_ms:
+			memory === undefined ? 0 : memory.memory_store_ms + memory.memory_assemble_ms + memory.token_count_ms,
+		l2_bytes: memory?.l2_bytes ?? 0,
+		compression_trigger_count: memory?.compression_trigger_count ?? 0,
+	};
+}
+
+function actualTokens(observation: MemoryPolicyRunObservation): number | null {
+	return observation.usage.complete
+		? observation.usage.agent.total_tokens + observation.usage.condenser.total_tokens
+		: null;
+}
+
+function completeTotal(values: readonly (number | null)[]): number | null {
+	return values.some((value) => value === null)
+		? null
+		: values.reduce<number>((total, value) => total + (value ?? 0), 0);
+}
+
+/** Build the fixed five-task, two-policy paired comparison. */
+export function createMemoryPolicyComparison(
+	observations: readonly MemoryPolicyRunObservation[],
+): MemoryPolicyComparison {
+	const instanceIds = [...new Set(observations.map((observation) => observation.instance_id))].sort();
+	if (observations.length !== 10 || instanceIds.length !== 5) {
+		throw new Error("Memory comparison requires exactly five tasks and ten observations");
+	}
+	const rows = instanceIds.map((instanceId) => {
+		const members = observations.filter((observation) => observation.instance_id === instanceId);
+		const legacy = members.find((observation) => observation.memory_policy === "legacy-context-v1");
+		const memory = members.find((observation) => observation.memory_policy === "layered-memory-v1");
+		if (members.length !== 2 || legacy === undefined || memory === undefined) {
+			throw new Error(`Memory comparison task ${instanceId} does not contain one run per policy`);
+		}
+		const legacyTokens = actualTokens(legacy);
+		const memoryTokens = actualTokens(memory);
+		return {
+			instance_id: instanceId,
+			legacy_tokens: legacyTokens,
+			memory_tokens: memoryTokens,
+			token_difference: legacyTokens === null || memoryTokens === null ? null : memoryTokens - legacyTokens,
+			legacy_time_ms: legacy.task_wall_ms,
+			memory_time_ms: memory.task_wall_ms,
+			time_difference_ms: memory.task_wall_ms - legacy.task_wall_ms,
+			legacy_resolved: legacy.resolved,
+			memory_resolved: memory.resolved,
+			memory_local_ms: memory.memory_local_ms,
+			memory_l2_bytes: memory.l2_bytes,
+			compression_trigger_count: memory.compression_trigger_count,
+		};
+	});
+	const legacyTokens = completeTotal(rows.map((row) => row.legacy_tokens));
+	const memoryTokens = completeTotal(rows.map((row) => row.memory_tokens));
+	const unsigned = {
+		schema_version: "v1" as const,
+		metric_type: "memory_policy_comparison" as const,
+		rows,
+		total: {
+			legacy_tokens: legacyTokens,
+			memory_tokens: memoryTokens,
+			token_difference: legacyTokens === null || memoryTokens === null ? null : memoryTokens - legacyTokens,
+			legacy_time_ms: rows.reduce((total, row) => total + row.legacy_time_ms, 0),
+			memory_time_ms: rows.reduce((total, row) => total + row.memory_time_ms, 0),
+			time_difference_ms: rows.reduce((total, row) => total + row.time_difference_ms, 0),
+			legacy_resolved_count: rows.filter((row) => row.legacy_resolved).length,
+			memory_resolved_count: rows.filter((row) => row.memory_resolved).length,
+			memory_local_ms: rows.reduce((total, row) => total + row.memory_local_ms, 0),
+			memory_l2_bytes: rows.reduce((total, row) => total + row.memory_l2_bytes, 0),
+			compression_trigger_count: rows.reduce((total, row) => total + row.compression_trigger_count, 0),
+		},
+	};
+	return { ...unsigned, comparison_sha256: canonicalContractSha256(unsigned) };
 }
 
 function rate(passed: number, total: number): number | null {

@@ -2,6 +2,7 @@ export * from "./dataset-preparer-self-check.ts";
 export * from "./experiment-plan.ts";
 export * from "./harness-equivalence.ts";
 export * from "./m6-task-environment-lock.ts";
+export * from "./memory.ts";
 export * from "./official-image-source-lock.ts";
 export * from "./pristine-runtime-lock.ts";
 export * from "./run-contracts.ts";

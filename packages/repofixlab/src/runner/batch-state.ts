@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, utimes } from "node:fs/promises";
+import { type FileHandle, mkdir, open, readFile, rename, unlink, utimes } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
@@ -202,7 +202,7 @@ export class ExperimentOwnerLease {
 	static async acquire(root: string): Promise<ExperimentOwnerLease> {
 		const path = join(resolve(root), "experiment-owner.lease");
 		await mkdir(dirname(path), { recursive: true });
-		let handle;
+		let handle: FileHandle;
 		try {
 			handle = await open(path, "wx", 0o600);
 		} catch (error) {
@@ -234,14 +234,12 @@ export class ExperimentOwnerLease {
 }
 
 export class BatchStateStore {
-	private readonly root: string;
 	private readonly eventsPath: string;
 	private readonly snapshotPath: string;
 	private events: BatchStateEvent[];
 	private runs: Map<string, BatchRunState>;
 
 	private constructor(root: string, events: BatchStateEvent[]) {
-		this.root = root;
 		this.eventsPath = join(root, "batch-events.jsonl");
 		this.snapshotPath = join(root, "batch-state.json");
 		this.events = events;

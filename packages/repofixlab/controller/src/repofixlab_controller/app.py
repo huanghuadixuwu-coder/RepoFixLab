@@ -1,3 +1,17 @@
+"""Trusted Controller HTTP application and production service wiring.
+
+This module:
+- Builds the FastAPI process that owns privileged Controller services.
+- Opens the local Docker SDK client only inside the Controller process.
+- Constructs factory, runtime, image-resolution, and preflight services.
+- Exposes bounded HTTP operations while closing owned resources on shutdown.
+
+Trust boundary:
+- Docker access and repository/container operations stay inside Controller.
+- Model credentials, model selection, token budgets, and experiment scheduling
+  remain owned by the Node Orchestrator and are not loaded here.
+"""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -47,6 +61,8 @@ from .runtime_service import RuntimeOperationService
 
 
 def _bootstrap_health_validator() -> Draft202012Validator:
+    """Load the frozen bootstrap-health schema used for fail-closed validation."""
+
     schema_path = Path(
         os.environ.get(
             "REPOFIXLAB_SCHEMA_PATH",
@@ -63,6 +79,8 @@ BOOTSTRAP_DOCTOR_LOCK = Lock()
 
 
 class TaskRoleFactoryOperationRequest(BaseModel):
+    """Validate one idempotent request for a trusted task-role factory probe."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     operation_id: str = Field(
@@ -79,6 +97,8 @@ class TaskRoleFactoryOperationRequest(BaseModel):
 
 
 class M3OfficialImageResolutionRequest(BaseModel):
+    """Validate one bounded batch request for resolving official task images."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal["v1"]
@@ -93,6 +113,8 @@ class M3OfficialImageResolutionRequest(BaseModel):
 
 
 class M3PreflightTaskRequest(BaseModel):
+    """Describe one task binding checked during official-image preflight."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     instance_id: str = Field(min_length=3, max_length=401)
@@ -105,6 +127,8 @@ class M3PreflightTaskRequest(BaseModel):
 
 
 class M3OfficialPreflightRequest(BaseModel):
+    """Validate a complete M3 preflight request against the frozen cohort size."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal["v1"]
@@ -116,6 +140,8 @@ class M3OfficialPreflightRequest(BaseModel):
 
 
 def _load_factory_from_environment() -> tuple[FactoryOperationService | None, object | None]:
+    """Create the trusted candidate factory and its owned Docker client."""
+
     candidate_directory_value = os.environ.get("REPOFIXLAB_FACTORY_CANDIDATE_DIR")
     if not candidate_directory_value:
         return None, None
@@ -149,6 +175,8 @@ def _load_runtime_from_environment(
     client: object,
     factory: FactoryOperationService,
 ) -> RuntimeOperationService | None:
+    """Build the Docker runtime from frozen locks, evaluator kernel, and journal."""
+
     task_lock_value = os.environ.get(
         "REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH"
     )
@@ -194,6 +222,8 @@ def _load_runtime_from_environment(
 
 
 def _runtime_enabled_from_environment() -> bool:
+    """Parse the exact boolean switch controlling production runtime startup."""
+
     value = os.environ.get("REPOFIXLAB_RUNTIME_ENABLED", "true")
     if value not in {"true", "false"}:
         raise RuntimeError("REPOFIXLAB_RUNTIME_ENABLED must be exactly true or false")
@@ -208,8 +238,12 @@ def create_app(
     m3_preflight_service: M3PreflightService | None = None,
     load_factory_from_environment: bool = True,
 ) -> FastAPI:
+    """Create the Controller API and bind injected or production-owned services."""
+
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """Open privileged services at startup and close only resources owned here."""
+
         service = factory_service
         active_runtime_service = runtime_service
         active_m3_image_resolution_service = m3_image_resolution_service
@@ -290,10 +324,14 @@ def create_app(
 
     @application.get("/healthz")
     def healthz() -> dict[str, str]:
+        """Return process liveness without claiming Docker runtime readiness."""
+
         return {"status": "ok"}
 
     @application.post("/v1/doctor/bootstrap")
     def bootstrap_doctor() -> dict[str, object]:
+        """Collect one serialized, schema-validated bootstrap health report."""
+
         with BOOTSTRAP_DOCTOR_LOCK:
             return _bootstrap_doctor_locked()
 
@@ -301,6 +339,8 @@ def create_app(
     def task_role_factory_probe(
         request: TaskRoleFactoryOperationRequest,
     ) -> JSONResponse:
+        """Execute one idempotent probe from the trusted candidate catalog."""
+
         service = getattr(application.state, "factory_service", None)
         if not isinstance(service, FactoryOperationService):
             raise HTTPException(status_code=503, detail="factory service is unavailable")
@@ -337,6 +377,8 @@ def create_app(
     def resolve_m3_official_images(
         request: M3OfficialImageResolutionRequest,
     ) -> JSONResponse:
+        """Start or replay official-image resolution for the frozen M3 cohort."""
+
         service = getattr(application.state, "m3_image_resolution_service", None)
         if not isinstance(service, M3ImageResolutionService):
             raise HTTPException(status_code=503, detail="M3 image resolution service is unavailable")
@@ -362,6 +404,8 @@ def create_app(
 
     @application.post("/v1/m3/official-preflight")
     def preflight_m3_official_images(request: M3OfficialPreflightRequest) -> JSONResponse:
+        """Start or replay the task, image, commit, and private-data preflight."""
+
         service = getattr(application.state, "m3_preflight_service", None)
         if not isinstance(service, M3PreflightService):
             raise HTTPException(status_code=503, detail="M3 preflight service is unavailable")
@@ -406,6 +450,8 @@ app = create_app()
 
 
 def _bootstrap_doctor_locked() -> dict[str, object]:
+    """Collect fail-closed Docker bootstrap evidence under the process lock."""
+
     compose_project = os.environ.get("REPOFIXLAB_COMPOSE_PROJECT", "repofixlab")
     try:
         client = docker.from_env()

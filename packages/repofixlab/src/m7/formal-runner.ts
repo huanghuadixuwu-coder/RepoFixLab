@@ -1,8 +1,24 @@
+/**
+ * Formal single-run orchestration from Agent execution to official evaluation.
+ *
+ * This module:
+ * - Freezes the run manifest, model identity, and run-level budget
+ * - Executes M4 while retaining a policy-passing final patch snapshot
+ * - Reconciles Provider usage before allowing official evaluation
+ * - Destroys the Worker before starting an independent Evaluator
+ * - Publishes normalized evaluation, attempt, index, and result artifacts
+ *
+ * The Orchestrator owns this admission and evidence chain. Controlled
+ * verification and Agent output cannot declare `resolved`; only the official
+ * Evaluator result supplies that terminal judgment.
+ */
+
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
+import type { RepoFixMemoryPolicyId } from "../contracts/memory.ts";
 import {
 	createArtifactIndex,
 	createAttempt,
@@ -29,6 +45,7 @@ const M7_PER_RUN_CAP = 5_000_000;
 const M7_TASK_ENVIRONMENT_LOCK_ROOT = fileURLToPath(new URL("../../configs/runtime/m6-26-task-v1", import.meta.url));
 const M7_RUNTIME_CONFIG_ROOT = fileURLToPath(new URL("../../configs/runtime", import.meta.url));
 
+/** Immutable identities, limits, and lifecycle hooks for one formal logical run. */
 export interface M7FormalRunOptions {
 	readonly artifactsRoot: string;
 	readonly formalRunsRoot: string;
@@ -39,13 +56,22 @@ export interface M7FormalRunOptions {
 	readonly configId: RepoFixConfigId;
 	readonly replicate: number;
 	readonly maxModelTurns: number;
+	readonly maxWallTimeMs?: number;
+	readonly memoryPolicy?: RepoFixMemoryPolicyId;
+	readonly accountedAdmissionCapTokens?: number;
 	readonly hooks?: { readonly agentFinished: () => Promise<void>; readonly evaluating: () => Promise<void> };
 }
 
+/** Controller, task, model-session, clock, and polling dependencies used by a formal run. */
 export interface M7FormalRunDependencies extends M4DevWorkflowDependencies {
 	readonly sleep: (milliseconds: number) => Promise<void>;
 }
 
+/**
+ * Reconcile the fsynced Provider reservation ledger into normalized run usage.
+ * Malformed settlement pairs fail closed; open or unverified reservations make
+ * actual usage incomplete while preserving their accounted charge.
+ */
 function usageFromLedger(content: string): RunResult["usage"] {
 	let accounted = 0;
 	let actual = 0;
@@ -57,6 +83,7 @@ function usageFromLedger(content: string): RunResult["usage"] {
 		const event = JSON.parse(line) as {
 			event_type: string;
 			request_id: string;
+			request_kind?: "agent" | "condenser";
 			accounted_tokens: number | null;
 			provider_total_tokens: number | null;
 		};
@@ -71,7 +98,7 @@ function usageFromLedger(content: string): RunResult["usage"] {
 				throw new Error("Settled token usage has no matching reservation");
 			accounted += event.accounted_tokens;
 			actual += event.provider_total_tokens;
-			modelTurns += 1;
+			if ((event.request_kind ?? "agent") === "agent") modelTurns += 1;
 		} else if (
 			event.event_type === "reservation_charged_unverified" ||
 			event.event_type === "budget_protocol_invalid"
@@ -95,15 +122,18 @@ function usageFromLedger(content: string): RunResult["usage"] {
 	};
 }
 
+/** Validate an Evaluator artifact name and assign a deterministic local path. */
 function evaluatorArtifactPath(name: string, index: number): string {
 	if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(name)) throw new Error("Unsafe Evaluator artifact name");
 	return `evaluator/${String(index + 1).padStart(3, "0")}-${name}`;
 }
 
+/** Convert an unknown failure into a bounded message safe for persisted batch evidence. */
 function errorMessage(error: unknown): string {
 	return (error instanceof Error ? error.message : "M7 pre-provider setup failed").slice(0, 2_000);
 }
 
+/** Detect whether a ledger proves that Provider admission or settlement began. */
 function hasProviderReservation(content: string): boolean {
 	for (const line of content.split("\n")) {
 		if (line.length === 0) continue;
@@ -119,10 +149,26 @@ function hasProviderReservation(content: string): boolean {
 	return false;
 }
 
+/**
+ * Execute one formal Agent attempt and pass only its retained P1 snapshot to an
+ * independent official Evaluator.
+ *
+ * The function verifies manifest identity and task inputs before Provider use,
+ * requires complete accounted usage plus a completed M4 worker/snapshot tuple,
+ * destroys the Worker, then persists and acknowledges official Evaluator
+ * artifacts. Only the normalized official result determines
+ * `official_resolved` or `official_unresolved`. Failures after known Provider
+ * usage retain that charge for outer batch accounting.
+ */
 export async function runM7FormalRun(
 	options: M7FormalRunOptions,
 	dependencies: M7FormalRunDependencies,
 ): Promise<RunResult> {
+	const accountedAdmissionCapTokens = options.accountedAdmissionCapTokens ?? M7_PER_RUN_CAP;
+	const maxWallTimeMs = options.maxWallTimeMs ?? 1_800_000;
+	if (!Number.isSafeInteger(maxWallTimeMs) || maxWallTimeMs < 1) {
+		throw new PreProviderBatchFailure("M7 max wall time must be a positive safe integer");
+	}
 	let environment: Awaited<ReturnType<M4DevWorkflowDependencies["environmentLockSource"]["load"]>>;
 	let publicTask: Awaited<ReturnType<M4DevWorkflowDependencies["publicTaskSource"]["load"]>>;
 	let runtime: ReturnType<typeof createDeepSeekV4FlashRuntime>;
@@ -177,10 +223,10 @@ export async function runM7FormalRun(
 			tool_schema_sha256: identity.toolSchemaSha256,
 		},
 		budget: {
-			accounted_admission_cap_tokens: M7_PER_RUN_CAP,
+			accounted_admission_cap_tokens: accountedAdmissionCapTokens,
 			max_model_turns: options.maxModelTurns,
 			max_tool_calls: null,
-			max_wall_time_ms: 1_800_000,
+			max_wall_time_ms: maxWallTimeMs,
 		},
 		created_at: startedAt,
 	});
@@ -198,7 +244,8 @@ export async function runM7FormalRun(
 				artifactsRoot: options.artifactsRoot,
 				instanceId: options.instanceId,
 				configId: options.configId,
-				accountedAdmissionCapTokens: M7_PER_RUN_CAP,
+				accountedAdmissionCapTokens,
+				memoryPolicy: options.memoryPolicy,
 				tokenAdmissionEstimator: {
 					version: "m6-deepseek-v4-flash-v1",
 					multiplier: 1.351,
@@ -339,17 +386,15 @@ export async function runM7FormalRun(
 			index_type: "artifact_index",
 			run_id: options.runId,
 			attempt_id: options.attemptId,
-			artifacts: store
-				.listArtifacts()
-				.map((artifact, index) => ({
-					name: `artifact-${String(index + 1).padStart(4, "0")}`,
-					path: artifact.path,
-					media_type: artifact.mediaType,
-					bytes: artifact.bytes,
-					sha256: artifact.sha256,
-					sensitivity: artifact.sensitivity,
-					generated_by: artifact.generatedBy,
-				})),
+			artifacts: store.listArtifacts().map((artifact, index) => ({
+				name: `artifact-${String(index + 1).padStart(4, "0")}`,
+				path: artifact.path,
+				media_type: artifact.mediaType,
+				bytes: artifact.bytes,
+				sha256: artifact.sha256,
+				sensitivity: artifact.sensitivity,
+				generated_by: artifact.generatedBy,
+			})),
 			created_at: finishedAt,
 		});
 		const result = createRunResult({
@@ -389,6 +434,7 @@ export async function runM7FormalRun(
 	}
 }
 
+/** Build production formal-run dependencies with frozen runtime and task-lock sources. */
 export function createDefaultM7FormalRunDependencies(controllerUrl: string): M7FormalRunDependencies {
 	const runtime = createDeepSeekV4FlashRuntime();
 	return {

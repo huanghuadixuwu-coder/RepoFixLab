@@ -30,16 +30,9 @@ import {
 	type PiGeneralSessionOptions,
 	type PiGeneralSessionResult,
 } from "../agent/pi-general.ts";
-import {
-	createRepoFixSession,
-	type RepoFixSessionOptions,
-	type RepoFixSessionResult,
-} from "../agent/repofix.ts";
+import { createRepoFixSession, type RepoFixSessionOptions, type RepoFixSessionResult } from "../agent/repofix.ts";
 import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
-import {
-	FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256,
-	FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256,
-} from "./pricing.ts";
+import { FROZEN_DEEPSEEK_V4_FLASH_PRICING_SPEC_SHA256, FROZEN_GLM_45_AIR_PRICING_SPEC_SHA256 } from "./pricing.ts";
 
 export const FROZEN_MODEL_PROVIDER = "zhipu-standard";
 export const FROZEN_MODEL_ID = "glm-4.5-air";
@@ -133,7 +126,12 @@ interface ModelRuntimeDefinition {
 	readonly compat: Model<Api>["compat"];
 	readonly contextWindow: number;
 	readonly maxTokens: number;
-	readonly cost: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number };
+	readonly cost: {
+		readonly input: number;
+		readonly output: number;
+		readonly cacheRead: number;
+		readonly cacheWrite: number;
+	};
 	readonly thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 	readonly forceStageCompletionToolChoice: boolean;
 }
@@ -200,7 +198,8 @@ function createModelRuntime(
 	useEnvironment = true,
 ): FrozenModelRuntime {
 	const configuredApiKey = apiKey ?? (useEnvironment ? process.env[definition.apiKeyEnvironmentName] : undefined);
-	const configuredApiKeyFile = apiKeyFile ?? (useEnvironment ? process.env[`${definition.apiKeyEnvironmentName}_FILE`] : undefined);
+	const configuredApiKeyFile =
+		apiKeyFile ?? (useEnvironment ? process.env[`${definition.apiKeyEnvironmentName}_FILE`] : undefined);
 	let fileApiKey: string | undefined;
 	if (configuredApiKeyFile !== undefined) {
 		const stats = lstatSync(configuredApiKeyFile);
@@ -285,7 +284,12 @@ export async function createFrozenRepoFixSession(
 	const stream = result.session.agent.streamFn;
 	result.session.agent.streamFn = (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) =>
 		stream(model, context, frozenProviderStreamOptions(streamOptions));
-	return result;
+	const providerStream = result.providerStream;
+	return {
+		...result,
+		providerStream: (model, context, streamOptions) =>
+			providerStream(model, context, frozenProviderStreamOptions(streamOptions)),
+	};
 }
 
 /**
@@ -298,7 +302,7 @@ export function frozenProviderStreamOptions(streamOptions?: SimpleStreamOptions)
 	return {
 		...streamOptions,
 		temperature: FROZEN_TEMPERATURE,
-		maxTokens: 16_384,
+		maxTokens: Math.min(16_384, streamOptions?.maxTokens ?? 16_384),
 		timeoutMs: FROZEN_PROVIDER_REQUEST_TIMEOUT_MS,
 		signal,
 	};

@@ -1,3 +1,16 @@
+/**
+ * Finite-state machine and structured completion contracts for RepoFix stages.
+ *
+ * This module owns:
+ * - The exact completion artifact schema for each workflow stage
+ * - Provider-wire normalization before strict validation
+ * - Stage-specific repository-tool authorization
+ * - Ordered stage transitions and cross-stage obligation checks
+ *
+ * Model output cannot advance the workflow until `stage_complete` validates
+ * against the active stage and all required prior-stage invariants.
+ */
+
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
@@ -411,24 +424,33 @@ export const StageCompletionToolSchema = Type.Union([
 	SelfReviewCompletionToolSchema,
 ]);
 
+/** Return the strict stored-artifact schema for one RepoFix stage. */
 export function stageCompletionSchema(stage: RepoFixStage) {
 	return STAGE_COMPLETION_SCHEMAS[stage];
 }
 
+/** Return the provider-facing tool schema for one RepoFix stage. */
 export function stageCompletionToolSchema(stage: RepoFixStage) {
 	return STAGE_COMPLETION_TOOL_SCHEMAS[stage];
 }
 
+/** Return the permissive wire schema used before normalization and strict validation. */
 export function stageCompletionWireSchema(stage: RepoFixStage) {
 	return STAGE_COMPLETION_WIRE_SCHEMAS[stage];
 }
 
+/** Describe the exact structured artifact required to complete one stage. */
 export function stageCompletionArtifactRequirement(stage: RepoFixStage): string {
 	return STAGE_COMPLETION_ARTIFACT_REQUIREMENTS[stage];
 }
 
+/** Validated structured artifact emitted by any RepoFix stage. */
 export type StageCompletion = Static<typeof StageCompletionSchema>;
+
+/** Sole tool name permitted to declare that the active stage is complete. */
 export const REPOFIX_STAGE_COMPLETE_TOOL_NAME = "stage_complete";
+
+/** Complete repository and completion tool registry available to RepoFix sessions. */
 export const REPOFIX_TOOL_NAMES = [
 	"repo_list",
 	"repo_read",
@@ -438,6 +460,7 @@ export const REPOFIX_TOOL_NAMES = [
 	"repo_diff",
 	REPOFIX_STAGE_COMPLETE_TOOL_NAME,
 ] as const;
+/** Tool name accepted by the RepoFix session hook boundary. */
 export type RepoFixToolName = (typeof REPOFIX_TOOL_NAMES)[number];
 
 const completionValidators = {
@@ -450,6 +473,7 @@ const completionValidators = {
 	SELF_REVIEW: Compile(SelfReviewCompletionSchema),
 } as const;
 
+/** Require IMPLEMENT or SELF_REVIEW to disposition every PLAN obligation once. */
 function assertObligationDispositionCoverage(
 	stage: "IMPLEMENT" | "SELF_REVIEW",
 	plan: Extract<StageCompletion, { stage: "PLAN" }>,
@@ -476,6 +500,7 @@ function assertObligationDispositionCoverage(
 	}
 }
 
+/** Require SELF_REVIEW to cover all PLAN obligations and preservation invariants. */
 function assertSelfReviewCoverage(
 	plan: Extract<StageCompletion, { stage: "PLAN" }>,
 	completion: Extract<StageCompletion, { stage: "SELF_REVIEW" }>,
@@ -495,10 +520,12 @@ function assertSelfReviewCoverage(
 	}
 }
 
+/** Narrow an unknown value to a non-array object for wire normalization. */
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Decode known JSON-encoded fields without accepting arbitrary structure changes. */
 function normalizeStructuredFields(
 	value: Record<string, unknown>,
 	fields: readonly string[],
@@ -522,6 +549,7 @@ function normalizeStructuredFields(
 	return normalized;
 }
 
+/** Normalize LOCALIZE candidates while rejecting unstructured prose entries. */
 function normalizeLocalizeCandidates(value: Record<string, unknown>): Record<string, unknown> {
 	const normalized = normalizeStructuredFields(value, ["candidates", "exclusions"], ["exclusions"]);
 	if (!Array.isArray(normalized.candidates)) return normalized;
@@ -583,6 +611,7 @@ export function normalizeStageCompletionParams(value: unknown): unknown {
 	}
 }
 
+/** Return the repository and completion tools authorized for one active stage. */
 function stageTools(_config: RepoFixWorkflowConfig, stage: RepoFixStage): readonly RepoFixToolName[] {
 	const completion = [REPOFIX_STAGE_COMPLETE_TOOL_NAME] as const;
 	switch (stage) {
@@ -602,12 +631,14 @@ function stageTools(_config: RepoFixWorkflowConfig, stage: RepoFixStage): readon
 	}
 }
 
+/** Owns ordered stage state, validated artifacts, and active-stage tool permissions. */
 export class RepoFixStageMachine {
 	private readonly completions = new Map<RepoFixStage, StageCompletion>();
 	private active: RepoFixStage | null = null;
 	private completionOnly = false;
 	private readonly config: RepoFixWorkflowConfig;
 
+	/** Create a stage machine for one validated RepoFix workflow configuration. */
 	constructor(config: RepoFixWorkflowConfig) {
 		if (config.workflow_kind !== "repofix") {
 			throw new Error("RepoFixStageMachine requires a RepoFix workflow configuration");
@@ -615,18 +646,22 @@ export class RepoFixStageMachine {
 		this.config = config;
 	}
 
+	/** Return the immutable workflow configuration owned by this machine. */
 	get workflowConfig(): RepoFixWorkflowConfig {
 		return this.config;
 	}
 
+	/** Return the active stage, or null between completed transitions. */
 	get activeStage(): RepoFixStage | null {
 		return this.active;
 	}
 
+	/** Return completed stage names in configured workflow order. */
 	get completedStages(): readonly RepoFixStage[] {
 		return this.config.stages.filter((stage) => this.completions.has(stage));
 	}
 
+	/** Start exactly the next configured stage and reject overlap or reordering. */
 	start(stage: RepoFixStage): void {
 		const expected = this.config.stages[this.completions.size];
 		if (this.active !== null || expected !== stage) {
@@ -636,12 +671,14 @@ export class RepoFixStageMachine {
 		this.completionOnly = false;
 	}
 
+	/** Return only the tools authorized for the current stage and recovery mode. */
 	allowedTools(): readonly RepoFixToolName[] {
 		if (this.active === null) throw new Error("No RepoFix stage is active");
 		if (this.completionOnly) return [REPOFIX_STAGE_COMPLETE_TOOL_NAME];
 		return stageTools(this.config, this.active);
 	}
 
+	/** Remove repository tools so recovery can submit only `stage_complete`. */
 	restrictToCompletion(stage: RepoFixStage): void {
 		if (this.active !== stage || this.completions.has(stage)) {
 			throw new Error(`Cannot restrict ${stage} to completion-only mode`);
@@ -649,6 +686,7 @@ export class RepoFixStageMachine {
 		this.completionOnly = true;
 	}
 
+	/** Validate and persist the active stage artifact, then advance to the boundary. */
 	complete(value: unknown): StageCompletion {
 		if (this.active === null) throw new Error("stage_complete is not valid without an active stage");
 		const validator = completionValidators[this.active];
@@ -685,25 +723,30 @@ export class RepoFixStageMachine {
 		return completion;
 	}
 
+	/** Return a completed artifact or fail if that stage never completed. */
 	assertComplete(stage: RepoFixStage): StageCompletion {
 		const completion = this.completions.get(stage);
 		if (completion === undefined) throw new Error(`RepoFix stage ${stage} did not complete`);
 		return completion;
 	}
 
+	/** Report whether a validated artifact exists for the requested stage. */
 	isComplete(stage: RepoFixStage): boolean {
 		return this.completions.has(stage);
 	}
 
+	/** Report whether every configured stage completed and none remains active. */
 	isFinished(): boolean {
 		return this.active === null && this.completions.size === this.config.stages.length;
 	}
 }
 
+/** Check whether a tool name belongs to the fixed RepoFix registry. */
 export function isRepoFixToolName(value: string): value is RepoFixToolName {
 	return (REPOFIX_TOOL_NAMES as readonly string[]).includes(value);
 }
 
+/** Create the sequential tool that submits completion artifacts to the stage machine. */
 export function createStageCompleteTool(machine: RepoFixStageMachine): ToolDefinition {
 	return defineTool({
 		name: REPOFIX_STAGE_COMPLETE_TOOL_NAME,

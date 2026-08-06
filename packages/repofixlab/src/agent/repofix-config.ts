@@ -1,6 +1,17 @@
+/**
+ * RepoFix workflow configuration and frozen stage sequences.
+ *
+ * This module defines:
+ * - The seven canonical RepoFix stages and their order
+ * - Full and ablation configurations used by experiments
+ * - Configuration invariants that prevent unintended workflow drift
+ * - Canonical configuration-difference evidence for reproducibility
+ */
+
 import { createHash } from "node:crypto";
 import { stableStringify } from "../contracts/canonical-json.ts";
 
+/** Stable identifiers for the baseline, full workflow, and supported ablations. */
 export const REPOFIX_CONFIG_IDS = [
 	"pi-general",
 	"repofix-full",
@@ -8,8 +19,10 @@ export const REPOFIX_CONFIG_IDS = [
 	"repofix-no-verify-feedback",
 ] as const;
 
+/** Identifier accepted by RepoFix configuration selection. */
 export type RepoFixConfigId = (typeof REPOFIX_CONFIG_IDS)[number];
 
+/** Canonical seven-stage order for a full RepoFix repair workflow. */
 export const REPOFIX_STAGES = [
 	"UNDERSTAND",
 	"LOCALIZE",
@@ -20,8 +33,10 @@ export const REPOFIX_STAGES = [
 	"SELF_REVIEW",
 ] as const;
 
+/** One stage name from the frozen RepoFix sequence. */
 export type RepoFixStage = (typeof REPOFIX_STAGES)[number];
 
+/** Complete set of workflow controls that may vary between experiment configurations. */
 export interface RepoFixWorkflowConfig {
 	readonly config_id: RepoFixConfigId;
 	readonly workflow_kind: "pi_general" | "repofix";
@@ -31,8 +46,10 @@ export interface RepoFixWorkflowConfig {
 	readonly stages: readonly RepoFixStage[];
 }
 
+/** Canonical full-workflow stage sequence reused by controlled configurations. */
 const FULL_STAGES = [...REPOFIX_STAGES] as const;
 
+/** Frozen baseline, full, and ablation configurations keyed by stable ID. */
 export const REPOFIX_WORKFLOW_CONFIGS: Readonly<Record<RepoFixConfigId, RepoFixWorkflowConfig>> = {
 	"pi-general": {
 		config_id: "pi-general",
@@ -68,6 +85,7 @@ export const REPOFIX_WORKFLOW_CONFIGS: Readonly<Record<RepoFixConfigId, RepoFixW
 	},
 };
 
+/** Hash-bound comparison of workflow variables and shared experimental invariants. */
 export interface RepoFixConfigurationDiffReport {
 	readonly schema_version: "v1";
 	readonly report_type: "repofix_configuration_diff";
@@ -86,16 +104,19 @@ export interface RepoFixConfigurationDiffReport {
 	readonly report_sha256: string;
 }
 
+/** Hash a configuration value after canonical JSON serialization. */
 function sha256(value: unknown): string {
 	return createHash("sha256").update(stableStringify(value), "utf8").digest("hex");
 }
 
+/** Resolve one immutable workflow configuration by its registered ID. */
 export function getRepoFixWorkflowConfig(configId: RepoFixConfigId): RepoFixWorkflowConfig {
 	const config = REPOFIX_WORKFLOW_CONFIGS[configId];
 	if (config === undefined) throw new Error(`Unsupported RepoFix configuration: ${configId}`);
 	return config;
 }
 
+/** Reject configurations that violate the baseline or RepoFix ablation contract. */
 export function assertRepoFixWorkflowConfig(config: RepoFixWorkflowConfig): void {
 	if (!REPOFIX_CONFIG_IDS.includes(config.config_id)) {
 		throw new Error(`Unsupported RepoFix configuration: ${config.config_id}`);
@@ -124,6 +145,7 @@ export function assertRepoFixWorkflowConfig(config: RepoFixWorkflowConfig): void
 	}
 }
 
+/** Build a deterministic evidence report comparing every registered configuration. */
 export function createRepoFixConfigurationDiffReport(
 	sharedInvariants: Readonly<Record<string, string>>,
 ): RepoFixConfigurationDiffReport {

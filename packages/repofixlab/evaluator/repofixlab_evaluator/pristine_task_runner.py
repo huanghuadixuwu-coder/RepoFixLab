@@ -1,3 +1,12 @@
+"""Pristine task runner for independent official-harness evaluation.
+
+This module executes one evaluator probe inside a clean task workspace:
+- Resets the repository to the frozen base before and after the probe
+- Accepts only a bounded candidate patch across the Worker boundary
+- Applies evaluator-private tests and runs the fixed official script
+- Writes exclusive logs and metadata for later official grading
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -24,6 +33,8 @@ OFFICIAL_APPLY_COMMANDS = (
 
 
 def _write_exclusive(path: Path, root: Path, content: bytes) -> None:
+    """Create evidence once inside its allowed root without overwriting a file."""
+
     resolved_root = root.resolve(strict=True)
     parent = path.parent.resolve(strict=True)
     try:
@@ -45,6 +56,8 @@ def _write_exclusive(path: Path, root: Path, content: bytes) -> None:
 
 
 def _read_candidate(path: Path, root: Path) -> bytes:
+    """Read a bounded candidate patch while rejecting links and root escapes."""
+
     resolved_root = root.resolve(strict=True)
     if path.is_symlink():
         raise EvaluationError("candidate patch must not be a symlink")
@@ -62,6 +75,8 @@ def _read_candidate(path: Path, root: Path) -> bytes:
 
 
 def _git(*arguments: str, input_bytes: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+    """Run a non-raising Git command against the fixed evaluator workspace."""
+
     return subprocess.run(
         ["git", "-c", "safe.directory=/testbed", "-C", str(WORKSPACE), *arguments],
         input=input_bytes,
@@ -72,6 +87,8 @@ def _git(*arguments: str, input_bytes: bytes | None = None) -> subprocess.Comple
 
 
 def _reset(base_commit: str) -> None:
+    """Restore `/testbed` to the frozen commit and verify a clean worktree."""
+
     reset = _git("reset", "--hard", base_commit)
     clean = _git("clean", "-fd")
     head = _git("rev-parse", "HEAD")
@@ -86,6 +103,8 @@ def _reset(base_commit: str) -> None:
 
 
 def _apply_official_candidate(patch: bytes) -> bool:
+    """Apply a candidate with the official harness fallback command sequence."""
+
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".patch") as handle:
         handle.write(patch)
         handle.flush()
@@ -112,6 +131,8 @@ def _apply_official_candidate(patch: bytes) -> bool:
 
 
 def _execute_eval_script(script: Path, timeout_seconds: int) -> tuple[int | None, bool, int, bytes]:
+    """Run the evaluator-private script with bounded time, output, and environment."""
+
     environment = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp/repofixlab-home"),
@@ -155,6 +176,8 @@ def run_probe(
     metadata_output: Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
+    """Run one pristine probe and emit fail-closed execution metadata."""
+
     if probe_kind == "base":
         if candidate is not None:
             raise EvaluationError("base probe must not receive a candidate")
@@ -222,6 +245,8 @@ def run_probe(
 
 
 def main() -> int:
+    """Parse the pristine-runner CLI and return a fail-closed process status."""
+
     parser = argparse.ArgumentParser(prog="repofixlab-pristine-task-runner")
     parser.add_argument("--probe-kind", choices=("base", "no_op", "malformed", "gold"), required=True)
     parser.add_argument("--private-spec", type=Path, required=True)

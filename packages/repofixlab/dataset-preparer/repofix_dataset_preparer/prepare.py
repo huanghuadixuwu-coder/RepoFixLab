@@ -1,3 +1,14 @@
+"""Dataset generation materializer and verifier for RepoFixLab.
+
+This module turns the frozen source dataset into three isolated scopes:
+- Public task records visible to the Agent
+- Control metadata used for deterministic sampling
+- Private patches and test expectations visible only to evaluation services
+
+It publishes a DatasetLock only after every file, cross-scope reference,
+READY marker, and SEAL marker has been written and verified.
+"""
+
 from __future__ import annotations
 
 import json
@@ -43,6 +54,8 @@ _PUBLISHED_DIRECTORY_MODE = 0o755
 
 @dataclass(frozen=True)
 class PreparationRequest:
+    """Immutable inputs and mount identities for one dataset generation."""
+
     generation_id: str
     public_root: Path
     control_root: Path
@@ -57,11 +70,15 @@ class PreparationRequest:
 
 @dataclass(frozen=True)
 class _MaterializedFile:
+    """One canonical file awaiting publication into a dataset scope."""
+
     scope: str
     path: str
     content: bytes
 
     def descriptor(self) -> dict[str, Any]:
+        """Describe the file by scope, path, byte count, and content hash."""
+
         return {
             "scope": self.scope,
             "path": self.path,
@@ -71,6 +88,8 @@ class _MaterializedFile:
 
 
 def _required_string(row: Mapping[str, Any], field: str, instance_hint: str) -> str:
+    """Read a required non-empty string or fail preparation with row context."""
+
     value = row.get(field)
     if not isinstance(value, str) or not value:
         raise PreparationError(f"{instance_hint}: required field {field!r} is missing or empty")
@@ -78,6 +97,8 @@ def _required_string(row: Mapping[str, Any], field: str, instance_hint: str) -> 
 
 
 def _test_list(row: Mapping[str, Any], field: str, instance_id: str) -> list[str]:
+    """Normalize one official test list from JSON text or an in-memory list."""
+
     value = row.get(field)
     if isinstance(value, str):
         try:
@@ -90,10 +111,14 @@ def _test_list(row: Mapping[str, Any], field: str, instance_id: str) -> list[str
 
 
 def _normalize_issue(value: str) -> str:
+    """Normalize issue text to LF newlines for stable bytes and hashes."""
+
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _assert_language(row: Mapping[str, Any], instance_id: str) -> None:
+    """Reject an explicit language outside the frozen JavaScript/TypeScript set."""
+
     value = row.get("language")
     if value is None:
         return
@@ -104,6 +129,8 @@ def _assert_language(row: Mapping[str, Any], instance_id: str) -> None:
 def _derive_records(
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate source rows and split each task into public, control, and private records."""
+
     if len(rows) != EXPECTED_SOURCE_RECORD_COUNT:
         raise PreparationError(
             f"frozen source contains {len(rows)} rows; expected {EXPECTED_SOURCE_RECORD_COUNT}"
@@ -225,6 +252,8 @@ def _derive_records(
 
 
 def _contains_forbidden_key(value: Any) -> str | None:
+    """Find the first evaluator-private key nested in a public value."""
+
     if isinstance(value, dict):
         for key, child in value.items():
             if key in PRIVATE_FIELD_NAMES:
@@ -245,6 +274,8 @@ def _audit_information_boundaries(
     control_records: Sequence[dict[str, Any]],
     private_records: Sequence[dict[str, Any]],
 ) -> None:
+    """Verify aligned task identities without leaking private patches across scopes."""
+
     public_ids = {record["instance_id"] for record in public_records}
     control_ids = {record["instance_id"] for record in control_records}
     private_ids = {record["instance_id"] for record in private_records}
@@ -277,6 +308,8 @@ def _make_scope_files(
     records: Sequence[dict[str, Any]],
     generation_id: str,
 ) -> list[_MaterializedFile]:
+    """Build canonical task files, JSONL, and an index for one dataset scope."""
+
     files: list[_MaterializedFile] = []
     index_records: list[dict[str, Any]] = []
     for record in records:
@@ -324,6 +357,8 @@ def _make_scope_files(
 
 
 def _mount_points() -> dict[str, frozenset[str]]:
+    """Read Linux mount topology and return mount options by mounted path."""
+
     mount_points: dict[str, frozenset[str]] = {}
     try:
         lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
@@ -352,6 +387,8 @@ def validate_preparation_request_metadata(
     private_volume: str,
     created_by_image_id: str,
 ) -> None:
+    """Validate immutable generation, volume, and preparer-image identities."""
+
     if not isinstance(generation_id, str) or _GENERATION.fullmatch(generation_id) is None:
         raise PreparationError("generation_id must match [a-z0-9][a-z0-9-]{0,63}")
     if (
@@ -375,6 +412,8 @@ def validate_preparation_request_metadata(
 
 
 def _validate_request(request: PreparationRequest) -> dict[str, Path]:
+    """Validate source provenance and three fresh, distinct generation roots."""
+
     validate_preparation_request_metadata(
         generation_id=request.generation_id,
         public_volume=request.public_volume,
@@ -433,6 +472,8 @@ def _validate_request(request: PreparationRequest) -> dict[str, Path]:
     return roots
 
 def _set_published_file_mode(descriptor: int, path: Path) -> None:
+    """Set the frozen publication mode through the platform-appropriate handle."""
+
     if os.name == "nt":
         os.chmod(path, _PUBLISHED_FILE_MODE)
     else:
@@ -441,6 +482,8 @@ def _set_published_file_mode(descriptor: int, path: Path) -> None:
 
 
 def _write_atomic(root: Path, relative_path: str, content: bytes) -> None:
+    """Durably publish a new generation file through an atomic replacement."""
+
     destination = root / relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(destination.parent, _PUBLISHED_DIRECTORY_MODE)
@@ -470,6 +513,8 @@ def _write_atomic(root: Path, relative_path: str, content: bytes) -> None:
 
 
 def _claim_writer(control_root: Path, content: bytes) -> None:
+    """Exclusively claim the generation's single-writer role in the control scope."""
+
     claim = control_root / "WRITER"
     try:
         descriptor = os.open(
@@ -494,6 +539,8 @@ def _claim_writer(control_root: Path, content: bytes) -> None:
 
 
 def _verify_file(root: Path, descriptor: Mapping[str, Any]) -> None:
+    """Verify a materialized file against its recorded byte count and SHA-256."""
+
     path = root / descriptor["path"]
     try:
         content = path.read_bytes()
@@ -504,6 +551,8 @@ def _verify_file(root: Path, descriptor: Mapping[str, Any]) -> None:
 
 
 def _validate_sealed_record(scope: str, value: Mapping[str, Any]) -> None:
+    """Enforce the exact field allowlist and invariants for a sealed task record."""
+
     common_valid = (
         value.get("schema_version") == SCHEMA_VERSION
         and value.get("dataset_revision") == DATASET_REVISION
@@ -614,6 +663,8 @@ def _validate_sealed_record(scope: str, value: Mapping[str, Any]) -> None:
 
 
 def _utc_now() -> str:
+    """Return the current UTC timestamp in the canonical report form."""
+
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
@@ -623,6 +674,8 @@ def prepare_generation(
     *,
     clock: Callable[[], str] = _utc_now,
 ) -> dict[str, Any]:
+    """Materialize, seal, verify, and return the lock for one fresh generation."""
+
     roots = _validate_request(request)
     writer_claim = canonical_json(
         {
@@ -746,6 +799,8 @@ def prepare_generation(
 
 
 def verify_generation(dataset_lock: Mapping[str, Any], roots: Mapping[str, Path]) -> None:
+    """Re-verify a DatasetLock, every scoped file, and all cross-scope invariants."""
+
     if set(roots) != {"public", "control", "private"}:
         raise PreparationError("generation verification requires exactly three dataset scopes")
     if dataset_lock.get("schema_version") != SCHEMA_VERSION or dataset_lock.get("lock_type") != "dataset":

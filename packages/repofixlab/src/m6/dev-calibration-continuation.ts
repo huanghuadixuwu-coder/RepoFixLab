@@ -1,12 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
-import { basename, dirname, relative, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
-import { type M4DevWorkflowSummary, M4PreProviderInputError } from "../runner/m4-dev-workflow.ts";
+import { M4PreProviderInputError } from "../runner/m4-dev-workflow.ts";
 import type { RepoToolOutputBudgetSnapshot } from "../sandbox/repo-tools.ts";
 import { ArtifactStore } from "../storage/artifact-store.ts";
 import {
-	M6_CALIBRATION_INSTANCE_IDS,
 	M6_CALIBRATION_RUN_COUNT,
 	M6_PROVIDER_SMOKE_CAP_TOKENS,
 	type M6CalibrationRun,
@@ -512,13 +511,6 @@ async function readUsageRecords(store: ArtifactStore): Promise<readonly M6Contin
 			if (actual !== canonicalHash(unsigned)) throw new Error("M6 continuation usage record hash is invalid");
 			return record as M6ContinuationUsageRecord;
 		});
-}
-
-function reportEvidenceSubset(
-	value: M6DevCalibrationContinuationReport,
-): Omit<M6DevCalibrationContinuationReport, "calibration_evidence_sha256" | "report_sha256"> {
-	const { calibration_evidence_sha256: _calibrationEvidenceSha256, report_sha256: _reportSha256, ...semantic } = value;
-	return semantic;
 }
 
 function reportSubset(
