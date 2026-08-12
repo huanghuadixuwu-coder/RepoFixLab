@@ -18,6 +18,7 @@
 	"files": [
 		"dist",
 		"configs",
+		"migrations",
 		"schemas",
 		"README.md",
 		"CHANGELOG.md"
@@ -29,16 +30,24 @@
 		"check:schemas": "node src/contracts/generate-schemas.ts --check",
 		"build": "npm run generate-schemas && tsgo -p tsconfig.build.json",
 		"test": "vitest --run",
+		"test:concurrency:workstream1:postgres": "node test/concurrency/workstream1-postgres.mjs",
+		"test:concurrency:workstream2:postgres": "node test/concurrency/workstream2-postgres.ts",
+		"test:concurrency:workstream3:postgres": "node test/concurrency/workstream3-postgres.ts",
+		"test:concurrency:workstream4:postgres": "node test/concurrency/workstream4-postgres.ts",
+		"test:concurrency:workstream5:postgres": "node test/concurrency/workstream5-postgres.ts",
+		"test:concurrency:workstream7:localize": "node test/concurrency/workstream7-localize.ts",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
 		"@earendil-works/pi-ai": "^0.80.3",
 		"@earendil-works/pi-coding-agent": "^0.80.3",
+		"pg": "8.22.0",
 		"typebox": "1.1.38",
 		"yaml": "2.9.0"
 	},
 	"devDependencies": {
 		"@types/node": "24.12.4",
+		"@types/pg": "8.20.0",
 		"shx": "0.4.0",
 		"typescript": "5.9.3",
 		"vitest": "4.1.9"

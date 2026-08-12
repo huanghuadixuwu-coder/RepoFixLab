@@ -12,6 +12,10 @@ Trust boundary:
   remain owned by the Node Orchestrator and are not loaded here.
 """
 
+# 脚本职责：装配受信 Controller HTTP 服务和生产运行时依赖。
+# 输入边界：读取冻结环境配置、Docker 接口、候选目录和证据结构。
+# 输出边界：公开受限 HTTP 接口并在退出时关闭自有资源。
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -175,7 +179,10 @@ def _load_runtime_from_environment(
     client: object,
     factory: FactoryOperationService,
 ) -> RuntimeOperationService | None:
-    """Build the Docker runtime from frozen locks, evaluator kernel, and journal."""
+    """函数职责：从冻结环境配置创建 Docker 运行时服务。
+    输入约束：候选目录、任务锁、数据锁、内核哈希和容量均有效。
+    返回结果：配置完整时返回运行时服务，未配置任务锁时返回空值。
+    失败语义：配置缺失及容量非法时同步抛出异常。"""
 
     task_lock_value = os.environ.get(
         "REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH"
@@ -218,7 +225,22 @@ def _load_runtime_from_environment(
     return RuntimeOperationService(
         backend,
         RuntimeOperationJournal(operation_root),
+        capacity=_runtime_capacity_from_environment(),
     )
+
+
+def _runtime_capacity_from_environment() -> int:
+    """函数职责：解析 Controller 的固定运行时容量。
+    输入约束：环境值采用无前导零的十进制整数文本。
+    返回结果：返回一到十六范围内的整数。
+    失败语义：格式及范围失配时同步抛出异常。"""
+
+    value = os.environ.get("REPOFIXLAB_RUNTIME_CAPACITY", "1")
+    if value not in {str(capacity) for capacity in range(1, 17)}:
+        raise RuntimeError(
+            "REPOFIXLAB_RUNTIME_CAPACITY must be an integer from 1 through 16"
+        )
+    return int(value)
 
 
 def _runtime_enabled_from_environment() -> bool:

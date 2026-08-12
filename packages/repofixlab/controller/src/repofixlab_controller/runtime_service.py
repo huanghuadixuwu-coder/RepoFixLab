@@ -1,3 +1,7 @@
+# 脚本职责：管理受信运行时操作、并发容量、恢复状态和持久化证据。
+# 输入边界：接收契约化请求、Docker 运行时后端和操作日志。
+# 输出边界：返回幂等响应并保证每项活跃 attempt 独占一个容量槽。
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -52,7 +56,9 @@ class RuntimeOperationConflict(RuntimeError):
 
 
 class RuntimeCapacityBusy(RuntimeError):
-    """The single runtime attempt capacity slot is occupied."""
+    """类职责：表达运行时容量已经用尽。
+    持有状态：保存稳定错误消息。
+    协作边界：不修改 attempt 及容量状态。"""
 
 
 class RuntimeInvalidState(RuntimeError):
@@ -199,6 +205,10 @@ class _AttemptState:
 
 
 class RuntimeOperationService:
+    """类职责：执行幂等运行时操作并管理固定并发容量。
+    持有状态：保存 attempt、作业、容量占用、恢复门禁和操作日志。
+    协作边界：通过后端管理工作区，不接触模型凭据。"""
+
     def __init__(
         self,
         backend: RuntimeBackendProtocol,
@@ -208,7 +218,18 @@ class RuntimeOperationService:
         clock: Callable[[], str] = lambda: datetime.now(UTC).isoformat().replace(
             "+00:00", "Z"
         ),
+        capacity: int = 1,
     ) -> None:
+        """函数职责：绑定运行时依赖并恢复持久化状态。
+        输入约束：容量是一区间内的整数且日志属于当前 Controller。
+        返回结果：创建完成恢复且容量计数一致的服务。
+        失败语义：容量非法及恢复失败时同步抛出异常。"""
+        if (
+            isinstance(capacity, bool)
+            or not isinstance(capacity, int)
+            or not 1 <= capacity <= 16
+        ):
+            raise ValueError("runtime capacity must be an integer from 1 through 16")
         self._backend = backend
         self._journal = journal
         self._id_factory = id_factory
@@ -218,7 +239,8 @@ class RuntimeOperationService:
         self._operations: dict[str, _OperationState] = {}
         self._attempts: dict[str, _AttemptState] = {}
         self._jobs: dict[str, str] = {}
-        self._capacity_attempt_id: str | None = None
+        self._capacity = capacity
+        self._capacity_attempt_ids: set[str] = set()
         self._recovery_blocked = False
         self._recover()
 
@@ -226,6 +248,10 @@ class RuntimeOperationService:
         self._journal.close()
 
     def preflight(self, request: Mapping[str, object]) -> RuntimeOperationResult:
+        """函数职责：校验任务绑定并返回当前运行时容量。
+        输入约束：请求身份、候选和实例满足冻结契约。
+        返回结果：返回基线、镜像、锁和容量证据。
+        失败语义：绑定漂移及后端失败时拒绝请求。"""
         canonical = _validate_write_request(
             request,
             "runtime_preflight",
@@ -264,13 +290,17 @@ class RuntimeOperationService:
                     "candidate_sha256": manifest.candidate_sha256,
                     "base_commit": manifest.base_commit,
                     "tools": list(manifest.tools),
-                    "capacity": 1,
+                    "capacity": self._capacity,
                 },
             )
 
         return self._execute_write(canonical, precheck, perform)
 
     def prepare_worker(self, request: Mapping[str, object]) -> RuntimeOperationResult:
+        """函数职责：在固定容量内准备一个隔离 Worker。
+        输入约束：attempt 已完成预检且恢复门禁处于开放状态。
+        返回结果：登记容量占用并返回独占租约。
+        失败语义：容量用尽、状态失配及后端失败时拒绝请求。"""
         canonical = _validate_write_request(
             request,
             "runtime_prepare_worker",
@@ -287,8 +317,8 @@ class RuntimeOperationService:
             if attempt.phase != "preflighted":
                 raise RuntimeInvalidState("worker preparation requires preflight")
             if (
-                self._capacity_attempt_id is not None
-                and self._capacity_attempt_id != attempt.attempt_id
+                attempt.attempt_id not in self._capacity_attempt_ids
+                and len(self._capacity_attempt_ids) >= self._capacity
             ):
                 raise RuntimeCapacityBusy("runtime attempt capacity is busy")
 
@@ -304,7 +334,7 @@ class RuntimeOperationService:
             attempt.lease_id = lease_id
             attempt.phase = "worker_active"
             attempt.capacity_owned = True
-            self._capacity_attempt_id = attempt.attempt_id
+            self._capacity_attempt_ids.add(attempt.attempt_id)
             return _write_response(
                 canonical,
                 "runtime_worker_prepared",
@@ -486,6 +516,10 @@ class RuntimeOperationService:
         return self._execute_write(canonical, precheck, perform)
 
     def destroy_worker(self, request: Mapping[str, object]) -> RuntimeOperationResult:
+        """函数职责：销毁 Worker 并按快照策略更新容量归属。
+        输入约束：attempt 持有当前快照和有效 Worker 租约。
+        返回结果：返回清理证据并在策略拒绝时释放容量。
+        失败语义：清理残留会封闭恢复门禁且保留容量占用。"""
         canonical = _validate_write_request(
             request,
             "runtime_destroy_worker",
@@ -514,8 +548,7 @@ class RuntimeOperationService:
             elif cleanup.clean:
                 attempt.phase = "policy_rejected"
                 attempt.capacity_owned = False
-                if self._capacity_attempt_id == attempt.attempt_id:
-                    self._capacity_attempt_id = None
+                self._capacity_attempt_ids.discard(attempt.attempt_id)
             else:
                 attempt.phase = "blocked"
                 self._recovery_blocked = True
@@ -583,6 +616,10 @@ class RuntimeOperationService:
         return self._execute_write(canonical, precheck, perform)
 
     def abort_attempt(self, request: Mapping[str, object]) -> RuntimeOperationResult:
+        """函数职责：中止 attempt、回收资源并释放对应容量。
+        输入约束：attempt 已在当前服务登记。
+        返回结果：返回资源残留计数和清理状态。
+        失败语义：清理不完整时保留容量并封闭恢复门禁。"""
         canonical = _validate_write_request(
             request,
             "runtime_abort_attempt",
@@ -616,8 +653,7 @@ class RuntimeOperationService:
                 attempt.artifact_set_sha256 = None
                 attempt.capacity_owned = False
                 attempt.phase = "aborted"
-                if self._capacity_attempt_id == attempt_id:
-                    self._capacity_attempt_id = None
+                self._capacity_attempt_ids.discard(attempt_id)
                 self._recovery_blocked = any(
                     item.phase == "blocked"
                     for other_id, item in self._attempts.items()
@@ -670,6 +706,10 @@ class RuntimeOperationService:
     def acknowledge_artifacts(
         self, request: Mapping[str, object]
     ) -> RuntimeOperationResult:
+        """函数职责：确认评估产物并释放作业容量。
+        输入约束：作业已终态且产物集合哈希完全匹配。
+        返回结果：返回评估清理证据和确认状态。
+        失败语义：清理不完整时封闭恢复门禁且不释放容量。"""
         canonical = _validate_write_request(
             request,
             "runtime_ack_artifacts",
@@ -698,7 +738,7 @@ class RuntimeOperationService:
             attempt.phase = "acked" if cleanup.clean else "blocked"
             attempt.capacity_owned = False
             if cleanup.clean:
-                self._capacity_attempt_id = None
+                self._capacity_attempt_ids.discard(attempt.attempt_id)
             else:
                 self._recovery_blocked = True
             return _write_response(
@@ -866,6 +906,10 @@ class RuntimeOperationService:
         return value
 
     def _recover(self) -> None:
+        """函数职责：恢复日志并清理重启前的全部活跃 attempt。
+        输入约束：日志记录属于当前 Controller 工作卷。
+        返回结果：重建幂等响应且清空已回收容量。
+        失败语义：任一恢复清理失败时服务启动失败。"""
         try:
             persisted = self._journal.load()
             pending: list[PersistedRuntimeOperation] = []
@@ -967,7 +1011,7 @@ class RuntimeOperationService:
                 attempt.capacity_owned = False
                 if not cleanup.clean:
                     self._recovery_blocked = True
-            self._capacity_attempt_id = None
+            self._capacity_attempt_ids.clear()
         except Exception as error:
             raise RuntimeServiceUnavailable("runtime recovery failed") from error
 

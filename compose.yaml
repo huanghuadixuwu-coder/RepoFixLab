@@ -1,6 +1,138 @@
 name: repofixlab
 
 services:
+  concurrency-postgres:
+    profiles:
+      - concurrency-test
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: repofixlab_concurrency
+      POSTGRES_PASSWORD: repofixlab-local-test
+      POSTGRES_USER: repofixlab
+    networks:
+      - repofix-control
+      - concurrency-test-host
+    ports:
+      - "127.0.0.1:${REPOFIXLAB_CONCURRENCY_POSTGRES_PORT:-55432}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U repofixlab -d repofixlab_concurrency
+      interval: 1s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    mem_limit: 1g
+    cpus: 1.0
+
+  concurrency-workspace-test:
+    profiles:
+      - concurrency-test
+    image: node:24-alpine
+    depends_on:
+      concurrency-postgres:
+        condition: service_healthy
+    environment:
+      REPOFIXLAB_CONCURRENCY_POSTGRES_URL: postgresql://repofixlab:repofixlab-local-test@concurrency-postgres:5432/repofixlab_concurrency
+      REPOFIXLAB_WORKSTREAM4_ROOT: /run/repofixlab
+    working_dir: /workspace
+    command:
+      - node
+      - packages/repofixlab/test/concurrency/workstream4-postgres.ts
+    networks:
+      - concurrency-test-host
+    volumes:
+      - .:/workspace:ro
+    read_only: true
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/repofixlab:rw,uid=1000,gid=1000,mode=0700
+    mem_limit: 1g
+    cpus: 1.0
+
+  concurrency-workstream7-localize:
+    profiles:
+      - concurrency-workstream7
+    image: repofixlab-workstream7-localize
+    build:
+      context: .
+      dockerfile: packages/repofixlab/docker/concurrency-localize.Dockerfile
+      args:
+        REPOFIXLAB_COMPOSE_CONFIG_SHA256: ${REPOFIXLAB_COMPOSE_CONFIG_SHA256}
+    depends_on:
+      concurrency-postgres:
+        condition: service_healthy
+      controller:
+        condition: service_healthy
+    environment:
+      DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      REPOFIX_ARTIFACTS_PATH: /artifacts
+      REPOFIX_CONTROLLER_URL: http://controller:8000
+      REPOFIXLAB_CONCURRENCY_POSTGRES_URL: postgresql://repofixlab:repofixlab-local-test@concurrency-postgres:5432/repofixlab_concurrency
+      REPOFIX_WORKSTREAM7_GIT_COMMIT: ${REPOFIX_WORKSTREAM7_GIT_COMMIT}
+      REPOFIX_WORKSTREAM7_RUN_ID: ${REPOFIX_WORKSTREAM7_RUN_ID}
+    entrypoint:
+      - node
+      - packages/repofixlab/test/concurrency/workstream7-localize.ts
+    networks:
+      - repofix-control
+      - provider-egress
+    volumes:
+      - ./artifacts:/artifacts
+      - dataset-public:/data/public:ro
+    secrets:
+      - deepseek_api_key
+    read_only: true
+    user: node
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,uid=1000,gid=1000,mode=0700
+    mem_limit: 12g
+    cpus: 4.0
+
+  concurrency-workstream7-preflight:
+    profiles:
+      - concurrency-workstream7
+    image: repofixlab-workstream7-localize
+    build:
+      context: .
+      dockerfile: packages/repofixlab/docker/concurrency-localize.Dockerfile
+      args:
+        REPOFIXLAB_COMPOSE_CONFIG_SHA256: ${REPOFIXLAB_COMPOSE_CONFIG_SHA256}
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      REPOFIX_ARTIFACTS_PATH: /artifacts
+      REPOFIX_CONTROLLER_URL: http://controller:8000
+    entrypoint:
+      - node
+      - packages/repofixlab/test/concurrency/workstream7-preflight.ts
+    networks:
+      - repofix-control
+    volumes:
+      - ./artifacts:/artifacts:ro
+      - dataset-public:/data/public:ro
+    read_only: true
+    user: node
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,uid=1000,gid=1000,mode=0700
+    mem_limit: 1g
+    cpus: 1.0
+
   controller:
     build:
       context: ./packages/repofixlab
@@ -11,6 +143,7 @@ services:
       REPOFIXLAB_M3_PRIVATE_VOLUME: ${REPOFIX_PRIVATE_VOLUME:-dataset-private-g-20260718-135934-066a8f5b6f6b}
       REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH: ${REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_PATH-/opt/repofixlab/runtime-locks/m6-26-task-v1/axios-4731/task-environment-lock.json}
       REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_ROOT: ${REPOFIXLAB_RUNTIME_TASK_ENVIRONMENT_LOCK_ROOT-/opt/repofixlab/runtime-locks/m6-26-task-v1}
+      REPOFIXLAB_RUNTIME_CAPACITY: ${REPOFIXLAB_RUNTIME_CAPACITY:-4}
       REPOFIXLAB_RUNTIME_ENABLED: ${REPOFIXLAB_RUNTIME_ENABLED:-true}
     networks:
       - repofix-control
@@ -148,6 +281,7 @@ services:
     cpus: 1.0
 
 networks:
+  concurrency-test-host:
   repofix-control:
     internal: true
   provider-egress:

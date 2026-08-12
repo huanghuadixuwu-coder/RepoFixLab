@@ -1,4 +1,11 @@
+/**
+ * 脚本职责：聚合 RepoFixLab 的公共模块出口。
+ * 输入边界：仅引用包内已经声明的稳定模块。
+ * 输出边界：不在导出阶段启动外部资源。
+ */
+
 export * from "./agent/index.ts";
+export * from "./concurrency/index.ts";
 export * from "./contracts/index.ts";
 export * from "./contracts/m6-task-environment-lock.ts";
 export * from "./controller/bootstrap-health.ts";

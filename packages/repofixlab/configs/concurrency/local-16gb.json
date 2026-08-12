@@ -1,0 +1,21 @@
+{
+	"schema_version": "v1",
+	"task_count": 100,
+	"submission_batch_count": 20,
+	"submission_batch_size": 5,
+	"submission_interval_ms": 3000,
+	"submission_window_ms": 60000,
+	"worker_capacity": 20,
+	"model_capacity": 2,
+	"localize_task_count": 26,
+	"localize_worker_capacity": 4,
+	"localize_batch_count": 7,
+	"localize_model_capacity": 2,
+	"localize_stop_stage": "LOCALIZE",
+	"postgres_interrupt_ms": 5000,
+	"test_memory_peak_bytes": 12884901888,
+	"system_available_memory_floor_bytes": 2147483648,
+	"scheduler_tick_ms": 1000,
+	"scheduler_lease_ms": 5000,
+	"task_lease_ms": 60000
+}
