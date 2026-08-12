@@ -1,3 +1,12 @@
+/**
+ * [脚本级]
+ *
+ * 定位：实现四层设计中的持久化侧，拥有本次 RepoFix attempt 的 L1、L2 及 L0/Condensation 审计制品。
+ * 负责：按事件只追加 L2、按完成阶段追加 L1、保存完整 Controller 返回、派生 coverage/file view/chunks，并维护仓库版本语义。
+ * 不负责：筛选 Provider 消息、执行模型压缩、决定阶段完成、触发工具或把 L3 跨任务经验注入评测。
+ * 数据流：任务输入/消息/工具结果 → L2；repo_read 正文 → L2 file view/chunks；阶段完成 → L1；Assembler 派生结果 → L2 审计。
+ * 不变量：原始事件永不覆盖；成功 repo_edit 才推进 revision；所有引用携带 artifact_id 与 SHA-256；未知文件范围保持未知。
+ */
 import { createHash } from "node:crypto";
 import { extname } from "node:path";
 import ts from "typescript";
@@ -23,12 +32,30 @@ import {
 import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
 import type { StoreArtifactOptions, StoredArtifact } from "../storage/artifact-store.ts";
 
-/** Minimal existing ArtifactStore surface used by memory persistence. */
+/**
+ * [类别级]
+ *
+ * 定位：记忆存储依赖的最小不可变 ArtifactStore 端口。
+ * 表示：以新路径写入字节并返回路径、大小和哈希的能力。
+ * 不变量：Memory Store 只要求追加写，不依赖覆盖或删除能力。
+ */
 export interface MemoryArtifactStore {
+	/**
+	 * [函数级]
+	 * 目的：以新路径持久化一个不可变记忆制品。
+	 * 输入/输出：路径、内容和 artifact 元数据；返回实际写入制品信息。
+	 * 约束：调用方只依赖 create-new 语义，不允许通过该端口覆盖旧记忆。
+	 */
 	writeNew(path: string, content: string | Uint8Array, options: StoreArtifactOptions): Promise<StoredArtifact>;
 }
 
-/** Repository-tool evidence accepted from the existing Agent hook. */
+/**
+ * [类别级]
+ *
+ * 定位：执行层已经完成一次仓库工具调用后交给记忆系统的原始证据输入。
+ * 表示：工具调用身份、工具名、规范化输入和完整 Controller 返回。
+ * 不变量：记忆系统只记录该事实，不负责发起、允许或重试工具调用。
+ */
 export interface MemoryToolEvidenceInput {
 	readonly tool_call_id: string;
 	readonly tool_name: string;
@@ -36,13 +63,25 @@ export interface MemoryToolEvidenceInput {
 	readonly controller_result: unknown;
 }
 
-/** One stored current-stage message and its stable event identity. */
+/**
+ * [类别级]
+ *
+ * 定位：把当前阶段一条 Provider 消息关联到其不可变 L2 事件。
+ * 表示：消息事件和该消息在阶段历史中的索引。
+ * 不变量：索引用于增量捕获，已经捕获的消息不会重复写成新事件。
+ */
 export interface MemoryMessageSource {
 	readonly event: MemoryL2Event;
 	readonly message_index: number;
 }
 
-/** One deterministic source-file chunk available for L0 retrieval. */
+/**
+ * [类别级]
+ *
+ * 定位：大文件按需召回的最小正文单元。
+ * 表示：路径、path revision、行范围、正文、来源哈希和 chunk 自身哈希。
+ * 不变量：chunk 只来自 L2 已经取得的正文；默认目标上限 4096 tokens、相邻重叠 256 tokens 的确定性字节近似。
+ */
 export interface MemoryFileChunk {
 	readonly chunk_id: string;
 	readonly path: string;
@@ -54,7 +93,13 @@ export interface MemoryFileChunk {
 	readonly sha256: string;
 }
 
-/** Structure and chunks derived only from source text already present in L2. */
+/**
+ * [类别级]
+ *
+ * 定位：从一次已保存 repo_read 正文机械派生的可寻址文件视图。
+ * 表示：文件版本、覆盖状态、JS/TS 结构目录及有序 chunks。
+ * 不变量：不补全 Controller 未返回的内容，也不把 partial coverage 伪装成完整文件。
+ */
 export interface MemoryFileViewPayload {
 	readonly schema_version: "v1";
 	readonly memory_type: "file_view";
@@ -74,10 +119,22 @@ export interface MemoryFileViewPayload {
 	readonly chunks: readonly MemoryFileChunk[];
 }
 
-/** Hash-bound file view stored as a derived L2 artifact. */
+/**
+ * [类别级]
+ *
+ * 定位：可落盘、可校验的 L2 文件派生视图。
+ * 表示：文件视图载荷及 canonical SHA-256。
+ * 不变量：它是来源事件的派生索引，不替代产生它的原始 L2 工具事件。
+ */
 export type MemoryFileView = MemoryFileViewPayload & { readonly sha256: string };
 
-/** One derived file view with stable source-event and tool-call provenance. */
+/**
+ * [类别级]
+ *
+ * 定位：Assembler 可检索的文件视图及完整来源关系。
+ * 表示：文件视图、artifact 引用、来源事件、阶段/事件顺序和等价工具调用 ID。
+ * 不变量：相同文件视图正文只存一份，所有等价来源仍被保留和排序。
+ */
 export interface MemoryFileViewRecord {
 	readonly view: MemoryFileView;
 	readonly ref: MemoryArtifactRef;
@@ -87,7 +144,13 @@ export interface MemoryFileViewRecord {
 	readonly tool_call_ids: readonly string[];
 }
 
-/** One current repository-version evidence body with all equivalent L2 sources. */
+/**
+ * [类别级]
+ *
+ * 定位：当前仓库版本中一个逻辑证据键对应的有效正文记录。
+ * 表示：一份代表事件及所有等价 L2 事件、工具调用来源。
+ * 不变量：L2 保留重复事实；L0 只需展示一份正文并用 stub 表示重复来源。
+ */
 export interface MemoryActiveEvidenceRecord {
 	readonly logical_evidence_key: string;
 	readonly event: MemoryL2Event;
@@ -95,7 +158,13 @@ export interface MemoryActiveEvidenceRecord {
 	readonly tool_call_ids: readonly string[];
 }
 
-/** Local memory overhead accumulated without adding a second metric system. */
+/**
+ * [类别级]
+ *
+ * 定位：记忆持久化侧的本地开销指标。
+ * 表示：写入耗时、L2 字节数及 L1/L2/Condensation 数量。
+ * 不变量：只统计本地存储，不重复统计 Provider token 或压缩等待时间。
+ */
 export interface RepoFixMemoryStoreMetrics {
 	readonly memory_store_ms: number;
 	readonly l2_bytes: number;
@@ -104,7 +173,13 @@ export interface RepoFixMemoryStoreMetrics {
 	readonly condensation_count: number;
 }
 
-/** Cumulative coverage derived from every immutable event sharing one key. */
+/**
+ * [类别级]
+ *
+ * 定位：由同一 coverage key 的全部只追加事件机械合成的累计覆盖视图。
+ * 表示：覆盖类型、累计状态、合并后的已知/缺失范围和全部来源事件。
+ * 不变量：派生过程不回写旧事件；任一完整事件可使累计状态变为 complete，否则保留已知或未知缺口。
+ */
 export interface MemoryCoverageView {
 	readonly coverage_key: string;
 	readonly coverage_type: MemoryL2EventPayload["coverage_type"];
@@ -114,6 +189,13 @@ export interface MemoryCoverageView {
 	readonly source_event_ids: readonly string[];
 }
 
+/**
+ * [类别级]
+ *
+ * 定位：Memory Store 内部的单阶段追加游标。
+ * 表示：外部指定阶段、下一事件序号、已捕获消息数和将写入 L1 的证据引用。
+ * 不变量：任意时刻最多一个活动阶段；阶段完成后整体清空而不影响已落盘 L1/L2。
+ */
 type ActiveStage = {
 	readonly stage_id: RepoFixStage;
 	readonly stage_sequence: number;
@@ -123,24 +205,54 @@ type ActiveStage = {
 	readonly evidence_refs: MemoryArtifactRef[];
 };
 
+/**
+ * [函数级]
+ * 目的：把未知 JSON 值安全收窄为普通对象。
+ * 输入/输出：任意值；排除 null 与数组后返回类型谓词。
+ * 约束：仅做形状判断，不声明字段可信。
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * [函数级]
+ * 目的：计算正文级 SHA-256，用于文件内容和 chunk 身份。
+ * 输入/输出：UTF-8 字符串；小写十六进制哈希。
+ * 约束：不同于契约对象的 canonical JSON 哈希，不得混用语义。
+ */
 function rawSha256(value: string): string {
 	return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+/**
+ * [函数级]
+ * 目的：从规范化工具输入中取得统一的仓库相对路径。
+ * 输入/输出：未知输入；标准化斜杠后的非空路径或 null。
+ * 约束：只读取显式 `path`，不从自由文本猜测路径。
+ */
 function explicitPath(value: unknown): string | null {
 	if (!isRecord(value) || typeof value.path !== "string") return null;
 	const path = value.path.trim().replaceAll("\\", "/");
 	return path.length === 0 ? null : path;
 }
 
+/**
+ * [函数级]
+ * 目的：安全读取 Controller 返回中的 stdout 或 stderr。
+ * 输入/输出：未知返回与字段名；缺失或非字符串字段映射为空串。
+ * 约束：不修改、截断或解释原始文本。
+ */
 function resultText(value: unknown, key: "stdout" | "stderr"): string {
 	return isRecord(value) && typeof value[key] === "string" ? value[key] : "";
 }
 
+/**
+ * [函数级]
+ * 目的：为一次 Controller 结果构造稳定的内容身份。
+ * 输入/输出：未知 Controller 返回；关键执行字段的 canonical SHA-256。
+ * 约束：哈希包含退出码、stdout/stderr、截断和超时状态，避免把不同结果错误合并。
+ */
 function resultSha256(value: unknown): string {
 	const record = isRecord(value) ? value : {};
 	return canonicalContractSha256({
@@ -152,19 +264,43 @@ function resultSha256(value: unknown): string {
 	});
 }
 
+/**
+ * [函数级]
+ * 目的：判定一次已经执行的 repo_edit 是否真正改变了仓库版本。
+ * 输入/输出：工具名与结果；仅成功、未超时的 repo_edit 返回 true。
+ * 约束：失败或超时编辑绝不推进 repository/path revision。
+ */
 function successfulRepoEdit(toolName: string, result: unknown): boolean {
 	return toolName === "repo_edit" && isRecord(result) && result.exit_code === 0 && result.timed_out !== true;
 }
 
+/**
+ * [函数级]
+ * 目的：把外部值收敛为可写入 JSON 制品的值。
+ * 输入/输出：任意值；JSON 往返后的副本，无法序列化的顶层值变为 null。
+ * 约束：落盘前移除运行时原型和不可序列化成员。
+ */
 function jsonSerializable(value: unknown): unknown {
 	const serialized = JSON.stringify(value);
 	return serialized === undefined ? null : JSON.parse(serialized);
 }
 
+/**
+ * [函数级]
+ * 目的：校验阶段与事件相关的正安全整数。
+ * 输入/输出：数值及字段名；成功无返回，失败抛错。
+ * 约束：拒绝零、负数、非整数和超出安全范围的值。
+ */
 function assertPositiveInteger(value: number, name: string): void {
 	if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive safe integer`);
 }
 
+/**
+ * [函数级]
+ * 目的：把 repo_read 分页输入转换为已覆盖行区间。
+ * 输入/输出：未知工具输入；合法时返回一个闭区间，否则返回空集合。
+ * 约束：只表示请求声明的范围，不推断文件总行数或未知缺口。
+ */
 function lineRange(input: unknown): readonly MemoryLineRange[] {
 	if (!isRecord(input)) return [];
 	const start = typeof input.start_line === "number" ? input.start_line : 1;
@@ -174,6 +310,12 @@ function lineRange(input: unknown): readonly MemoryLineRange[] {
 	return [{ start_line: start, end_line: start + count - 1 }];
 }
 
+/**
+ * [函数级]
+ * 目的：为一次工具结果机械生成 coverage key、类型和初始覆盖状态。
+ * 输入/输出：工具名、规范化输入和 Controller 返回；覆盖描述对象。
+ * 约束：分页、截断或超时结果不得标记 complete；未知缺口保持 `partial_unknown`。
+ */
 function toolCoverage(
 	toolName: string,
 	input: unknown,
@@ -224,6 +366,12 @@ function toolCoverage(
 	};
 }
 
+/**
+ * [函数级]
+ * 目的：为当前仓库版本中的一份工具证据建立确定性合并键。
+ * 输入/输出：工具事实及 repository/path revision；canonical SHA-256 逻辑键。
+ * 约束：repo_read 绑定路径版本、行范围和正文；search/list/diff 绑定全局仓库版本，防止跨版本误合并。
+ */
 function logicalEvidenceKey(
 	toolName: string,
 	input: unknown,
@@ -274,6 +422,12 @@ function logicalEvidenceKey(
 	return canonicalContractSha256(identity);
 }
 
+/**
+ * [函数级]
+ * 目的：按文件扩展名选择 TypeScript parser 的语法模式。
+ * 输入/输出：仓库路径；JS、JSX、TS 或 TSX ScriptKind。
+ * 约束：未知扩展名按 TS 解析，调用方只对支持的 JS/TS 系列文件提取结构。
+ */
 function sourceFileKind(path: string): ts.ScriptKind {
 	switch (extname(path).toLowerCase()) {
 		case ".js":
@@ -287,6 +441,12 @@ function sourceFileKind(path: string): ts.ScriptKind {
 	}
 }
 
+/**
+ * [函数级]
+ * 目的：为结构目录中的 AST 节点提取稳定可读名称。
+ * 输入/输出：TypeScript AST 节点；标识符、字符串名或 SyntaxKind 名称。
+ * 约束：仅用于索引，不把推断名称写回源码。
+ */
 function nodeName(node: ts.Node): string {
 	if ("name" in node) {
 		const name = (node as ts.Node & { readonly name?: ts.Node }).name;
@@ -296,10 +456,22 @@ function nodeName(node: ts.Node): string {
 	return ts.SyntaxKind[node.kind] ?? "unknown";
 }
 
+/**
+ * [函数级]
+ * 目的：从 L2 已取得的 JS/TS 正文派生 imports、类、函数和方法的行号目录。
+ * 输入/输出：路径、正文和原始起始行；按位置稳定排序的结构项。
+ * 约束：非 JS/TS 文件返回空目录；语法目录只覆盖当前已读正文。
+ */
 function fileStructure(path: string, content: string, startLine: number): MemoryFileViewPayload["structure"] {
 	if (![".js", ".jsx", ".ts", ".tsx"].includes(extname(path).toLowerCase())) return [];
 	const source = ts.createSourceFile(path, content, ts.ScriptTarget.Latest, true, sourceFileKind(path));
 	const entries: MemoryFileViewPayload["structure"][number][] = [];
+	/**
+	 * [函数级]
+	 * 目的：深度遍历当前已取得源码的 AST，并收集允许暴露的结构节点。
+	 * 输入/输出：一个 AST 节点；通过闭包向 `entries` 追加结构项。
+	 * 约束：遍历顺序不作为最终顺序，返回前统一按行号和名称排序。
+	 */
 	const visit = (node: ts.Node): void => {
 		if (
 			ts.isImportDeclaration(node) ||
@@ -323,6 +495,12 @@ function fileStructure(path: string, content: string, startLine: number): Memory
 	);
 }
 
+/**
+ * [函数级]
+ * 目的：把一段已取得文件正文切成可按 query 精确召回的稳定 chunks。
+ * 输入/输出：文件版本与正文；带路径、行号、来源哈希和 chunk 哈希的有序集合。
+ * 约束：使用 4 bytes/token 近似实现 4096-token 上限和 256-token 重叠；不创建未知正文。
+ */
 function chunkFile(path: string, pathRevision: number, content: string, startLine: number): readonly MemoryFileChunk[] {
 	const maxBytes = 4096 * 4;
 	const overlapBytes = 256 * 4;
@@ -369,6 +547,12 @@ function chunkFile(path: string, pathRevision: number, content: string, startLin
 	return chunks;
 }
 
+/**
+ * [函数级]
+ * 目的：规范化并合并重叠或相邻的覆盖行区间。
+ * 输入/输出：任意顺序区间；按起始行排序的最小不重叠区间集。
+ * 约束：只合并已知范围，不据此推断未列出的范围。
+ */
 function mergeRanges(ranges: readonly MemoryLineRange[]): readonly MemoryLineRange[] {
 	const ordered = [...ranges].sort(
 		(left, right) => left.start_line - right.start_line || left.end_line - right.end_line,
@@ -385,7 +569,13 @@ function mergeRanges(ranges: readonly MemoryLineRange[]): readonly MemoryLineRan
 	return merged;
 }
 
-/** Own append-only L1/L2 artifacts for one RepoFix attempt. */
+/**
+ * [类别级]
+ *
+ * 定位：一个 RepoFix attempt 的 L1/L2 权威存储与派生索引所有者。
+ * 表示：活动阶段游标、不可变 L1/L2 缓存、逻辑证据组、repository/path revision、file views 和 Condensations。
+ * 不变量：存储层只记录外部已执行事实；L1/L2 只追加；同一时刻仅一个活动阶段；L3 在 SWE-bench 中不存在。
+ */
 export class RepoFixMemoryStore {
 	private readonly artifactStore: MemoryArtifactStore;
 	private readonly taskId: string;
@@ -415,7 +605,12 @@ export class RepoFixMemoryStore {
 	private storeMs = 0;
 	private l2Bytes = 0;
 
-	/** Bind memory artifacts to the existing immutable attempt store. */
+	/**
+	 * [函数级]
+	 * 目的：把一个 attempt 的记忆写入绑定到现有不可变 ArtifactStore。
+	 * 输入/输出：artifact 端口、task ID 和 attempt ID；构造可追加的 Memory Store。
+	 * 约束：两个身份必须非空，并复制进后续所有记忆制品。
+	 */
 	constructor(artifactStore: MemoryArtifactStore, taskId: string, attemptId: string) {
 		if (taskId.length === 0 || attemptId.length === 0)
 			throw new Error("Memory store task and attempt IDs are required");
@@ -424,17 +619,32 @@ export class RepoFixMemoryStore {
 		this.attemptId = attemptId;
 	}
 
-	/** Stable task identity copied into every memory artifact. */
+	/**
+	 * [函数级]
+	 * 目的：暴露写入每个记忆制品的稳定任务身份。
+	 * 输入/输出：无输入；返回构造时冻结的 task ID。
+	 * 约束：只读，不随阶段变化。
+	 */
 	get task_id(): string {
 		return this.taskId;
 	}
 
-	/** Stable attempt identity copied into every memory artifact. */
+	/**
+	 * [函数级]
+	 * 目的：暴露写入每个记忆制品的稳定 attempt 身份。
+	 * 输入/输出：无输入；返回构造时冻结的 attempt ID。
+	 * 约束：只读，不随阶段变化。
+	 */
 	get attempt_id(): string {
 		return this.attemptId;
 	}
 
-	/** Persist the original task input once before any Provider request. */
+	/**
+	 * [函数级]
+	 * 目的：在任何 Provider 请求前把原始任务输入完整写入 L2。
+	 * 输入/输出：问题陈述；返回不可变 task-input artifact 引用。
+	 * 约束：调用方负责每 attempt 只调用一次；内容不压缩、不摘要。
+	 */
 	async writeTaskInput(problemStatement: string): Promise<MemoryArtifactRef> {
 		return this.writeJson(
 			"memory/l2/task-input.json",
@@ -449,7 +659,12 @@ export class RepoFixMemoryStore {
 		);
 	}
 
-	/** Start one externally selected stage with a fresh append sequence. */
+	/**
+	 * [函数级]
+	 * 目的：为执行层已经选择的阶段开启新的 L2 追加序列。
+	 * 输入/输出：阶段 ID 与一基阶段序号；初始化活动阶段状态。
+	 * 约束：不选择阶段；已有活动阶段时拒绝开始另一个阶段。
+	 */
 	startStage(stageId: RepoFixStage, stageSequence: number): void {
 		if (this.active !== null) throw new Error(`Memory stage ${this.active.stage_id} is already active`);
 		assertPositiveInteger(stageSequence, "stage_sequence");
@@ -463,7 +678,12 @@ export class RepoFixMemoryStore {
 		};
 	}
 
-	/** Append current-stage messages not seen by an earlier Provider request. */
+	/**
+	 * [函数级]
+	 * 目的：把当前阶段尚未捕获的 user/assistant/reasoning/tool-result 消息按序追加到 L2。
+	 * 输入/输出：阶段消息全量前缀；返回截至当前的消息来源记录。
+	 * 约束：以 `captured_message_count` 增量写入，旧消息不会在下一请求重复落盘。
+	 */
 	async captureMessages(messages: readonly unknown[]): Promise<readonly MemoryMessageSource[]> {
 		const active = this.assertActive();
 		for (let index = active.captured_message_count; index < messages.length; index += 1) {
@@ -492,7 +712,12 @@ export class RepoFixMemoryStore {
 		return [...active.message_events];
 	}
 
-	/** Append the complete Controller return for one already executed repository tool. */
+	/**
+	 * [函数级]
+	 * 目的：完整记录一次已执行仓库工具的 Controller 返回，并派生版本、coverage 与 file view。
+	 * 输入/输出：工具证据输入；返回不可变 L2 工具事件。
+	 * 约束：成功 repo_edit 才推进 revision；原始返回完整保存；重复证据仍分别写入 L2。
+	 */
 	async appendToolEvidence(input: MemoryToolEvidenceInput): Promise<MemoryL2Event> {
 		const path = explicitPath(input.normalized_input);
 		if (successfulRepoEdit(input.tool_name, input.controller_result)) {
@@ -534,7 +759,12 @@ export class RepoFixMemoryStore {
 		return event;
 	}
 
-	/** Append the completed stage's full schema artifact and all stage evidence references to L1. */
+	/**
+	 * [函数级]
+	 * 目的：在外部确认阶段完成后，把完整 handoff 与本阶段全部 L2 引用追加到 L1。
+	 * 输入/输出：严格 StageCompletion；返回带哈希的 L1 记录。
+	 * 约束：completion 必须匹配活动阶段；不执行 top-N、截断或二次摘要；完成后关闭活动阶段。
+	 */
 	async completeStage(completion: StageCompletion): Promise<MemoryL1Record> {
 		const active = this.assertActive();
 		if (completion.stage !== active.stage_id) throw new Error("Memory L1 completion does not match the active stage");
@@ -559,37 +789,72 @@ export class RepoFixMemoryStore {
 		return record;
 	}
 
-	/** Return immutable completed-stage handoffs in stage order. */
+	/**
+	 * [函数级]
+	 * 目的：向 Assembler 提供本任务全部已完成阶段的 L1 交接。
+	 * 输入/输出：无输入；返回按 stage sequence 排序的只读副本。
+	 * 约束：不返回活动阶段的未完成 handoff。
+	 */
 	listL1(): readonly MemoryL1Record[] {
 		return [...this.l1Records].sort((left, right) => left.stage_sequence - right.stage_sequence);
 	}
 
-	/** Return all current-stage message sources captured so far. */
+	/**
+	 * [函数级]
+	 * 目的：取得当前阶段已经写入 L2 的全部消息来源。
+	 * 输入/输出：无输入；返回消息来源数组副本。
+	 * 约束：必须存在活动阶段，调用者不能修改内部集合。
+	 */
 	currentMessageSources(): readonly MemoryMessageSource[] {
 		return [...this.assertActive().message_events];
 	}
 
-	/** Return every current-stage L2 reference accumulated before stage completion. */
+	/**
+	 * [函数级]
+	 * 目的：取得将随阶段 completion 写入 L1 的全部当前阶段 L2 引用。
+	 * 输入/输出：无输入；返回 evidence refs 数组副本。
+	 * 约束：包含原始事件和派生 file view 引用，且必须存在活动阶段。
+	 */
 	currentEvidenceRefs(): readonly MemoryArtifactRef[] {
 		return [...this.assertActive().evidence_refs];
 	}
 
-	/** Current repository revision derived only from successful repo_edit returns. */
+	/**
+	 * [函数级]
+	 * 目的：暴露当前全局仓库修订号供证据失效和 L0 审计使用。
+	 * 输入/输出：无输入；返回从零开始的 revision。
+	 * 约束：只由成功 repo_edit 增加。
+	 */
 	get repository_revision(): number {
 		return this.repositoryRevision;
 	}
 
-	/** Current version of one repository-relative path. */
+	/**
+	 * [函数级]
+	 * 目的：查询某仓库路径的当前内容修订号。
+	 * 输入/输出：仓库相对路径；返回从零开始的 path revision。
+	 * 约束：统一路径分隔符；仅该路径成功编辑时增加。
+	 */
 	pathRevision(path: string): number {
 		return this.pathRevisions.get(path.replaceAll("\\", "/")) ?? 0;
 	}
 
-	/** Resolve one already-executed tool call to its immutable L2 event. */
+	/**
+	 * [函数级]
+	 * 目的：把 Provider 协议中的 tool call ID 解析为其完整 L2 工具事件。
+	 * 输入/输出：tool call ID；对应事件或 null。
+	 * 约束：只查询已记录调用，不发起工具或构造缺失事件。
+	 */
 	toolEvent(toolCallId: string): MemoryL2Event | null {
 		return this.toolEventsByCallId.get(toolCallId) ?? null;
 	}
 
-	/** Return one body per logical key for the current repository version. */
+	/**
+	 * [函数级]
+	 * 目的：派生当前 repository/path revision 下去重后的 ActiveEvidence 工作集。
+	 * 输入/输出：无输入；每个逻辑键返回一份正文代表及所有等价来源。
+	 * 约束：旧 revision 只退出 L0 候选，不从 L2 删除；输出按逻辑键稳定排序。
+	 */
 	listActiveEvidence(): readonly MemoryActiveEvidenceRecord[] {
 		const records: MemoryActiveEvidenceRecord[] = [];
 		for (const [key, events] of this.evidenceEvents) {
@@ -612,7 +877,12 @@ export class RepoFixMemoryStore {
 		return records.sort((left, right) => left.logical_evidence_key.localeCompare(right.logical_evidence_key));
 	}
 
-	/** Project current-stage activity facts without deciding an action. */
+	/**
+	 * [函数级]
+	 * 目的：从已执行事件机械投影当前阶段的高密度活动事实。
+	 * 输入/输出：无输入；返回 revision、最近成功编辑、最新有效 diff 和验证引用占位。
+	 * 约束：不判断 ready/done/next_stage；当前 `latest_verification_ref` 固定为 null，属于尚未实现的设计缺口。
+	 */
 	currentActivity(): MemoryStageActivityView {
 		const active = this.assertActive();
 		const events = [...this.l2Events.values()]
@@ -652,7 +922,12 @@ export class RepoFixMemoryStore {
 		};
 	}
 
-	/** Return L2 events addressed by immutable L1 evidence references. */
+	/**
+	 * [函数级]
+	 * 目的：按不可变 artifact 引用解析内存中的 L2 原始事件。
+	 * 输入/输出：artifact ID 与 SHA-256 引用集合；返回存在且校验一致的事件。
+	 * 约束：哈希不一致立即失败；派生 file view 等非事件引用不会伪装成事件。
+	 */
 	readEvents(refs: readonly MemoryArtifactRef[]): readonly MemoryL2Event[] {
 		return refs.flatMap((ref) => {
 			const event = this.l2Events.get(ref.artifact_id);
@@ -662,7 +937,12 @@ export class RepoFixMemoryStore {
 		});
 	}
 
-	/** Return file views already derived from complete or partial L2 source text. */
+	/**
+	 * [函数级]
+	 * 目的：向 Assembler 提供所有由已取得正文派生的 file views。
+	 * 输入/输出：无输入；返回带来源关系并按路径、阶段、事件稳定排序的记录。
+	 * 约束：同时包含 complete 与 partial 视图，调用者必须继续尊重 coverage 和 path revision。
+	 */
 	listFileViews(): readonly MemoryFileViewRecord[] {
 		return [...this.fileViews.values()]
 			.sort(
@@ -681,7 +961,12 @@ export class RepoFixMemoryStore {
 			}));
 	}
 
-	/** Derive cumulative coverage without rewriting any source L2 event. */
+	/**
+	 * [函数级]
+	 * 目的：合并同一 coverage key 的只追加事件，得到当前累计覆盖状态。
+	 * 输入/输出：无输入；返回按 coverage key 排序的覆盖视图。
+	 * 约束：不修改源事件；complete 优先，否则区分已知缺口和未知缺口。
+	 */
 	listCoverage(): readonly MemoryCoverageView[] {
 		const groups = new Map<string, MemoryL2Event[]>();
 		for (const event of this.l2Events.values()) {
@@ -711,12 +996,22 @@ export class RepoFixMemoryStore {
 			});
 	}
 
-	/** Reuse a previously saved semantic summary for the exact same inputs. */
+	/**
+	 * [函数级]
+	 * 目的：按精确输入、query 与 policy 身份复用已有 Condensation。
+	 * 输入/输出：三个 SHA-256；返回缓存的摘要与引用或 undefined。
+	 * 约束：只有三者全部相同才可复用，避免跨 query 或策略污染。
+	 */
 	findCondensation(inputSha256: string, querySha256: string, policySha256: string) {
 		return this.condensations.get(`${inputSha256}:${querySha256}:${policySha256}`);
 	}
 
-	/** Append one derived semantic summary without replacing any source event. */
+	/**
+	 * [函数级]
+	 * 目的：保存一份滚动语义摘要，或复用同键的不可变摘要。
+	 * 输入/输出：Condensation 载荷；返回带哈希制品及 artifact 引用。
+	 * 约束：摘要作为 L2 派生制品追加，不删除、不覆盖其 `source_event_ids` 指向的原始事实。
+	 */
 	async saveCondensation(payload: MemoryCondensationPayload): Promise<{
 		readonly value: MemoryCondensation;
 		readonly ref: MemoryArtifactRef;
@@ -731,7 +1026,12 @@ export class RepoFixMemoryStore {
 		return stored;
 	}
 
-	/** Append one L0 audit snapshot keyed by the Provider request identity. */
+	/**
+	 * [函数级]
+	 * 目的：保存一次实际 Provider 请求的完整 L0 组装审计。
+	 * 输入/输出：未绑定哈希的 L0 payload；返回快照与 artifact 引用。
+	 * 约束：路径由 request ID 哈希确定；该快照不能作为下一轮原始事实回流。
+	 */
 	async saveL0(
 		payload: MemoryL0Payload,
 	): Promise<{ readonly value: MemoryL0Snapshot; readonly ref: MemoryArtifactRef }> {
@@ -741,7 +1041,12 @@ export class RepoFixMemoryStore {
 		return { value, ref };
 	}
 
-	/** Report local storage overhead for the attempt summary. */
+	/**
+	 * [函数级]
+	 * 目的：汇总本 attempt 的记忆存储成本。
+	 * 输入/输出：无输入；返回耗时、字节和制品计数快照。
+	 * 约束：不包含 Assembler 或 Provider 的耗时/token。
+	 */
 	get metrics(): RepoFixMemoryStoreMetrics {
 		return {
 			memory_store_ms: this.storeMs,
@@ -752,11 +1057,23 @@ export class RepoFixMemoryStore {
 		};
 	}
 
+	/**
+	 * [函数级]
+	 * 目的：取得活动阶段并统一处理生命周期错误。
+	 * 输入/输出：无输入；返回内部 ActiveStage。
+	 * 约束：无活动阶段时立即抛错，避免把事件写入错误阶段。
+	 */
 	private assertActive(): ActiveStage {
 		if (this.active === null) throw new Error("No RepoFix memory stage is active");
 		return this.active;
 	}
 
+	/**
+	 * [函数级]
+	 * 目的：为一条消息或工具事实分配稳定顺序、绑定哈希并追加成 L2 事件。
+	 * 输入/输出：除公共身份字段外的事件载荷；返回已落盘 L2 事件。
+	 * 约束：`event_id=attempt:stage:sequence`，artifact 路径按阶段/事件补零；写入后才更新缓存与 L1 引用。
+	 */
 	private async appendEvent(
 		input: Omit<
 			MemoryL2EventPayload,
@@ -794,6 +1111,12 @@ export class RepoFixMemoryStore {
 		return event;
 	}
 
+	/**
+	 * [函数级]
+	 * 目的：在 repo_read 已取得正文后派生结构目录与 chunks，并记录完整来源关系。
+	 * 输入/输出：一条 L2 工具事件；需要时追加 file-view artifact，否则无操作。
+	 * 约束：只处理非空 repo_read stdout；相同视图复用正文并累积来源，不制造未读取区间。
+	 */
 	private async maybeAppendFileView(event: MemoryL2Event): Promise<void> {
 		if (event.tool_name !== "repo_read" || !isRecord(event.normalized_input) || !isRecord(event.controller_result))
 			return;
@@ -842,6 +1165,12 @@ export class RepoFixMemoryStore {
 		this.assertActive().evidence_refs.push(ref);
 	}
 
+	/**
+	 * [函数级]
+	 * 目的：通过 ArtifactStore 以稳定 JSON 写入任一记忆制品，并累计本地指标。
+	 * 输入/输出：artifact 路径、值和敏感级别；返回路径与内容哈希引用。
+	 * 约束：生成者固定为 orchestrator；L2 路径计入 `l2_bytes`；优先返回契约绑定的对象哈希。
+	 */
 	private async writeJson(
 		path: string,
 		value: unknown,
@@ -862,7 +1191,12 @@ export class RepoFixMemoryStore {
 	}
 }
 
-/** Parse and verify a memory record read outside the in-process store cache. */
+/**
+ * [函数级]
+ * 目的：解析并验证从进程外 artifact 读取的哈希绑定记忆记录。
+ * 输入/输出：JSON 字符串；返回已通过 canonical SHA-256 校验的对象。
+ * 约束：拒绝非对象、无 sha256 或内容哈希不一致的记录。
+ */
 export function parseMemoryRecord(content: string): object & { readonly sha256: string } {
 	const value: unknown = JSON.parse(content);
 	if (!isRecord(value) || typeof value.sha256 !== "string") throw new Error("Memory artifact is not hash-bound JSON");
