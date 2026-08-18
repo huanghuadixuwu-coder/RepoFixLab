@@ -144,18 +144,91 @@ export const RepoExecInputSchema = Type.Object(
 
 export const RepoDiffInputSchema = Type.Object({}, { additionalProperties: false });
 
-export const RepoToolResultSchema = Type.Object(
+const Sha256Schema = Type.String({ pattern: "^[a-f0-9]{64}$" });
+
+export const RepoLineSpanSchema = Type.Object(
 	{
-		tool: RepoToolNameSchema,
-		exit_code: Type.Union([Type.Integer(), Type.Null()]),
-		stdout: Type.String({ maxLength: 65_536 }),
-		stderr: Type.String({ maxLength: 65_536 }),
-		truncated: Type.Boolean(),
-		timed_out: Type.Boolean(),
-		duration_ms: Type.Integer({ minimum: 0 }),
+		start_line: Type.Integer({ minimum: 1 }),
+		end_line_exclusive: Type.Integer({ minimum: 1 }),
 	},
 	{ additionalProperties: false },
 );
+
+export const RepoReadMetadataSchema = Type.Object(
+	{
+		path: FilePathSchema,
+		returned_range: Type.Union([RepoLineSpanSchema, Type.Null()]),
+		total_lines: Type.Integer({ minimum: 0 }),
+		file_sha256: Sha256Schema,
+		source_sha256: Sha256Schema,
+		complete: Type.Boolean(),
+	},
+	{ additionalProperties: false },
+);
+
+const RepoCreateMetadataSchema = Type.Object(
+	{
+		path: FilePathSchema,
+		edit_kind: Type.Literal("create"),
+		before_range: Type.Null(),
+		before_total_lines: Type.Null(),
+		before_file_sha256: Type.Null(),
+		after_range: RepoLineSpanSchema,
+		after_total_lines: Type.Integer({ minimum: 0 }),
+		after_file_sha256: Sha256Schema,
+		line_delta: Type.Null(),
+	},
+	{ additionalProperties: false },
+);
+
+const RepoReplaceMetadataSchema = Type.Object(
+	{
+		path: FilePathSchema,
+		edit_kind: Type.Literal("replace"),
+		before_range: RepoLineSpanSchema,
+		before_total_lines: Type.Integer({ minimum: 1 }),
+		before_file_sha256: Sha256Schema,
+		after_range: RepoLineSpanSchema,
+		after_total_lines: Type.Integer({ minimum: 0 }),
+		after_file_sha256: Sha256Schema,
+		line_delta: Type.Integer(),
+	},
+	{ additionalProperties: false },
+);
+
+export const RepoEditMetadataSchema = Type.Union([RepoCreateMetadataSchema, RepoReplaceMetadataSchema]);
+
+const RepoToolResultCommon = {
+	exit_code: Type.Union([Type.Integer(), Type.Null()]),
+	stdout: Type.String({ maxLength: 65_536 }),
+	stderr: Type.String({ maxLength: 65_536 }),
+	truncated: Type.Boolean(),
+	timed_out: Type.Boolean(),
+	duration_ms: Type.Integer({ minimum: 0 }),
+};
+
+export const RepoToolResultSchema = Type.Union([
+	Type.Object(
+		{ tool: Type.Literal("repo_read"), ...RepoToolResultCommon, read_metadata: RepoReadMetadataSchema },
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{ tool: Type.Literal("repo_edit"), ...RepoToolResultCommon, edit_metadata: RepoEditMetadataSchema },
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			tool: Type.Union([
+				Type.Literal("repo_list"),
+				Type.Literal("repo_search"),
+				Type.Literal("repo_exec"),
+				Type.Literal("repo_diff"),
+			]),
+			...RepoToolResultCommon,
+		},
+		{ additionalProperties: false },
+	),
+]);
 
 export type RepoListInput = Static<typeof RepoListInputSchema>;
 export type RepoReadInput = Static<typeof RepoReadInputSchema>;
@@ -164,6 +237,9 @@ export type RepoEditInput = Static<typeof RepoEditInputSchema>;
 export type RepoEditToolWireInput = Static<typeof RepoEditToolWireSchema>;
 export type RepoExecInput = Static<typeof RepoExecInputSchema>;
 export type RepoDiffInput = Static<typeof RepoDiffInputSchema>;
+export type RepoLineSpan = Static<typeof RepoLineSpanSchema>;
+export type RepoReadMetadata = Static<typeof RepoReadMetadataSchema>;
+export type RepoEditMetadata = Static<typeof RepoEditMetadataSchema>;
 export type RepoToolResult = Static<typeof RepoToolResultSchema>;
 
 interface RepoToolRequestIdentity {
@@ -193,7 +269,7 @@ export const RepoToolHttpResponseSchema = Type.Object(
 		operation_id: Type.String({
 			pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$",
 		}),
-		request_sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+		request_sha256: Sha256Schema,
 		lease_id: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$" }),
 		tool: RepoToolNameSchema,
 		input: Type.Union([

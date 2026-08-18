@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -46,6 +46,43 @@ _SHELL_INTERPRETERS = frozenset(
 
 class RuntimeToolError(RuntimeError):
     """A repository tool request violates the fixed worker policy."""
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _text_lines(value: str) -> list[str]:
+    """Split only on LF so Worker and TypeScript Memory use identical line semantics."""
+    if not value:
+        return []
+    parts = value.split("\n")
+    lines = [f"{part}\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _read_text_exact(path: Path) -> str:
+    """Decode UTF-8 without universal-newline rewriting so hashes describe exact text."""
+    with path.open("r", encoding="utf-8", newline="") as stream:
+        return stream.read()
+
+
+def runtime_text_line_count(value: str) -> int:
+    """Count lines with the shared LF-only repository-text contract."""
+    return len(_text_lines(value))
+
+
+def _text_line_span(value: str, start_offset: int, fragment: str) -> RuntimeLineSpan:
+    start_line = value.count("\n", 0, start_offset) + 1
+    if not fragment:
+        return RuntimeLineSpan(start_line=start_line, end_line_exclusive=start_line)
+    touched_lines = fragment.count("\n") + (0 if fragment.endswith("\n") else 1)
+    return RuntimeLineSpan(
+        start_line=start_line,
+        end_line_exclusive=start_line + touched_lines,
+    )
 
 
 VerificationStatus = Literal[
@@ -141,6 +178,51 @@ class RuntimeVerificationResult:
 
 
 @dataclass(frozen=True)
+class RuntimeLineSpan:
+    start_line: int
+    end_line_exclusive: int
+
+
+@dataclass(frozen=True)
+class RuntimeReadMetadata:
+    path: str
+    returned_range: RuntimeLineSpan | None
+    total_lines: int
+    file_sha256: str
+    source_sha256: str
+    complete: bool
+
+
+@dataclass(frozen=True)
+class RuntimeCreateMetadata:
+    path: str
+    edit_kind: Literal["create"]
+    before_range: None
+    before_total_lines: None
+    before_file_sha256: None
+    after_range: RuntimeLineSpan
+    after_total_lines: int
+    after_file_sha256: str
+    line_delta: None
+
+
+@dataclass(frozen=True)
+class RuntimeReplaceMetadata:
+    path: str
+    edit_kind: Literal["replace"]
+    before_range: RuntimeLineSpan
+    before_total_lines: int
+    before_file_sha256: str
+    after_range: RuntimeLineSpan
+    after_total_lines: int
+    after_file_sha256: str
+    line_delta: int
+
+
+RuntimeEditMetadata = RuntimeCreateMetadata | RuntimeReplaceMetadata
+
+
+@dataclass(frozen=True)
 class RuntimeToolResult:
     tool: RuntimeToolName
     exit_code: int | None
@@ -149,9 +231,11 @@ class RuntimeToolResult:
     truncated: bool
     timed_out: bool
     duration_ms: int
+    read_metadata: RuntimeReadMetadata | None = None
+    edit_metadata: RuntimeEditMetadata | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "tool": self.tool,
             "exit_code": self.exit_code,
             "stdout": self.stdout,
@@ -160,6 +244,17 @@ class RuntimeToolResult:
             "timed_out": self.timed_out,
             "duration_ms": self.duration_ms,
         }
+        if self.tool == "repo_read":
+            if self.read_metadata is None or self.edit_metadata is not None:
+                raise RuntimeToolError("repo_read result metadata is invalid")
+            result["read_metadata"] = asdict(self.read_metadata)
+        elif self.tool == "repo_edit":
+            if self.edit_metadata is None or self.read_metadata is not None:
+                raise RuntimeToolError("repo_edit result metadata is invalid")
+            result["edit_metadata"] = asdict(self.edit_metadata)
+        elif self.read_metadata is not None or self.edit_metadata is not None:
+            raise RuntimeToolError("non-file tool result contains file metadata")
+        return result
 
 
 @dataclass(frozen=True)
@@ -213,14 +308,31 @@ class RepositoryToolExecutor:
             stdout = self._repo_list(arguments)
             return self._text_result(tool, stdout, started_ms)
         if tool == "repo_read":
-            stdout = self._repo_read(arguments)
-            return self._text_result(tool, stdout, started_ms)
+            stdout, metadata, output_truncated = self._repo_read(arguments)
+            return self._bytes_result(
+                tool,
+                0,
+                stdout,
+                b"",
+                False,
+                started_ms,
+                output_truncated=output_truncated,
+                read_metadata=metadata,
+            )
         if tool == "repo_search":
             stdout = self._repo_search(arguments)
             return self._text_result(tool, stdout, started_ms)
         if tool == "repo_edit":
-            stdout = self._repo_edit(arguments)
-            return self._text_result(tool, stdout, started_ms)
+            stdout, metadata = self._repo_edit(arguments)
+            return self._bytes_result(
+                tool,
+                0,
+                stdout,
+                b"",
+                False,
+                started_ms,
+                edit_metadata=metadata,
+            )
         if tool == "repo_diff":
             _require_exact_keys(arguments, frozenset())
             patch = self.snapshot_patch()
@@ -613,7 +725,9 @@ class RepositoryToolExecutor:
             rows.append(f"{kind}\t{child.name}")
         return ("\n".join(rows) + ("\n" if rows else "")).encode("utf-8")
 
-    def _repo_read(self, arguments: Mapping[str, object]) -> bytes:
+    def _repo_read(
+        self, arguments: Mapping[str, object]
+    ) -> tuple[bytes, RuntimeReadMetadata, bool]:
         _require_allowed_keys(
             arguments,
             frozenset({"path", "start_line", "line_count"}),
@@ -623,18 +737,50 @@ class RepositoryToolExecutor:
         if not target.is_file():
             raise RuntimeToolError("repo_read path is not a regular file")
         try:
-            content = target.read_text(encoding="utf-8")
+            content = _read_text_exact(target)
         except (OSError, UnicodeError) as error:
             raise RuntimeToolError("repo_read requires a readable UTF-8 file") from error
         start_line = _optional_integer(arguments, "start_line", 1, minimum=1, maximum=1_000_000)
         line_count = _optional_integer(arguments, "line_count", 500, minimum=1, maximum=2_000)
-        lines = content.splitlines(keepends=True)
+        lines = _text_lines(content)
         selected = lines[start_line - 1 : start_line - 1 + line_count]
-        next_start_line = start_line + len(selected)
-        header = f"start_line: {start_line}\nline_count: {len(selected)}\n"
-        if next_start_line <= len(lines):
-            header += f"next_start_line: {next_start_line}\n"
-        return (header + "".join(selected)).encode("utf-8")
+        returned: list[str] = []
+        returned_bytes = 0
+        for line in selected:
+            encoded = line.encode("utf-8")
+            if returned_bytes + len(encoded) > TOOL_OUTPUT_LIMIT_BYTES:
+                break
+            returned.append(line)
+            returned_bytes += len(encoded)
+        body = "".join(returned)
+        output_truncated = len(returned) < len(selected)
+        returned_range = (
+            None
+            if not returned
+            else RuntimeLineSpan(
+                start_line=start_line,
+                end_line_exclusive=start_line + len(returned),
+            )
+        )
+        total_lines = len(lines)
+        complete = not output_truncated and (
+            total_lines == 0
+            or (
+                returned_range is not None
+                and returned_range.start_line == 1
+                and returned_range.end_line_exclusive == total_lines + 1
+            )
+        )
+        relative_path = target.relative_to(self.repository_root).as_posix()
+        metadata = RuntimeReadMetadata(
+            path=relative_path,
+            returned_range=returned_range,
+            total_lines=total_lines,
+            file_sha256=_text_sha256(content),
+            source_sha256=_text_sha256(body),
+            complete=complete,
+        )
+        return body.encode("utf-8"), metadata, output_truncated
 
     def _repo_search(self, arguments: Mapping[str, object]) -> bytes:
         _require_allowed_keys(
@@ -679,7 +825,9 @@ class RepositoryToolExecutor:
             header += f"next_cursor: {cursor + len(page)}\n"
         return (header + "\n".join(page) + ("\n" if page else "")).encode("utf-8")
 
-    def _repo_edit(self, arguments: Mapping[str, object]) -> bytes:
+    def _repo_edit(
+        self, arguments: Mapping[str, object]
+    ) -> tuple[bytes, RuntimeEditMetadata]:
         if "content" in arguments:
             _require_exact_keys(arguments, frozenset({"path", "content"}))
             content = _required_string(arguments, "content", allow_empty=True)
@@ -695,9 +843,23 @@ class RepositoryToolExecutor:
                     "repo_edit content creates new files only; existing files require old_text and new_text"
                 )
             self._write_text_atomically(target, content)
-            return f"created\t{target.relative_to(self.repository_root).as_posix()}\n".encode(
-                "utf-8"
+            relative_path = target.relative_to(self.repository_root).as_posix()
+            total_lines = runtime_text_line_count(content)
+            metadata = RuntimeCreateMetadata(
+                path=relative_path,
+                edit_kind="create",
+                before_range=None,
+                before_total_lines=None,
+                before_file_sha256=None,
+                after_range=RuntimeLineSpan(
+                    start_line=1,
+                    end_line_exclusive=total_lines + 1,
+                ),
+                after_total_lines=total_lines,
+                after_file_sha256=_text_sha256(content),
+                line_delta=None,
             )
+            return f"created\t{relative_path}\n".encode("utf-8"), metadata
 
         _require_exact_keys(arguments, frozenset({"path", "old_text", "new_text"}))
         old_text = _required_string(arguments, "old_text")
@@ -712,19 +874,33 @@ class RepositoryToolExecutor:
         if not target.exists() or not target.is_file():
             raise RuntimeToolError("repo_edit replacement path is not a regular existing file")
         try:
-            original = target.read_text(encoding="utf-8")
+            original = _read_text_exact(target)
         except (OSError, UnicodeError) as error:
             raise RuntimeToolError("repo_edit replacement file could not be read as UTF-8") from error
         if original.count(old_text) != 1:
             raise RuntimeToolError("repo_edit old_text must occur exactly once in the existing file")
+        start_offset = original.index(old_text)
+        updated = original.replace(old_text, new_text, 1)
+        before_total_lines = runtime_text_line_count(original)
+        after_total_lines = runtime_text_line_count(updated)
+        relative_path = target.relative_to(self.repository_root).as_posix()
         self._write_text_atomically(
             target,
-            original.replace(old_text, new_text, 1),
+            updated,
             mode=target.stat().st_mode & 0o777,
         )
-        return f"replaced\t{target.relative_to(self.repository_root).as_posix()}\n".encode(
-            "utf-8"
+        metadata = RuntimeReplaceMetadata(
+            path=relative_path,
+            edit_kind="replace",
+            before_range=_text_line_span(original, start_offset, old_text),
+            before_total_lines=before_total_lines,
+            before_file_sha256=_text_sha256(original),
+            after_range=_text_line_span(updated, start_offset, new_text),
+            after_total_lines=after_total_lines,
+            after_file_sha256=_text_sha256(updated),
+            line_delta=after_total_lines - before_total_lines,
         )
+        return f"replaced\t{relative_path}\n".encode("utf-8"), metadata
 
     def _assert_candidate_edit_path(self, target: Path) -> None:
         relative = target.relative_to(self.repository_root)
@@ -743,7 +919,11 @@ class RepositoryToolExecutor:
         temporary = target.with_name(f".{target.name}.repofixlab-edit-{os.getpid()}")
         if temporary.exists():
             raise RuntimeToolError("repo_edit temporary path already exists")
-        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
         try:
             offset = 0
             while offset < len(encoded):
@@ -890,6 +1070,10 @@ class RepositoryToolExecutor:
         stderr: bytes,
         timed_out: bool,
         started_ms: int,
+        *,
+        output_truncated: bool = False,
+        read_metadata: RuntimeReadMetadata | None = None,
+        edit_metadata: RuntimeEditMetadata | None = None,
     ) -> RuntimeToolResult:
         bounded_stdout, bounded_stderr, truncated = _bound_output(stdout, stderr)
         return RuntimeToolResult(
@@ -897,9 +1081,11 @@ class RepositoryToolExecutor:
             exit_code=exit_code,
             stdout=bounded_stdout.decode("utf-8", errors="replace"),
             stderr=bounded_stderr.decode("utf-8", errors="replace"),
-            truncated=truncated,
+            truncated=truncated or output_truncated,
             timed_out=timed_out,
             duration_ms=max(monotonic_ns() // 1_000_000 - started_ms, 0),
+            read_metadata=read_metadata,
+            edit_metadata=edit_metadata,
         )
 
     def _run_git(

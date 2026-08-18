@@ -127,6 +127,25 @@ artifact = memory/l2/stages/<stage_sequence>/events/<event_sequence>.json
 
 后续分页或分段结果继续追加。Assembler 按相同 `coverage_key` 的事件顺序派生累计覆盖状态，不改写旧事件。
 
+文件 Coverage 的身份严格绑定为：
+
+```text
+path + path_revision + file_sha256
+```
+
+`repo_read` 不要求全局 `repository_revision` 相同；其他工具仍绑定全局 revision。Store 另行维护 `path + path_revision → file_sha256` 唯一映射，不能只依赖已经包含 SHA 的 `coverage_key`。同一路径版本出现两个不同完整文件 SHA 时立即返回记忆基础设施错误。
+
+两个哈希的含义固定为：
+
+```text
+file_sha256   = 完整 UTF-8 文件正文的 SHA-256
+source_sha256 = 64 KiB 完整行限制后，实际保存到 stdout 的正文 SHA-256
+```
+
+正文保留原始换行字节对应的字符，不做通用换行归一化；行号只按 LF 分隔，使 Python Worker、Docker 校验和 TypeScript Store 使用同一定义。
+
+`repo_read.read_metadata` 描述实际保存范围，而不是请求范围。空文件使用 `returned_range = null`、`total_lines = 0`、`complete = true`；对非空文件从文件末尾之后读取使用 `returned_range = null`、`complete = false`。只有实际返回范围完整覆盖 `1..total_lines` 且没有输出截断时才为 `complete`。
+
 ### 4.3 L3：评测隔离
 
 生产环境可以按需使用 L3。SWE-bench 运行中 L3 的读取和写入都固定为零，避免跨任务泄漏。
@@ -138,10 +157,11 @@ artifact = memory/l2/stages/<stage_sequence>/events/<event_sequence>.json
 1. 任务开始时，将原始任务输入写入 L2。
 2. 阶段开始由外部执行系统提供 `task_id`、`stage_id` 和 `stage_sequence`。
 3. 新 user、assistant、reasoning 和 tool result 按出现顺序写入 L2。
-4. 每个已执行仓库工具的完整 Controller 返回立即写入 L2。
+4. 每个已执行仓库工具的完整 Controller 返回立即写入 L2；`repo_read` 必须携带 `read_metadata`，`repo_edit` 必须携带按 `edit_kind` 区分的严格 `edit_metadata`，其他工具不得携带这两类元数据。
 5. `repo_read` 已取得的正文派生为可寻址 file view 和 chunks；来源事件保持不变。
-6. 阶段完成时，把完整 handoff 和本阶段 L2 引用追加到 L1。
-7. Condensation 和 L0 快照作为派生审计制品写入 L2，但不成为新的原始事实。
+6. 成功编辑后先推进 repository/path revision，使旧版本退出当前视图，再按编辑元数据重建或迁移新版本 file view；迁移失败不回退 revision。
+7. 阶段完成时，把完整 handoff 和本阶段 L2 引用追加到 L1。
+8. Condensation 和 L0 快照作为派生审计制品写入 L2，但不成为新的原始事实。
 
 所有制品使用 canonical JSON SHA-256：先对不含自身 `sha256` 的 payload 计算哈希，再写入外层记录；读取时按相同规则复算。
 
@@ -164,6 +184,8 @@ repo_search = repository_revision + normalized_input_sha256 + result_sha256
 repo_diff   = repository_revision + result_sha256
 repo_list   = repository_revision + normalized_input_sha256 + result_sha256
 ```
+
+文件 Coverage 不使用上述正文去重键，而使用 `path + path_revision + file_sha256`。因此同一路径旧 revision 的 `complete` 不能参与新 revision 的 Coverage 合并。
 
 同一逻辑键重复出现时：
 
@@ -218,10 +240,10 @@ L2 完整保存已取得的文件范围，但不把大文件全文强行放入 L
 
 ```text
 file view
-├── path、path_revision、source_sha256
-├── coverage_status
+├── path、path_revision、file_sha256、source_sha256
+├── coverage_status、total_lines、covered_ranges、missing_ranges
 ├── structure：imports、类、函数、方法及行范围
-└── chunks[]：chunk_id、起止行、正文、sha256
+└── chunks[]：chunk_id、起止行、正文、file/source/content SHA、sha256
 ```
 
 当前规则：
@@ -230,6 +252,14 @@ file view
 - 每个 chunk 目标上限 4096 tokens，重叠 256 tokens；实现使用确定性字节近似。
 - chunk 按起始行排序。
 - 只为 L2 已取得的正文生成 chunk，不把未知范围表示为已知。
+
+成功 `repo_edit` 后的派生规则固定为：
+
+1. `edit_metadata` 是严格联合类型：`create` 的全部 `before_*` 和 `before_file_sha256` 为 `null`，`after_*` 完整；`replace` 的前后行范围、总行数、`line_delta` 和前后完整文件 SHA 全部必填。行范围使用一基、半开区间。
+2. 若旧 revision 的多个 file views 已能合成并通过完整文件 SHA 校验，则在内存中执行同一精确替换，直接生成新 revision 的完整 file view，不再次调用 `repo_read`。
+3. 若只有部分 chunks，则编辑范围及前后固定一行保护带失效；确定未相交的 chunks 按 `line_delta` 调整后重新绑定新 `path_revision`、`file_sha256` 和 chunk SHA。
+4. 新 Coverage 的 `covered_ranges` 是成功迁移范围与后续实际新读取范围的并集；`missing_ranges` 是 `1..after_total_lines` 的机械补集。
+5. 存在明确缺口时为 `partial_known`；元数据不足、范围无法换算或 SHA 校验失败时为 `partial_unknown`。后续真实读取若使可信范围覆盖全文件，累计状态可恢复为 `complete`。
 
 取回顺序固定为：
 
@@ -485,6 +515,8 @@ L1 在整个任务中累积所有已完成阶段；L2 累积完整已取得证�
 | rolling `previous summary + new delta` 压缩 | 已实现 |
 | checkpoint/delta 缓存友好组装 | 已实现 |
 | 重复证据合并、repository/path revision 失效 | 已实现 |
+| repo_read 实际范围元数据、文件/来源双 SHA 和 revision 隔离 Coverage | 已实现 |
+| 完整文件编辑后本地重建、部分 chunk 安全迁移 | 已实现 |
 | 最新编辑和 diff 活动视图 | 已实现 |
 | 已确认分析结论的稳定视图 | 尚未实现 |
 | 验证专用高密度视图与 `latest_verification_ref` | 尚未实现 |

@@ -24,7 +24,7 @@
 
 ## 3. 最小实现结构
 
-只新增三个记忆代码文件：
+记忆核心保持三个代码文件：
 
 ```text
 packages/repofixlab/src/
@@ -37,6 +37,8 @@ packages/repofixlab/src/
 
 指标继续写入现有 token ledger、RepoFix 轨迹和报告模块，不新增独立指标系统。
 
+文件版本语义通过现有仓库工具协议接入，不新增记忆服务：Controller 负责产生可验证的 `read_metadata` / `edit_metadata`，Store 负责保存并派生 file view，Assembler 只消费当前版本视图。
+
 现有文件只做必要接入：
 
 - `agent/repofix.ts`：从现有 `afterToolCall` 的 `result.details` 增量保存 Controller 返回，在 Provider 调用前保存尚未写入的 current-stage 消息并接入 assembler；用 L1 和 L0 替换前三项 handoff 与历史密封文本。
@@ -45,7 +47,7 @@ packages/repofixlab/src/
 - `runner/m4-dev-workflow.ts`：创建任务记忆，向 assembler 提供由同一冻结模型和 Token Supervisor 构造的 Condenser 回调，保存制品并记录耗时。
 - `metrics`、`report`：生成加入记忆前后的配对结果。
 
-现有 `repo-tools.ts` 已在模型可见文本之外保留 `response.result`，因此不修改 Controller 协议，也不改变单次 12 KiB 字符和单阶段 48 KiB 字符的模型可见工具输出限制。
+现有 `repo-tools.ts` 在模型可见文本之外保留 `response.result`。为使文件版本和实际读取范围可验证，Controller 协议仅增加严格的 `read_metadata` / `edit_metadata`；不改变单次 12 KiB 字符和单阶段 48 KiB 字符的模型可见工具输出限制。
 
 ## 4. 实施步骤
 
@@ -77,16 +79,18 @@ systemPrompt + tools + materialize(L0, 当前阶段请求) ──> Provider Cont
 
 1. `agent/repofix.ts` 在 `afterToolCall` 中读取现有 `result.details`，把每次完整 Controller 返回立即追加为 L2 事件；Provider 调用前将尚未保存的 current-stage user、assistant 和 tool result 事件按原顺序追加。记忆模块不主动发起仓库操作。
 2. `store.ts` 使用现有 `ArtifactStore` 保存 sidecar。`artifact_id` 直接使用 ArtifactStore 相对路径；事件路径固定为 `memory/l2/stages/<stage_sequence>/events/<event_sequence>.json`，`event_id` 固定为 `attempt_id:stage_id:event_sequence`。事件只追加、不覆盖。
-3. 单次工具返回被截断或只覆盖部分范围时记录 `partial_known` 或 `partial_unknown`；外部执行系统后续取得的分页或分段结果作为同一 `coverage_key` 的新事件追加。Assembler 按事件顺序合并覆盖范围并派生累计状态，覆盖完整后才返回 `complete`；旧事件不改写，记忆模块不主动补读。
-4. 每个阶段结束时向 L1 追加一份不可变记录，包含 `stage_id`、`stage_sequence`、完整 schema 交接制品、按 `event_sequence` 排列的本阶段全部 L2 证据引用和自身 `sha256`。旧阶段记录不覆盖；交接字段和数组成员不执行 `top-N`、240 字符截断或其他二次缩减。
-5. `assembler.ts` 读取全部 L1，并且只按明确的 `artifact_id`、文件路径、行号或 chunk 引用新增召回 L2 已取得内容；没有明确引用时不猜测。首次召回后，该来源进入当前阶段连续工作集，在被有效 `Condensation` 覆盖或阶段结束前不再接受 query 淘汰。来源固定按 L1 阶段、L2 制品、当前阶段事件排列。
-6. `assembler.ts` 从候选视图机械生成受保护索引，完整复制 L1 集合成员标识并为每个已完成阶段保留一条阶段制品引用；具体 L2 覆盖状态和证据引用首次由 query 明确召回时进入 L0，随后按当前阶段工作集连续性规则保留。模型只压缩受保护索引以外的自由文本。
-7. Provider Context 的 `systemPrompt` 和 `tools` 不变。历史部分由 L0 替换；当前阶段原始请求只出现一次，并与 L0 记忆块使用固定分隔符组成首个 current-stage user message。达到压缩线前，当前阶段尚未被压缩覆盖的消息、工具结果和文件片段按 `source_event_id` 单调累积；最近完整 assistant/tool 轮次按原消息类型和顺序保留。
-8. 未压缩 Provider Context 达到窗口的 70% 时，`assembler.ts` 保留受保护索引、阶段固定 head 和最近工具协议轮次，以本阶段第一次 Controller 请求作为冻结 query，通过回调压缩“上一版 summary + 新增 delta”，并把带上一版引用和 delta 来源的 `Condensation` 追加到 L2。压缩结果使用前必须满足“压缩前来源集合 = 原文保留来源集合 ∪ Condensation 累计覆盖来源集合”；不相等时拒绝该结果。
-9. Condenser 通过独立的受监督 Provider 回调调用同一冻结模型，不经过会增加 RepoFix 阶段轮次或修改 session history 的 `session.agent.streamFn`。它不允许工具调用、不重试，`max_output_tokens=summary_max_tokens≤4096`，并通过同一 Token Supervisor 计入 run cap。相同三项输入哈希直接复用已有结果。
-10. Condenser 失败时，未压缩输入在模型窗口内安全可发送则回退到未压缩 L0，否则返回记忆基础设施失败。受保护索引超过安全预算时同样失败，不允许删减。
-11. L0 写明受保护索引、使用的 `Condensation`、已装入和未装入的文件范围；请求结束后将 L0 快照追加到 L2，但不把该快照作为新事实来源。
-12. SWE-bench 配置中的 L3 输入固定为空数组，禁止读取和写入跨任务经验。
+3. `repo_read` Coverage 固定使用 `path + path_revision + file_sha256`，并额外维护 `path + path_revision → file_sha256` 唯一映射；同一路径版本出现不同完整文件 SHA 时立即返回基础设施错误。其他工具继续绑定全局 repository revision。
+4. `read_metadata` 描述 64 KiB 完整行限制后实际保存的范围；单次返回被截断或只覆盖部分范围时记录 `partial_known` 或 `partial_unknown`。后续分页结果追加到相同文件版本，累计覆盖取并集并机械计算缺口，旧事件不改写，记忆模块不主动补读。
+5. 成功 `repo_edit` 先推进 repository/path revision。旧完整文件可由 L2 视图合成并通过 SHA 校验时，在内存执行相同精确替换并生成新完整视图；只有部分 chunks 时只迁移编辑范围及固定保护带之外的确定未变范围。迁移失败保持新 revision 并标记 `partial_unknown`。
+6. 每个阶段结束时向 L1 追加一份不可变记录，包含 `stage_id`、`stage_sequence`、完整 schema 交接制品、按 `event_sequence` 排列的本阶段全部 L2 证据引用和自身 `sha256`。旧阶段记录不覆盖；交接字段和数组成员不执行 `top-N`、240 字符截断或其他二次缩减。
+7. `assembler.ts` 读取全部 L1，并且只按明确的 `artifact_id`、文件路径、行号或 chunk 引用新增召回 L2 已取得内容；没有明确引用时不猜测。首次召回后，该来源进入当前阶段连续工作集，在被有效 `Condensation` 覆盖或阶段结束前不再接受 query 淘汰。来源固定按 L1 阶段、L2 制品、当前阶段事件排列。
+8. `assembler.ts` 从候选视图机械生成受保护索引，完整复制 L1 集合成员标识并为每个已完成阶段保留一条阶段制品引用；具体 L2 覆盖状态和证据引用首次由 query 明确召回时进入 L0，随后按当前阶段工作集连续性规则保留。模型只压缩受保护索引以外的自由文本。
+9. Provider Context 的 `systemPrompt` 和 `tools` 不变。历史部分由 L0 替换；当前阶段原始请求只出现一次，并与 L0 记忆块使用固定分隔符组成首个 current-stage user message。达到压缩线前，当前阶段尚未被压缩覆盖的消息、工具结果和文件片段按 `source_event_id` 单调累积；最近完整 assistant/tool 轮次按原消息类型和顺序保留。
+10. 未压缩 Provider Context 达到窗口的 70% 时，`assembler.ts` 保留受保护索引、阶段固定 head 和最近工具协议轮次，以本阶段第一次 Controller 请求作为冻结 query，通过回调压缩“上一版 summary + 新增 delta”，并把带上一版引用和 delta 来源的 `Condensation` 追加到 L2。压缩结果使用前必须满足“压缩前来源集合 = 原文保留来源集合 ∪ Condensation 累计覆盖来源集合”；不相等时拒绝该结果。
+11. Condenser 通过独立的受监督 Provider 回调调用同一冻结模型，不经过会增加 RepoFix 阶段轮次或修改 session history 的 `session.agent.streamFn`。它不允许工具调用、不重试，`max_output_tokens=summary_max_tokens≤4096`，并通过同一 Token Supervisor 计入 run cap。相同三项输入哈希直接复用已有结果。
+12. Condenser 失败时，未压缩输入在模型窗口内安全可发送则回退到未压缩 L0，否则返回记忆基础设施失败。受保护索引超过安全预算时同样失败，不允许删减。
+13. L0 写明受保护索引、使用的 `Condensation`、已装入和未装入的文件范围；请求结束后将 L0 快照追加到 L2，但不把该快照作为新事实来源。
+14. SWE-bench 配置中的 L3 输入固定为空数组，禁止读取和写入跨任务经验。
 
 所有 L0/L1/L2/Condensation 哈希复用现有 `canonicalContractSha256`：对不含自身 `sha256` 的 payload 计算 canonical JSON SHA-256，再写入外层记录；读取时复算验证。
 
@@ -135,11 +139,12 @@ systemPrompt + tools + materialize(L0, 当前阶段请求) ──> Provider Cont
 - `coverage_status`：`complete`、`partial_known`、`partial_unknown`
 - 覆盖类型：`full_file`、`full_result_set`、`file_range`、`result_page`
 - 已覆盖范围；仅在 Controller 返回足够信息时记录精确未覆盖范围
+- 文件工具的 `path_revision`、`file_sha256`、实际返回的 `source_sha256` 和 `total_lines`
 - Controller `truncated`
 - 原始字节数
 - `sha256`
 
-对六个仓库工具都把本次操作的完整 Controller 返回作为不可变事件追加保存：`repo_list`、`repo_read`、`repo_search`、`repo_edit`、`repo_exec`、`repo_diff`。Controller 单次原始返回仍受 64 KiB 限制；`truncated=true` 时该事件标记为 `partial_known` 或 `partial_unknown`，不能标记为完整文件或完整结果集。后续分页或分段调用继续追加；累计状态由相同 `coverage_key` 的事件确定性派生，不建立可变覆盖记录。L2 写入失败时，该次 attempt 记录为基础设施失败。
+对六个仓库工具都把本次操作的完整 Controller 返回作为不可变事件追加保存：`repo_list`、`repo_read`、`repo_search`、`repo_edit`、`repo_exec`、`repo_diff`。`repo_read` 必须对应 `read_metadata`；`repo_edit` 必须对应严格 create/replace `edit_metadata`；其他工具的文件 Coverage 为 `null`。Controller 单次原始返回仍受 64 KiB 限制，累计状态按同一文件版本确定性派生，不建立可变覆盖记录。L2 写入失败时，该次 attempt 记录为基础设施失败。
 
 语义压缩结果作为派生制品写入 L2，固定包含 `summary`、`source_event_ids`、`query_sha256`、`input_sha256`、`policy_sha256` 和自身 `sha256`。它不覆盖来源事件。
 
@@ -186,9 +191,11 @@ L0 快照不是下一轮的事实来源，但 Assembler 必须持有本阶段的
 3. 超过 4096 tokens 的节点按行边界继续切分，每片上限 4096 tokens，重叠 256 tokens。
 4. 其他文件或解析失败文件使用同样的 4096/256 规则切分。
 5. chunk 顺序固定为文件起始行升序。
-6. 每个 chunk 保存文件 `sha256`、`chunk_id`、起止行和 chunk `sha256`。
+6. 每个 chunk 保存 `file_sha256`、实际读取来源 `source_sha256`、正文 `content_sha256`、`chunk_id`、起止行和 chunk 契约 `sha256`。
 
 只对 L2 已取得的文件范围生成目录和 chunk。Assembler 仅按明确的 `artifact_id`、路径、行号或 `chunk_id` 取回；未取得范围只报告覆盖状态，Agent 是否调用现有 `repo_read` 由 RepoFix 执行流程决定。
+
+编辑后完整缓存直接在本地重建，不调用工具；部分缓存仅迁移确定未受影响的 chunks。所有迁移条目重新绑定新 `path_revision` 和新哈希。Coverage 的已覆盖范围为迁移范围与后续真实读取范围的并集，缺失范围为新文件全范围的机械补集。
 
 ### 6.2 Query 引导的语义压缩
 
@@ -364,23 +371,27 @@ memory 组 task_wall_ms - legacy 组 task_wall_ms
 
 ### 12.1 修改范围
 
-只修改现有三个记忆文件和对应测试：
+在现有记忆实现上做必要的协议和版本语义修改：
 
-- `contracts/memory.ts`：为 L2/file view 增加 `repository_revision`、`path_revision` 和逻辑证据键；为 L0 增加 `checkpoint`/`delta` 类型及紧凑活动视图。
-- `memory/store.ts`：从已执行的成功 `repo_edit` 事件递增 revision；为工具证据生成逻辑键。全部原始事件仍追加到 L2。
+- `sandbox/protocol.ts`、`repo-tools.ts`：增加严格 `read_metadata` / `edit_metadata` 契约，并把必要元数据展示给模型。
+- Controller `runtime_tools.py`、`runtime_docker.py`：生成并严格校验实际读取范围、文件/来源 SHA 及编辑前后范围。
+- `contracts/memory.ts`：为 L2/file view 增加 revision、文件哈希和 Coverage 字段；为 L0 增加 `checkpoint`/`delta` 类型及紧凑活动视图。
+- `memory/store.ts`：成功编辑后递增 revision；隔离文件版本 Coverage；完整文件本地重建，部分 chunks 安全迁移。全部原始事件仍追加到 L2。
 - `memory/assembler.ts`：把 `stageWorkingSourceKeys` Set 替换为 `ActiveEvidence` Map；实现重复合并、编辑后失效、L0 delta 追加和 checkpoint 重建。
-- `test/memory-system.test.ts`：增加下面四项确定性回归。
+- 对应 TypeScript 和 Python 测试：覆盖上下文连续性、协议元数据和 revision-aware Coverage。
 
-不修改 Controller 工具协议、RepoFix FSM、工具额度、阶段完成规则或官方评测流程。
+不修改 RepoFix FSM、工具额度、阶段完成规则或官方评测流程。
 
 ### 12.2 实施顺序
 
-1. **版本与逻辑键。** Store 初始 revision 为 0；只有成功 `repo_edit` 增加全局 revision 和对应 path revision。所有 L2 事件记录当时 revision。
-2. **工作集归并。** Assembler 按逻辑键维护一份有效正文；重复事件只增加来源引用。编辑后删除被修改路径旧 revision 的活动表示，L2 不删除。
-3. **活动视图。** 从现有事件生成最新编辑、最新 diff 和已有验证引用；禁止生成完成判断字段。
-4. **消息级增量组装。** 保存上一次实际 Provider 消息视图，只追加新 session 消息和 L0 delta。首次阶段请求独立、原样位于动态 memory 之前。
-5. **checkpoint。** 仅在 70% 压缩或成功编辑后重建；压缩继续使用现有 rolling Condensation，编辑 checkpoint 不调用模型。
-6. **指标。** 在现有 L0 审计中增加 `view_kind`、`repository_revision`、`active_evidence_count` 和 `stable_prefix_message_count`，不新增指标系统。
+1. **结构化工具元数据。** `repo_read` 记录实际正文范围、总行数和 file/source SHA；`repo_edit` 按 create/replace 返回前后范围、总行数、行差和完整文件 SHA。Docker 边界按工具类型严格校验。
+2. **版本与 SHA 账本。** Store 初始 revision 为 0；只有成功 `repo_edit` 增加全局 revision 和对应 path revision。文件 Coverage 绑定 path revision，并独立检查同版本 SHA 冲突。
+3. **文件视图迁移。** 完整缓存执行同一精确替换并重建；部分缓存迁移保护带之外的 chunks，Coverage 机械重算，失败保持新 revision 并标记未知。
+4. **工作集归并。** Assembler 按逻辑键维护一份有效正文；重复事件只增加来源引用。编辑后删除被修改路径旧 revision 的活动表示，L2 不删除。
+5. **活动视图。** 从现有事件生成最新编辑、最新 diff 和已有验证引用；禁止生成完成判断字段。
+6. **消息级增量组装。** 保存上一次实际 Provider 消息视图，只追加新 session 消息和 L0 delta。首次阶段请求独立、原样位于动态 memory 之前。
+7. **checkpoint。** 仅在 70% 压缩或成功编辑后重建；压缩继续使用现有 rolling Condensation，编辑 checkpoint 不调用模型。
+8. **指标。** 在现有 L0 审计中增加 `view_kind`、`repository_revision`、`active_evidence_count` 和 `stable_prefix_message_count`，不新增指标系统。
 
 ### 12.3 确定性测试
 
@@ -388,6 +399,9 @@ memory 组 task_wall_ms - legacy 组 task_wall_ms
 2. 同一路径、revision 和行范围连续读取 16 次时，L2 有 16 份工具事件，L0 只有 1 份文件正文；重复 result 使用短引用 stub。
 3. 成功编辑后 revision 加 1，编辑前目标路径的 file view/chunk 不再进入新 checkpoint；编辑后重新读取形成新版本，旧证据仍可从 L2 按引用读取。
 4. 同一 revision 的重复 `repo_diff` 在 L0 只保留一份；活动视图指向最新编辑和当前 revision 的 diff，但不包含阶段完成判断。
+5. 同一路径旧 revision 完整、新 revision 只读取局部时，新 revision 不能继承旧 `complete`；同一路径版本出现不同 `file_sha256` 时立即失败。
+6. 旧文件可由多个分页视图合成完整内容时，编辑后无需 `repo_read` 即生成新完整视图；只有部分内容时，未受影响 chunks 迁移，后续读取与迁移范围取并集。
+7. 空文件和超出文件末尾读取的 `returned_range` 均为 `null`，但前者为 `complete`、后者为不完整；64 KiB 限制不切断 UTF-8 字符或半行。
 
 现有 70% 边界、滚动压缩、8 候选、部分文件覆盖和 L2 完整性测试必须保持通过。
 
@@ -410,8 +424,10 @@ memory 组 task_wall_ms - legacy 组 task_wall_ms
 - L2 工具事件增加仓库 revision、路径 revision 和逻辑证据键，原始事件仍完整追加。
 - L0 使用 checkpoint/delta 消息视图；非 checkpoint 请求复用上一轮完整 Provider 消息前缀。
 - 当前工作集按逻辑证据键归并；成功编辑后重建 checkpoint，并使目标路径旧版本退出 L0。
+- 文件 Coverage 按 `path + path_revision + file_sha256` 隔离，并有独立的 path revision SHA 冲突检查。
+- Controller 已提供严格 read/edit metadata；完整文件编辑可在 L2 本地重建，部分 chunks 可安全迁移并与后续读取合并。
 - 活动视图只投影最新编辑、当前 revision 和最新 diff，不包含执行判断。
 
-定向 `memory-system.test.ts` 共 18 项通过，其中新增 4 项覆盖严格前缀、16 次重复读取、编辑后版本失效和重复 diff。目标文件 Biome 检查及仓库的 pinned dependency、TS import、shrinkwrap、install lock、browser smoke 检查通过；仓库级 TypeScript 检查仍有本轮范围外的既有错误，目标文件没有 TypeScript 错误。
+定向 `memory-system.test.ts` 18 项、revision Coverage 4 项及 Controller metadata 3 项通过。目标文件 Biome 检查通过；仓库级 TypeScript 检查仍有本轮范围外的既有测试类型错误。
 
 正式 Layered 复跑尚未启动：当前执行环境没有 `DEEPSEEK_API_KEY` 或 `DEEPSEEK_API_KEY_FILE`。取得 Provider secret 后，按 4M、128 turns、2,700,000 ms 参数只复跑 `preactjs__preact-4182`。

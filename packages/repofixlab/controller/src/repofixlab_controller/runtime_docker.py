@@ -30,6 +30,11 @@ from .runtime_service import (
 )
 from .runtime_tools import (
     RUNTIME_TOOL_NAMES,
+    RuntimeCreateMetadata,
+    RuntimeEditMetadata,
+    RuntimeLineSpan,
+    RuntimeReadMetadata,
+    RuntimeReplaceMetadata,
     RuntimeSnapshotEvidence,
     RuntimeSnapshotFile,
     RuntimeToolError,
@@ -39,6 +44,7 @@ from .runtime_tools import (
     RuntimeVerificationCatalogEntry,
     RuntimeVerificationObservation,
     RuntimeVerificationResult,
+    runtime_text_line_count,
 )
 
 
@@ -881,7 +887,7 @@ class DockerRuntimeBackend:
         result = output.get("result")
         if not isinstance(result, Mapping):
             raise RuntimeDockerError("worker tool result is malformed")
-        return _runtime_tool_result(result, tool)
+        return _runtime_tool_result(result, tool, arguments)
 
     def verification_catalog(self, worker: object) -> RuntimeVerificationCatalog:
         handle = _worker_handle(worker)
@@ -1967,10 +1973,209 @@ def _exec_text_static(container: object, command: list[str], *, user: str) -> st
         raise RuntimeDockerError("runtime container text is malformed") from error
 
 
-def _runtime_tool_result(
-    value: Mapping[str, object], expected_tool: RuntimeToolName
-) -> RuntimeToolResult:
+def _runtime_line_span(value: object) -> RuntimeLineSpan:
+    if not isinstance(value, Mapping) or set(value) != {
+        "start_line",
+        "end_line_exclusive",
+    }:
+        raise RuntimeDockerError("worker line span drifted")
+    start_line = value.get("start_line")
+    end_line_exclusive = value.get("end_line_exclusive")
+    if (
+        isinstance(start_line, bool)
+        or not isinstance(start_line, int)
+        or start_line < 1
+        or isinstance(end_line_exclusive, bool)
+        or not isinstance(end_line_exclusive, int)
+        or end_line_exclusive < start_line
+    ):
+        raise RuntimeDockerError("worker line span drifted")
+    return RuntimeLineSpan(
+        start_line=start_line,
+        end_line_exclusive=end_line_exclusive,
+    )
+
+
+def _runtime_read_metadata(
+    value: object,
+    *,
+    expected_path: object,
+    stdout: str,
+    truncated: bool,
+) -> RuntimeReadMetadata:
     expected_keys = {
+        "path",
+        "returned_range",
+        "total_lines",
+        "file_sha256",
+        "source_sha256",
+        "complete",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        raise RuntimeDockerError("worker repo_read metadata drifted")
+    path = value.get("path")
+    total_lines = value.get("total_lines")
+    file_sha256 = value.get("file_sha256")
+    source_sha256 = value.get("source_sha256")
+    complete = value.get("complete")
+    returned_value = value.get("returned_range")
+    returned_range = None if returned_value is None else _runtime_line_span(returned_value)
+    stdout_line_count = runtime_text_line_count(stdout)
+    actual_source_sha256 = hashlib.sha256(stdout.encode("utf-8")).hexdigest()
+    if (
+        not isinstance(path, str)
+        or path != expected_path
+        or isinstance(total_lines, bool)
+        or not isinstance(total_lines, int)
+        or total_lines < 0
+        or not isinstance(file_sha256, str)
+        or _SHA256.fullmatch(file_sha256) is None
+        or not isinstance(source_sha256, str)
+        or source_sha256 != actual_source_sha256
+        or not isinstance(complete, bool)
+        or (returned_range is None and stdout != "")
+        or (returned_range is not None and stdout == "")
+        or (total_lines == 0 and returned_range is not None)
+        or (
+            returned_range is not None
+            and (
+                returned_range.end_line_exclusive - returned_range.start_line
+                != stdout_line_count
+                or returned_range.end_line_exclusive > total_lines + 1
+            )
+        )
+    ):
+        raise RuntimeDockerError("worker repo_read metadata drifted")
+    expected_complete = not truncated and (
+        total_lines == 0
+        or (
+            returned_range is not None
+            and returned_range.start_line == 1
+            and returned_range.end_line_exclusive == total_lines + 1
+        )
+    )
+    if complete != expected_complete or (complete and file_sha256 != source_sha256):
+        raise RuntimeDockerError("worker repo_read completion metadata drifted")
+    return RuntimeReadMetadata(
+        path=path,
+        returned_range=returned_range,
+        total_lines=total_lines,
+        file_sha256=file_sha256,
+        source_sha256=source_sha256,
+        complete=complete,
+    )
+
+
+def _runtime_edit_metadata(
+    value: object,
+    *,
+    expected_path: object,
+    arguments: Mapping[str, object],
+) -> RuntimeEditMetadata:
+    expected_keys = {
+        "path",
+        "edit_kind",
+        "before_range",
+        "before_total_lines",
+        "before_file_sha256",
+        "after_range",
+        "after_total_lines",
+        "after_file_sha256",
+        "line_delta",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        raise RuntimeDockerError("worker repo_edit metadata drifted")
+    path = value.get("path")
+    edit_kind = value.get("edit_kind")
+    after_total_lines = value.get("after_total_lines")
+    after_file_sha256 = value.get("after_file_sha256")
+    if (
+        not isinstance(path, str)
+        or path != expected_path
+        or isinstance(after_total_lines, bool)
+        or not isinstance(after_total_lines, int)
+        or after_total_lines < 0
+        or not isinstance(after_file_sha256, str)
+        or _SHA256.fullmatch(after_file_sha256) is None
+    ):
+        raise RuntimeDockerError("worker repo_edit metadata drifted")
+    after_range = _runtime_line_span(value.get("after_range"))
+    if edit_kind == "create":
+        content = arguments.get("content")
+        if (
+            set(arguments) != {"path", "content"}
+            or not isinstance(content, str)
+            or value.get("before_range") is not None
+            or value.get("before_total_lines") is not None
+            or value.get("before_file_sha256") is not None
+            or value.get("line_delta") is not None
+            or after_range.start_line != 1
+            or after_range.end_line_exclusive != after_total_lines + 1
+            or after_total_lines != runtime_text_line_count(content)
+            or after_file_sha256
+            != hashlib.sha256(content.encode("utf-8")).hexdigest()
+        ):
+            raise RuntimeDockerError("worker repo_edit create metadata drifted")
+        return RuntimeCreateMetadata(
+            path=path,
+            edit_kind="create",
+            before_range=None,
+            before_total_lines=None,
+            before_file_sha256=None,
+            after_range=after_range,
+            after_total_lines=after_total_lines,
+            after_file_sha256=after_file_sha256,
+            line_delta=None,
+        )
+    if edit_kind != "replace" or set(arguments) != {"path", "old_text", "new_text"}:
+        raise RuntimeDockerError("worker repo_edit metadata drifted")
+    before_total_lines = value.get("before_total_lines")
+    before_file_sha256 = value.get("before_file_sha256")
+    line_delta = value.get("line_delta")
+    before_range = _runtime_line_span(value.get("before_range"))
+    old_text = arguments.get("old_text")
+    new_text = arguments.get("new_text")
+    if (
+        not isinstance(old_text, str)
+        or not old_text
+        or not isinstance(new_text, str)
+        or isinstance(before_total_lines, bool)
+        or not isinstance(before_total_lines, int)
+        or before_total_lines < 1
+        or not isinstance(before_file_sha256, str)
+        or _SHA256.fullmatch(before_file_sha256) is None
+        or isinstance(line_delta, bool)
+        or not isinstance(line_delta, int)
+        or line_delta != after_total_lines - before_total_lines
+        or before_range.end_line_exclusive > before_total_lines + 1
+        or after_range.end_line_exclusive > after_total_lines + 1
+        or before_range.start_line != after_range.start_line
+        or before_range.end_line_exclusive - before_range.start_line
+        != old_text.count("\n") + (0 if old_text.endswith("\n") else 1)
+        or after_range.end_line_exclusive - after_range.start_line
+        != (0 if not new_text else new_text.count("\n") + (0 if new_text.endswith("\n") else 1))
+    ):
+        raise RuntimeDockerError("worker repo_edit replace metadata drifted")
+    return RuntimeReplaceMetadata(
+        path=path,
+        edit_kind="replace",
+        before_range=before_range,
+        before_total_lines=before_total_lines,
+        before_file_sha256=before_file_sha256,
+        after_range=after_range,
+        after_total_lines=after_total_lines,
+        after_file_sha256=after_file_sha256,
+        line_delta=line_delta,
+    )
+
+
+def _runtime_tool_result(
+    value: Mapping[str, object],
+    expected_tool: RuntimeToolName,
+    arguments: Mapping[str, object] | None = None,
+) -> RuntimeToolResult:
+    tool_arguments = {} if arguments is None else arguments
+    base_keys = {
         "tool",
         "exit_code",
         "stdout",
@@ -1979,6 +2184,11 @@ def _runtime_tool_result(
         "timed_out",
         "duration_ms",
     }
+    expected_keys = set(base_keys)
+    if expected_tool == "repo_read":
+        expected_keys.add("read_metadata")
+    elif expected_tool == "repo_edit":
+        expected_keys.add("edit_metadata")
     exit_code = value.get("exit_code")
     duration_ms = value.get("duration_ms")
     if (
@@ -1997,14 +2207,37 @@ def _runtime_tool_result(
         or duration_ms < 0
     ):
         raise RuntimeDockerError("worker tool result drifted")
+    stdout = str(value["stdout"])
+    truncated = bool(value["truncated"])
+    read_metadata = (
+        _runtime_read_metadata(
+            value.get("read_metadata"),
+            expected_path=tool_arguments.get("path"),
+            stdout=stdout,
+            truncated=truncated,
+        )
+        if expected_tool == "repo_read"
+        else None
+    )
+    edit_metadata = (
+        _runtime_edit_metadata(
+            value.get("edit_metadata"),
+            expected_path=tool_arguments.get("path"),
+            arguments=tool_arguments,
+        )
+        if expected_tool == "repo_edit"
+        else None
+    )
     return RuntimeToolResult(
         tool=expected_tool,
         exit_code=exit_code,
-        stdout=str(value["stdout"]),
+        stdout=stdout,
         stderr=str(value["stderr"]),
-        truncated=bool(value["truncated"]),
+        truncated=truncated,
         timed_out=bool(value["timed_out"]),
         duration_ms=duration_ms,
+        read_metadata=read_metadata,
+        edit_metadata=edit_metadata,
     )
 
 

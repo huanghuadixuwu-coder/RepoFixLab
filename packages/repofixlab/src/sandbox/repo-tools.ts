@@ -82,6 +82,27 @@ function assertExpectedTool(response: RepoToolResponse, expectedTool: RepoToolRe
 
 /** Format bounded model-visible execution evidence from a Controller result. */
 function formatToolResult(response: RepoToolResponse, visibleCharacterLimit: number): string {
+	const metadata =
+		response.result.tool === "repo_read"
+			? [
+					`path: ${response.result.read_metadata.path}`,
+					`returned_range: ${
+						response.result.read_metadata.returned_range === null
+							? "empty"
+							: `${String(response.result.read_metadata.returned_range.start_line)}-${String(
+									response.result.read_metadata.returned_range.end_line_exclusive - 1,
+								)}`
+					}`,
+					`total_lines: ${String(response.result.read_metadata.total_lines)}`,
+					`complete: ${response.result.read_metadata.complete}`,
+				]
+			: response.result.tool === "repo_edit"
+				? [
+						`path: ${response.result.edit_metadata.path}`,
+						`edit_kind: ${response.result.edit_metadata.edit_kind}`,
+						`after_file_sha256: ${response.result.edit_metadata.after_file_sha256}`,
+					]
+				: [];
 	const raw = [
 		`tool: ${response.result.tool}`,
 		`exit_code: ${response.result.exit_code === null ? "null" : response.result.exit_code}`,
@@ -89,6 +110,7 @@ function formatToolResult(response: RepoToolResponse, visibleCharacterLimit: num
 		`truncated: ${response.result.truncated}`,
 		"model_output_truncated: false",
 		`duration_ms: ${response.result.duration_ms}`,
+		...metadata,
 		"stdout:",
 		response.result.stdout.length === 0 ? "<empty>" : response.result.stdout,
 		"stderr:",

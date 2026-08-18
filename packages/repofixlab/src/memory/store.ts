@@ -9,6 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { extname } from "node:path";
+import { Compile } from "typebox/compile";
 import ts from "typescript";
 import type { RepoFixStage } from "../agent/repofix-config.ts";
 import type { StageCompletion } from "../agent/repofix-fsm.ts";
@@ -30,7 +31,10 @@ import {
 	verifyMemorySha256,
 } from "../contracts/memory.ts";
 import { canonicalContractSha256 } from "../contracts/run-contracts.ts";
+import { type RepoEditMetadata, type RepoReadMetadata, RepoToolResultSchema } from "../sandbox/protocol.ts";
 import type { StoreArtifactOptions, StoredArtifact } from "../storage/artifact-store.ts";
+
+const repoToolResultValidator = Compile(RepoToolResultSchema);
 
 /**
  * [类别级]
@@ -89,14 +93,16 @@ export interface MemoryFileChunk {
 	readonly start_line: number;
 	readonly end_line: number;
 	readonly content: string;
-	readonly source_sha256: string;
+	readonly file_sha256: string;
+	readonly source_sha256: string | null;
+	readonly content_sha256: string;
 	readonly sha256: string;
 }
 
 /**
  * [类别级]
  *
- * 定位：从一次已保存 repo_read 正文机械派生的可寻址文件视图。
+ * 定位：从已保存 repo_read 正文或可验证的 repo_edit 机械派生的可寻址文件视图。
  * 表示：文件版本、覆盖状态、JS/TS 结构目录及有序 chunks。
  * 不变量：不补全 Controller 未返回的内容，也不把 partial coverage 伪装成完整文件。
  */
@@ -107,9 +113,14 @@ export interface MemoryFileViewPayload {
 	readonly repository_revision: number;
 	readonly path_revision: number;
 	readonly logical_evidence_key: string;
-	readonly source_sha256: string;
+	readonly file_sha256: string;
+	readonly source_sha256: string | null;
 	readonly coverage_key: string;
 	readonly coverage_status: MemoryCoverageStatus;
+	readonly total_lines: number;
+	readonly covered_ranges: readonly MemoryLineRange[];
+	readonly missing_ranges: readonly MemoryLineRange[] | null;
+	readonly provenance_event_ids: readonly string[];
 	readonly structure: readonly {
 		readonly kind: string;
 		readonly name: string;
@@ -176,12 +187,16 @@ export interface RepoFixMemoryStoreMetrics {
 /**
  * [类别级]
  *
- * 定位：由同一 coverage key 的全部只追加事件机械合成的累计覆盖视图。
+ * 定位：由同一文件版本的派生视图或同一非文件 coverage key 的事件机械合成的累计覆盖视图。
  * 表示：覆盖类型、累计状态、合并后的已知/缺失范围和全部来源事件。
  * 不变量：派生过程不回写旧事件；任一完整事件可使累计状态变为 complete，否则保留已知或未知缺口。
  */
 export interface MemoryCoverageView {
 	readonly coverage_key: string;
+	readonly path: string | null;
+	readonly repository_revision: number | null;
+	readonly path_revision: number | null;
+	readonly file_sha256: string | null;
 	readonly coverage_type: MemoryL2EventPayload["coverage_type"];
 	readonly coverage_status: MemoryCoverageStatus;
 	readonly covered_ranges: readonly MemoryLineRange[];
@@ -297,17 +312,66 @@ function assertPositiveInteger(value: number, name: string): void {
 
 /**
  * [函数级]
- * 目的：把 repo_read 分页输入转换为已覆盖行区间。
- * 输入/输出：未知工具输入；合法时返回一个闭区间，否则返回空集合。
- * 约束：只表示请求声明的范围，不推断文件总行数或未知缺口。
+ * 目的：复用仓库工具结果 Schema 收窄 repo_read metadata，并校验 Schema 无法表达的范围关系。
+ * 输入/输出：未知 Controller 结果；合法的读取元数据或 null。
+ * 约束：不重复实现字段、SHA 格式和严格键集合校验。
  */
-function lineRange(input: unknown): readonly MemoryLineRange[] {
-	if (!isRecord(input)) return [];
-	const start = typeof input.start_line === "number" ? input.start_line : 1;
-	const count = typeof input.line_count === "number" ? input.line_count : null;
-	if (!Number.isSafeInteger(start) || start < 1 || count === null || !Number.isSafeInteger(count) || count < 1)
-		return [];
-	return [{ start_line: start, end_line: start + count - 1 }];
+function readMetadata(result: unknown): RepoReadMetadata | null {
+	if (!repoToolResultValidator.Check(result) || result.tool !== "repo_read") return null;
+	const metadata = result.read_metadata;
+	const returnedRange = metadata.returned_range;
+	if (
+		returnedRange !== null &&
+		(returnedRange.end_line_exclusive < returnedRange.start_line ||
+			returnedRange.end_line_exclusive > metadata.total_lines + 1)
+	) {
+		return null;
+	}
+	return metadata;
+}
+
+/**
+ * [函数级]
+ * 目的：复用仓库工具结果 Schema 收窄 repo_edit metadata，并校验严格联合类型的跨字段关系。
+ * 输入/输出：未知 Controller 结果；合法的创建或替换元数据，否则返回 null。
+ * 约束：创建和替换语义保持互斥；失败时不修补或猜测字段。
+ */
+function editMetadata(result: unknown): RepoEditMetadata | null {
+	if (!repoToolResultValidator.Check(result) || result.tool !== "repo_edit") return null;
+	const metadata = result.edit_metadata;
+	const afterRange = metadata.after_range;
+	if (
+		afterRange.end_line_exclusive < afterRange.start_line ||
+		afterRange.end_line_exclusive > metadata.after_total_lines + 1
+	) {
+		return null;
+	}
+	if (metadata.edit_kind === "create") {
+		if (afterRange.start_line !== 1 || afterRange.end_line_exclusive !== metadata.after_total_lines + 1) {
+			return null;
+		}
+		return metadata;
+	}
+	const beforeRange = metadata.before_range;
+	if (
+		beforeRange.end_line_exclusive < beforeRange.start_line ||
+		metadata.line_delta !== metadata.after_total_lines - metadata.before_total_lines ||
+		beforeRange.end_line_exclusive > metadata.before_total_lines + 1 ||
+		beforeRange.start_line !== afterRange.start_line
+	) {
+		return null;
+	}
+	return metadata;
+}
+
+/**
+ * [函数级]
+ * 目的：把文件 Coverage 绑定到唯一的路径版本和完整文件身份。
+ * 输入/输出：路径、path revision 和完整文件 SHA；canonical coverage key。
+ * 约束：该键不能替代独立的 path revision SHA 冲突表。
+ */
+function fileCoverageKey(path: string, pathRevision: number, fileSha256: string): string {
+	return canonicalContractSha256({ tool: "repo_read", path, path_revision: pathRevision, file_sha256: fileSha256 });
 }
 
 /**
@@ -320,49 +384,106 @@ function toolCoverage(
 	toolName: string,
 	input: unknown,
 	result: unknown,
+	repositoryRevision: number,
+	pathRevision: number | null,
+	read: RepoReadMetadata | null,
 ): {
-	readonly key: string;
+	readonly key: string | null;
 	readonly type: MemoryL2EventPayload["coverage_type"];
-	readonly status: MemoryCoverageStatus;
+	readonly status: MemoryCoverageStatus | null;
 	readonly covered: readonly MemoryLineRange[];
 	readonly missing: readonly MemoryLineRange[] | null;
 	readonly truncated: boolean;
+	readonly totalLines: number | null;
+	readonly fileSha256: string | null;
+	readonly sourceSha256: string | null;
 } {
 	const resultRecord = isRecord(result) ? result : {};
 	const truncated = resultRecord.truncated === true || resultRecord.timed_out === true;
 	const inputRecord = isRecord(input) ? input : {};
+	if (toolName === "repo_read") {
+		const metadata = read;
+		const path = explicitPath(input);
+		if (metadata === null || path === null || pathRevision === null || metadata.path !== path) {
+			throw new Error("Memory repo_read result is missing valid read_metadata");
+		}
+		const stdout = resultText(result, "stdout");
+		const stdoutLineCount = splitFileLines(stdout).length;
+		const returnedRange = metadata.returned_range;
+		const expectedComplete =
+			!truncated &&
+			(metadata.total_lines === 0 ||
+				(returnedRange !== null &&
+					returnedRange.start_line === 1 &&
+					returnedRange.end_line_exclusive === metadata.total_lines + 1));
+		if (metadata.source_sha256 !== rawSha256(stdout)) {
+			throw new Error("Memory repo_read source SHA-256 does not match stdout");
+		}
+		if (
+			(returnedRange === null && stdout.length > 0) ||
+			(returnedRange !== null && stdout.length === 0) ||
+			(metadata.total_lines === 0 && returnedRange !== null) ||
+			(returnedRange !== null && returnedRange.end_line_exclusive - returnedRange.start_line !== stdoutLineCount) ||
+			metadata.complete !== expectedComplete ||
+			(metadata.complete && metadata.file_sha256 !== metadata.source_sha256)
+		) {
+			throw new Error("Memory repo_read range or completion metadata is inconsistent");
+		}
+		const covered: readonly MemoryLineRange[] =
+			returnedRange === null || returnedRange.end_line_exclusive === returnedRange.start_line
+				? []
+				: [{ start_line: returnedRange.start_line, end_line: returnedRange.end_line_exclusive - 1 }];
+		return {
+			key: fileCoverageKey(path, pathRevision, metadata.file_sha256),
+			type: metadata.complete ? "full_file" : "file_range",
+			status: metadata.complete ? "complete" : "partial_known",
+			covered,
+			missing: complementRanges(metadata.total_lines, covered),
+			truncated,
+			totalLines: metadata.total_lines,
+			fileSha256: metadata.file_sha256,
+			sourceSha256: metadata.source_sha256,
+		};
+	}
+	if (toolName !== "repo_search" && toolName !== "repo_list" && toolName !== "repo_diff") {
+		return {
+			key: null,
+			type: null,
+			status: null,
+			covered: [],
+			missing: null,
+			truncated,
+			totalLines: null,
+			fileSha256: null,
+			sourceSha256: null,
+		};
+	}
 	const target =
-		toolName === "repo_read"
-			? { tool: toolName, path: inputRecord.path ?? null, range_type: "file" }
-			: toolName === "repo_search"
-				? {
-						tool: toolName,
-						query: inputRecord.query ?? null,
-						path: inputRecord.path ?? null,
-						range_type: "results",
-					}
-				: { tool: toolName, input };
-	const covered = toolName === "repo_read" ? lineRange(input) : [];
-	const explicitlyPaged =
-		toolName === "repo_read"
-			? inputRecord.start_line !== undefined || inputRecord.line_count !== undefined
-			: toolName === "repo_search";
+		toolName === "repo_search"
+			? {
+					tool: toolName,
+					repository_revision: repositoryRevision,
+					query: inputRecord.query ?? null,
+					path: inputRecord.path ?? null,
+					range_type: "results",
+				}
+			: { tool: toolName, repository_revision: repositoryRevision, input };
+	const explicitlyPaged = toolName === "repo_search";
 	return {
 		key: canonicalContractSha256(target),
 		type:
-			toolName === "repo_read"
-				? explicitlyPaged || truncated
-					? "file_range"
-					: "full_file"
-				: toolName === "repo_search"
-					? "result_page"
-					: toolName === "repo_list" || toolName === "repo_diff"
-						? "full_result_set"
-						: null,
+			toolName === "repo_search"
+				? "result_page"
+				: toolName === "repo_list" || toolName === "repo_diff"
+					? "full_result_set"
+					: null,
 		status: truncated || explicitlyPaged ? "partial_unknown" : "complete",
-		covered,
+		covered: [],
 		missing: null,
 		truncated,
+		totalLines: null,
+		fileSha256: null,
+		sourceSha256: null,
 	};
 }
 
@@ -497,15 +618,34 @@ function fileStructure(path: string, content: string, startLine: number): Memory
 
 /**
  * [函数级]
- * 目的：把一段已取得文件正文切成可按 query 精确召回的稳定 chunks。
- * 输入/输出：文件版本与正文；带路径、行号、来源哈希和 chunk 哈希的有序集合。
+ * 目的：使用与 Controller 一致的 LF 规则切分已取得正文。
+ * 输入/输出：UTF-8 正文；保留每行原始换行字符的有序数组。
+ * 约束：空正文没有行；不把其他 Unicode 分隔符解释为换行。
+ */
+function splitFileLines(content: string): string[] {
+	if (content.length === 0) return [];
+	const lines = content.split(/(?<=\n)/);
+	if (lines.at(-1) === "") lines.pop();
+	return lines;
+}
+
+/**
+ * [函数级]
+ * 目的：把已取得文件正文切成可按 query 精确召回的稳定 chunks。
+ * 输入/输出：文件版本与正文；带路径、行号、来源哈希和契约哈希的有序 chunks。
  * 约束：使用 4 bytes/token 近似实现 4096-token 上限和 256-token 重叠；不创建未知正文。
  */
-function chunkFile(path: string, pathRevision: number, content: string, startLine: number): readonly MemoryFileChunk[] {
+function chunkFile(
+	path: string,
+	pathRevision: number,
+	fileSha256: string,
+	content: string,
+	startLine: number,
+	sourceSha256: string | null,
+): readonly MemoryFileChunk[] {
 	const maxBytes = 4096 * 4;
 	const overlapBytes = 256 * 4;
-	const lines = content.split(/(?<=\n)/);
-	const sourceSha256 = rawSha256(content);
+	const lines = splitFileLines(content);
 	const chunks: MemoryFileChunk[] = [];
 	let cursor = 0;
 	while (cursor < lines.length) {
@@ -520,6 +660,7 @@ function chunkFile(path: string, pathRevision: number, content: string, startLin
 		}
 		if (end === cursor) end += 1;
 		const value = lines.slice(cursor, end).join("");
+		const contentSha256 = rawSha256(value);
 		const chunkStart = startLine + cursor;
 		const chunkEnd = startLine + end - 1;
 		const payload = {
@@ -528,10 +669,12 @@ function chunkFile(path: string, pathRevision: number, content: string, startLin
 			start_line: chunkStart,
 			end_line: chunkEnd,
 			content: value,
+			file_sha256: fileSha256,
 			source_sha256: sourceSha256,
+			content_sha256: contentSha256,
 		};
 		chunks.push({
-			chunk_id: `chunk-${sourceSha256.slice(0, 12)}-${String(chunks.length + 1).padStart(4, "0")}`,
+			chunk_id: `chunk-${fileSha256.slice(0, 12)}-${String(chunkStart)}-${contentSha256.slice(0, 12)}`,
 			...payload,
 			sha256: canonicalContractSha256(payload),
 		});
@@ -570,6 +713,92 @@ function mergeRanges(ranges: readonly MemoryLineRange[]): readonly MemoryLineRan
 }
 
 /**
+ * [函数级]
+ * 目的：机械计算一基文件范围内尚未覆盖的补集。
+ * 输入/输出：文件总行数与已覆盖范围；最小有序缺失范围集合。
+ * 约束：只使用已知范围，空文件没有缺口。
+ */
+function complementRanges(totalLines: number, ranges: readonly MemoryLineRange[]): readonly MemoryLineRange[] {
+	if (totalLines === 0) return [];
+	const covered = mergeRanges(ranges).filter((range) => range.end_line >= 1 && range.start_line <= totalLines);
+	const missing: MemoryLineRange[] = [];
+	let cursor = 1;
+	for (const range of covered) {
+		const start = Math.max(1, range.start_line);
+		const end = Math.min(totalLines, range.end_line);
+		if (start > cursor) missing.push({ start_line: cursor, end_line: start - 1 });
+		cursor = Math.max(cursor, end + 1);
+	}
+	if (cursor <= totalLines) missing.push({ start_line: cursor, end_line: totalLines });
+	return missing;
+}
+
+/**
+ * [函数级]
+ * 目的：从可能重叠的可信 chunks 重建完整缓存文件。
+ * 输入/输出：chunks、总行数与完整文件 SHA；校验成功的正文或 null。
+ * 约束：缺行、重叠内容冲突或完整文件 SHA 不匹配时拒绝重建。
+ */
+function materializeFileChunks(
+	chunks: readonly MemoryFileChunk[],
+	totalLines: number,
+	fileSha256: string,
+): string | null {
+	if (totalLines === 0) return fileSha256 === rawSha256("") ? "" : null;
+	const lines = new Map<number, string>();
+	for (const chunk of [...chunks].sort((left, right) => left.start_line - right.start_line)) {
+		const chunkLines = splitFileLines(chunk.content);
+		if (chunkLines.length !== chunk.end_line - chunk.start_line + 1) return null;
+		for (const [offset, line] of chunkLines.entries()) {
+			const lineNumber = chunk.start_line + offset;
+			const existing = lines.get(lineNumber);
+			if (existing !== undefined && existing !== line) return null;
+			lines.set(lineNumber, line);
+		}
+	}
+	const ordered: string[] = [];
+	for (let line = 1; line <= totalLines; line += 1) {
+		const value = lines.get(line);
+		if (value === undefined) return null;
+		ordered.push(value);
+	}
+	const content = ordered.join("");
+	return rawSha256(content) === fileSha256 ? content : null;
+}
+
+/**
+ * [函数级]
+ * 目的：把确定未变化的 chunk 重新绑定到编辑后的路径版本和行范围。
+ * 输入/输出：旧 chunk、新 path revision、文件 SHA 和行差；重新计算哈希的新 chunk。
+ * 约束：只迁移正文，不复用旧版本身份或契约哈希。
+ */
+function migrateChunk(
+	chunk: MemoryFileChunk,
+	pathRevision: number,
+	fileSha256: string,
+	lineDelta: number,
+): MemoryFileChunk {
+	const startLine = chunk.start_line + lineDelta;
+	const endLine = chunk.end_line + lineDelta;
+	const contentSha256 = rawSha256(chunk.content);
+	const payload = {
+		path: chunk.path,
+		path_revision: pathRevision,
+		start_line: startLine,
+		end_line: endLine,
+		content: chunk.content,
+		file_sha256: fileSha256,
+		source_sha256: chunk.source_sha256,
+		content_sha256: contentSha256,
+	};
+	return {
+		chunk_id: `chunk-${fileSha256.slice(0, 12)}-${String(startLine)}-${contentSha256.slice(0, 12)}`,
+		...payload,
+		sha256: canonicalContractSha256(payload),
+	};
+}
+
+/**
  * [类别级]
  *
  * 定位：一个 RepoFix attempt 的 L1/L2 权威存储与派生索引所有者。
@@ -587,6 +816,7 @@ export class RepoFixMemoryStore {
 	private readonly evidenceEvents = new Map<string, MemoryL2Event[]>();
 	private repositoryRevision = 0;
 	private readonly pathRevisions = new Map<string, number>();
+	private readonly fileShaByPathRevision = new Map<string, string>();
 	private readonly fileViews = new Map<
 		string,
 		{
@@ -692,6 +922,9 @@ export class RepoFixMemoryStore {
 				repository_revision: this.repositoryRevision,
 				path_revision: null,
 				logical_evidence_key: null,
+				file_sha256: null,
+				source_sha256: null,
+				coverage_total_lines: null,
 				event_kind: "message",
 				tool_call_id: null,
 				tool_name: null,
@@ -720,12 +953,23 @@ export class RepoFixMemoryStore {
 	 */
 	async appendToolEvidence(input: MemoryToolEvidenceInput): Promise<MemoryL2Event> {
 		const path = explicitPath(input.normalized_input);
-		if (successfulRepoEdit(input.tool_name, input.controller_result)) {
+		const previousPathRevision = path === null ? null : (this.pathRevisions.get(path) ?? 0);
+		const successfulEdit = successfulRepoEdit(input.tool_name, input.controller_result);
+		if (successfulEdit) {
 			this.repositoryRevision += 1;
-			if (path !== null) this.pathRevisions.set(path, (this.pathRevisions.get(path) ?? 0) + 1);
+			if (path !== null) this.pathRevisions.set(path, (previousPathRevision ?? 0) + 1);
 		}
 		const pathRevision = path === null ? null : (this.pathRevisions.get(path) ?? 0);
-		const coverage = toolCoverage(input.tool_name, input.normalized_input, input.controller_result);
+		const read = input.tool_name === "repo_read" ? readMetadata(input.controller_result) : null;
+		const coverage = toolCoverage(
+			input.tool_name,
+			input.normalized_input,
+			input.controller_result,
+			this.repositoryRevision,
+			pathRevision,
+			read,
+		);
+		const edit = successfulEdit ? editMetadata(input.controller_result) : null;
 		const evidenceKey = logicalEvidenceKey(
 			input.tool_name,
 			input.normalized_input,
@@ -733,29 +977,51 @@ export class RepoFixMemoryStore {
 			this.repositoryRevision,
 			pathRevision,
 		);
+		const normalizedInput = jsonSerializable(input.normalized_input);
+		const controllerResultJson = JSON.stringify(input.controller_result) ?? "null";
+		const controllerResult: unknown = JSON.parse(controllerResultJson);
 		const event = await this.appendEvent({
 			repository_revision: this.repositoryRevision,
 			path_revision: pathRevision,
 			logical_evidence_key: evidenceKey,
+			file_sha256: coverage.fileSha256 ?? edit?.after_file_sha256 ?? null,
+			source_sha256: coverage.sourceSha256,
+			coverage_total_lines: coverage.totalLines,
 			event_kind: "tool_evidence",
 			tool_call_id: input.tool_call_id,
 			tool_name: input.tool_name,
-			normalized_input: jsonSerializable(input.normalized_input),
+			normalized_input: normalizedInput,
 			message: null,
-			controller_result: jsonSerializable(input.controller_result),
+			controller_result: controllerResult,
 			coverage_key: coverage.key,
 			coverage_type: coverage.type,
 			coverage_status: coverage.status,
 			covered_ranges: coverage.covered,
 			missing_ranges: coverage.missing,
 			controller_truncated: coverage.truncated,
-			controller_result_bytes: Buffer.byteLength(JSON.stringify(jsonSerializable(input.controller_result)), "utf8"),
+			controller_result_bytes: Buffer.byteLength(controllerResultJson, "utf8"),
 		});
 		this.toolEventsByCallId.set(input.tool_call_id, event);
 		const equivalent = this.evidenceEvents.get(evidenceKey) ?? [];
 		equivalent.push(event);
 		this.evidenceEvents.set(evidenceKey, equivalent);
-		await this.maybeAppendFileView(event);
+		if (path !== null && coverage.fileSha256 !== null && pathRevision !== null) {
+			this.assertFileRevisionSha(path, pathRevision, coverage.fileSha256);
+		}
+		if (path !== null && edit !== null && previousPathRevision !== null && pathRevision !== null) {
+			if (edit.path !== path) throw new Error("Memory repo_edit metadata path does not match tool input");
+			if (edit.edit_kind === "replace") {
+				this.assertFileRevisionSha(path, previousPathRevision, edit.before_file_sha256);
+			}
+			this.assertFileRevisionSha(path, pathRevision, edit.after_file_sha256);
+		}
+		if (read !== null) await this.appendReadFileView(event, read);
+		if (successfulEdit) {
+			if (path === null || previousPathRevision === null || pathRevision === null || edit === null) {
+				throw new Error("Memory repo_edit result is missing valid edit_metadata");
+			}
+			await this.migrateFileViewsAfterEdit(event, path, previousPathRevision, pathRevision, edit);
+		}
 		return event;
 	}
 
@@ -968,32 +1234,72 @@ export class RepoFixMemoryStore {
 	 * 约束：不修改源事件；complete 优先，否则区分已知缺口和未知缺口。
 	 */
 	listCoverage(): readonly MemoryCoverageView[] {
-		const groups = new Map<string, MemoryL2Event[]>();
+		const eventGroups = new Map<string, MemoryL2Event[]>();
 		for (const event of this.l2Events.values()) {
-			if (event.coverage_key === null || event.coverage_status === null) continue;
-			const group = groups.get(event.coverage_key) ?? [];
+			if (event.tool_name === "repo_read" || event.coverage_key === null || event.coverage_status === null) continue;
+			const group = eventGroups.get(event.coverage_key) ?? [];
 			group.push(event);
-			groups.set(event.coverage_key, group);
+			eventGroups.set(event.coverage_key, group);
 		}
-		return [...groups.entries()]
-			.sort(([left], [right]) => left.localeCompare(right))
-			.map(([coverageKey, events]) => {
-				const ordered = events.sort(
-					(left, right) =>
-						left.stage_sequence - right.stage_sequence || left.event_sequence - right.event_sequence,
-				);
-				const completeEvent = ordered.find((event) => event.coverage_status === "complete");
-				const complete = completeEvent !== undefined;
-				const knownMissing = ordered.flatMap((event) => event.missing_ranges ?? []);
-				return {
-					coverage_key: coverageKey,
-					coverage_type: completeEvent?.coverage_type ?? ordered.at(-1)?.coverage_type ?? null,
-					coverage_status: complete ? "complete" : knownMissing.length > 0 ? "partial_known" : "partial_unknown",
-					covered_ranges: mergeRanges(ordered.flatMap((event) => event.covered_ranges)),
-					missing_ranges: complete ? [] : knownMissing.length > 0 ? mergeRanges(knownMissing) : null,
-					source_event_ids: ordered.map((event) => event.event_id),
-				};
+		const coverage: MemoryCoverageView[] = [...eventGroups.entries()].map(([coverageKey, events]) => {
+			const ordered = events.sort(
+				(left, right) => left.stage_sequence - right.stage_sequence || left.event_sequence - right.event_sequence,
+			);
+			const completeEvent = ordered.find((event) => event.coverage_status === "complete");
+			const complete = completeEvent !== undefined;
+			const knownMissing = ordered.flatMap((event) => event.missing_ranges ?? []);
+			return {
+				coverage_key: coverageKey,
+				path: null,
+				repository_revision: ordered.at(-1)?.repository_revision ?? null,
+				path_revision: null,
+				file_sha256: null,
+				coverage_type: completeEvent?.coverage_type ?? ordered.at(-1)?.coverage_type ?? null,
+				coverage_status: complete ? "complete" : knownMissing.length > 0 ? "partial_known" : "partial_unknown",
+				covered_ranges: mergeRanges(ordered.flatMap((event) => event.covered_ranges)),
+				missing_ranges: complete ? [] : knownMissing.length > 0 ? mergeRanges(knownMissing) : null,
+				source_event_ids: ordered.map((event) => event.event_id),
+			};
+		});
+
+		const fileGroups = new Map<string, MemoryFileViewRecord[]>();
+		for (const record of this.listFileViews()) {
+			const group = fileGroups.get(record.view.coverage_key) ?? [];
+			group.push(record);
+			fileGroups.set(record.view.coverage_key, group);
+		}
+		for (const [coverageKey, records] of fileGroups) {
+			const first = records[0]?.view;
+			if (first === undefined) continue;
+			for (const { view } of records) {
+				if (
+					view.path !== first.path ||
+					view.path_revision !== first.path_revision ||
+					view.file_sha256 !== first.file_sha256 ||
+					view.total_lines !== first.total_lines
+				) {
+					throw new Error("repofixlab_memory_infrastructure_failure: file_coverage_identity_conflict");
+				}
+			}
+			const coveredRanges = mergeRanges(records.flatMap(({ view }) => view.covered_ranges));
+			const missingRanges = complementRanges(first.total_lines, coveredRanges);
+			const hasKnownRecord = records.some(({ view }) => view.coverage_status !== "partial_unknown");
+			const complete = missingRanges.length === 0 && hasKnownRecord;
+			const hasUnknown = records.some(({ view }) => view.coverage_status === "partial_unknown");
+			coverage.push({
+				coverage_key: coverageKey,
+				path: first.path,
+				repository_revision: Math.max(...records.map(({ view }) => view.repository_revision)),
+				path_revision: first.path_revision,
+				file_sha256: first.file_sha256,
+				coverage_type: complete ? "full_file" : "file_range",
+				coverage_status: complete ? "complete" : hasUnknown ? "partial_unknown" : "partial_known",
+				covered_ranges: coveredRanges,
+				missing_ranges: complete ? [] : hasUnknown ? null : missingRanges,
+				source_event_ids: [...new Set(records.flatMap((record) => record.source_event_ids))].sort(),
 			});
+		}
+		return coverage.sort((left, right) => left.coverage_key.localeCompare(right.coverage_key));
 	}
 
 	/**
@@ -1070,6 +1376,22 @@ export class RepoFixMemoryStore {
 
 	/**
 	 * [函数级]
+	 * 目的：维护独立于 coverage key 的 path revision → full-file SHA 唯一映射。
+	 * 输入/输出：规范化路径、path revision 与完整文件哈希；成功无返回。
+	 * 约束：同一 path revision 观察到不同完整文件 SHA 时立即报告基础设施错误。
+	 */
+	private assertFileRevisionSha(path: string, pathRevision: number, fileSha256: string): void {
+		const normalizedPath = path.replaceAll("\\", "/");
+		const key = `${normalizedPath}\u0000${String(pathRevision)}`;
+		const existing = this.fileShaByPathRevision.get(key);
+		if (existing !== undefined && existing !== fileSha256) {
+			throw new Error("repofixlab_memory_infrastructure_failure: file_revision_sha_conflict");
+		}
+		if (existing === undefined) this.fileShaByPathRevision.set(key, fileSha256);
+	}
+
+	/**
+	 * [函数级]
 	 * 目的：为一条消息或工具事实分配稳定顺序、绑定哈希并追加成 L2 事件。
 	 * 输入/输出：除公共身份字段外的事件载荷；返回已落盘 L2 事件。
 	 * 约束：`event_id=attempt:stage:sequence`，artifact 路径按阶段/事件补零；写入后才更新缓存与 L1 引用。
@@ -1115,41 +1437,322 @@ export class RepoFixMemoryStore {
 	 * [函数级]
 	 * 目的：在 repo_read 已取得正文后派生结构目录与 chunks，并记录完整来源关系。
 	 * 输入/输出：一条 L2 工具事件；需要时追加 file-view artifact，否则无操作。
-	 * 约束：只处理非空 repo_read stdout；相同视图复用正文并累积来源，不制造未读取区间。
+	 * 约束：包括空文件和超出文件末尾的空返回；只记录 metadata 声明的实际范围，不制造未读取正文。
 	 */
-	private async maybeAppendFileView(event: MemoryL2Event): Promise<void> {
-		if (event.tool_name !== "repo_read" || !isRecord(event.normalized_input) || !isRecord(event.controller_result))
-			return;
+	private async appendReadFileView(event: MemoryL2Event, metadata: RepoReadMetadata): Promise<void> {
+		if (!isRecord(event.normalized_input) || !isRecord(event.controller_result))
+			throw new Error("repofixlab_memory_infrastructure_failure: invalid_repo_read_file_view");
 		const path = event.normalized_input.path;
 		const content = event.controller_result.stdout;
+		if (typeof path !== "string" || typeof content !== "string" || event.coverage_key === null)
+			throw new Error("repofixlab_memory_infrastructure_failure: invalid_repo_read_file_view");
 		if (
-			typeof path !== "string" ||
-			typeof content !== "string" ||
-			event.coverage_key === null ||
-			content.length === 0
-		)
-			return;
-		const startLine = typeof event.normalized_input.start_line === "number" ? event.normalized_input.start_line : 1;
+			event.path_revision === null ||
+			event.file_sha256 !== metadata.file_sha256 ||
+			event.source_sha256 !== metadata.source_sha256 ||
+			event.coverage_total_lines !== metadata.total_lines
+		) {
+			throw new Error("repofixlab_memory_infrastructure_failure: repo_read_event_metadata_drift");
+		}
+		const startLine = metadata.returned_range?.start_line ?? 1;
 		const payload: MemoryFileViewPayload = {
 			schema_version: "v1",
 			memory_type: "file_view",
 			path,
 			repository_revision: event.repository_revision,
-			path_revision: event.path_revision ?? 0,
+			path_revision: event.path_revision,
 			logical_evidence_key:
-				event.logical_evidence_key ?? canonicalContractSha256({ path, source_sha256: rawSha256(content) }),
-			source_sha256: rawSha256(content),
+				event.logical_evidence_key ?? canonicalContractSha256({ path, source_sha256: metadata.source_sha256 }),
+			file_sha256: metadata.file_sha256,
+			source_sha256: metadata.source_sha256,
 			coverage_key: event.coverage_key,
 			coverage_status: event.coverage_status ?? "partial_unknown",
+			total_lines: metadata.total_lines,
+			covered_ranges: event.covered_ranges,
+			missing_ranges: event.missing_ranges,
+			provenance_event_ids: [event.event_id],
 			structure: fileStructure(path, content, startLine),
-			chunks: chunkFile(path, event.path_revision ?? 0, content, startLine),
+			chunks: chunkFile(path, event.path_revision, metadata.file_sha256, content, startLine, metadata.source_sha256),
 		};
+		await this.persistFileView(
+			payload,
+			event,
+			[event.event_id],
+			event.tool_call_id === null ? [] : [event.tool_call_id],
+		);
+	}
+
+	/**
+	 * [函数级]
+	 * 目的：成功编辑后从旧 revision 的可信文件视图机械派生新 revision 视图。
+	 * 输入/输出：编辑事件、路径、前后 path revision 及严格 edit metadata；追加完整、部分已知或部分未知视图。
+	 * 约束：完整缓存优先本地精确替换；部分缓存只迁移固定一行保护带之外的 chunks；任何失败都不回退 revision。
+	 */
+	private async migrateFileViewsAfterEdit(
+		event: MemoryL2Event,
+		path: string,
+		previousPathRevision: number,
+		pathRevision: number,
+		metadata: RepoEditMetadata,
+	): Promise<void> {
+		const oldRecords = [...this.fileViews.values()].filter(
+			(record) => record.view.path === path && record.view.path_revision === previousPathRevision,
+		);
+		const eventToolCallIds = event.tool_call_id === null ? [] : [event.tool_call_id];
+		if (metadata.edit_kind === "create") {
+			const content = isRecord(event.normalized_input) ? event.normalized_input.content : null;
+			if (
+				typeof content !== "string" ||
+				rawSha256(content) !== metadata.after_file_sha256 ||
+				splitFileLines(content).length !== metadata.after_total_lines
+			) {
+				await this.persistUnknownEditView(event, path, pathRevision, metadata, [event.event_id], eventToolCallIds);
+				return;
+			}
+			await this.persistCompleteEditView(
+				event,
+				path,
+				pathRevision,
+				metadata,
+				content,
+				[event.event_id],
+				eventToolCallIds,
+			);
+			return;
+		}
+
+		const normalizedInput = isRecord(event.normalized_input) ? event.normalized_input : {};
+		const oldText = normalizedInput.old_text;
+		const newText = normalizedInput.new_text;
+		let migrationUnknown = typeof oldText !== "string" || typeof newText !== "string";
+		const compatibleRecords = oldRecords.filter(
+			(record) =>
+				record.view.file_sha256 === metadata.before_file_sha256 &&
+				record.view.total_lines === metadata.before_total_lines,
+		);
+		const original = materializeFileChunks(
+			compatibleRecords.flatMap((record) => record.view.chunks),
+			metadata.before_total_lines,
+			metadata.before_file_sha256,
+		);
+		if (original !== null && typeof oldText === "string" && typeof newText === "string") {
+			if (original.split(oldText).length !== 2) {
+				migrationUnknown = true;
+			} else {
+				const updated = original.replace(oldText, newText);
+				if (
+					rawSha256(updated) !== metadata.after_file_sha256 ||
+					splitFileLines(updated).length !== metadata.after_total_lines
+				) {
+					migrationUnknown = true;
+				} else {
+					const provenance = [
+						...new Set([...compatibleRecords.flatMap((record) => [...record.source_event_ids]), event.event_id]),
+					].sort();
+					const toolCallIds = [
+						...new Set([
+							...compatibleRecords.flatMap((record) => [...record.tool_call_ids]),
+							...eventToolCallIds,
+						]),
+					].sort();
+					await this.persistCompleteEditView(
+						event,
+						path,
+						pathRevision,
+						metadata,
+						updated,
+						provenance,
+						toolCallIds,
+					);
+					return;
+				}
+			}
+		} else if (
+			compatibleRecords.some((record) => record.view.coverage_status === "complete") ||
+			complementRanges(
+				metadata.before_total_lines,
+				mergeRanges(compatibleRecords.flatMap((record) => record.view.covered_ranges)),
+			).length === 0
+		) {
+			migrationUnknown = true;
+		}
+
+		const migratedByIdentity = new Map<string, MemoryFileChunk>();
+		const provenance = new Set<string>([event.event_id]);
+		const toolCallIds = new Set(eventToolCallIds);
+		const invalidStartLine = Math.max(1, metadata.before_range.start_line - 1);
+		const invalidEndLineExclusive = Math.min(
+			metadata.before_total_lines + 1,
+			metadata.before_range.end_line_exclusive + 1,
+		);
+		for (const record of oldRecords) {
+			if (
+				record.view.file_sha256 !== metadata.before_file_sha256 ||
+				record.view.total_lines !== metadata.before_total_lines
+			) {
+				migrationUnknown = true;
+				continue;
+			}
+			for (const sourceEventId of record.source_event_ids) provenance.add(sourceEventId);
+			for (const toolCallId of record.tool_call_ids) toolCallIds.add(toolCallId);
+			for (const chunk of record.view.chunks) {
+				if (
+					chunk.path !== path ||
+					chunk.path_revision !== previousPathRevision ||
+					chunk.file_sha256 !== metadata.before_file_sha256 ||
+					rawSha256(chunk.content) !== chunk.content_sha256 ||
+					splitFileLines(chunk.content).length !== chunk.end_line - chunk.start_line + 1
+				) {
+					migrationUnknown = true;
+					continue;
+				}
+				if (chunk.end_line >= invalidStartLine && chunk.start_line < invalidEndLineExclusive) continue;
+				const shift = chunk.start_line >= invalidEndLineExclusive ? metadata.line_delta : 0;
+				const migrated = migrateChunk(chunk, pathRevision, metadata.after_file_sha256, shift);
+				if (migrated.start_line < 1 || migrated.end_line > metadata.after_total_lines) {
+					migrationUnknown = true;
+					continue;
+				}
+				migratedByIdentity.set(
+					`${String(migrated.start_line)}:${String(migrated.end_line)}:${migrated.content_sha256}`,
+					migrated,
+				);
+			}
+		}
+		const chunks = [...migratedByIdentity.values()].sort(
+			(left, right) => left.start_line - right.start_line || left.end_line - right.end_line,
+		);
+		const coveredRanges = mergeRanges(
+			chunks.map((chunk) => ({ start_line: chunk.start_line, end_line: chunk.end_line })),
+		);
+		const payload: MemoryFileViewPayload = {
+			schema_version: "v1",
+			memory_type: "file_view",
+			path,
+			repository_revision: event.repository_revision,
+			path_revision: pathRevision,
+			logical_evidence_key: canonicalContractSha256({
+				kind: "partial_edit_migration",
+				path,
+				path_revision: pathRevision,
+				file_sha256: metadata.after_file_sha256,
+				covered_ranges: coveredRanges,
+			}),
+			file_sha256: metadata.after_file_sha256,
+			source_sha256: null,
+			coverage_key: fileCoverageKey(path, pathRevision, metadata.after_file_sha256),
+			coverage_status: migrationUnknown ? "partial_unknown" : "partial_known",
+			total_lines: metadata.after_total_lines,
+			covered_ranges: coveredRanges,
+			missing_ranges: migrationUnknown ? null : complementRanges(metadata.after_total_lines, coveredRanges),
+			provenance_event_ids: [...provenance].sort(),
+			structure: [],
+			chunks,
+		};
+		await this.persistFileView(payload, event, payload.provenance_event_ids, [...toolCallIds].sort());
+	}
+
+	/**
+	 * [函数级]
+	 * 目的：保存由确定性编辑输入重建的完整新版本文件视图。
+	 * 输入/输出：编辑事件、版本、元数据、完整正文和来源；追加 complete file view。
+	 * 约束：调用前必须完成正文行数与完整文件 SHA 校验。
+	 */
+	private async persistCompleteEditView(
+		event: MemoryL2Event,
+		path: string,
+		pathRevision: number,
+		metadata: RepoEditMetadata,
+		content: string,
+		provenanceEventIds: readonly string[],
+		toolCallIds: readonly string[],
+	): Promise<void> {
+		const coveredRanges: readonly MemoryLineRange[] =
+			metadata.after_total_lines === 0 ? [] : [{ start_line: 1, end_line: metadata.after_total_lines }];
+		const payload: MemoryFileViewPayload = {
+			schema_version: "v1",
+			memory_type: "file_view",
+			path,
+			repository_revision: event.repository_revision,
+			path_revision: pathRevision,
+			logical_evidence_key: canonicalContractSha256({
+				kind: "complete_edit_rebuild",
+				path,
+				path_revision: pathRevision,
+				file_sha256: metadata.after_file_sha256,
+			}),
+			file_sha256: metadata.after_file_sha256,
+			source_sha256: null,
+			coverage_key: fileCoverageKey(path, pathRevision, metadata.after_file_sha256),
+			coverage_status: "complete",
+			total_lines: metadata.after_total_lines,
+			covered_ranges: coveredRanges,
+			missing_ranges: [],
+			provenance_event_ids: provenanceEventIds,
+			structure: fileStructure(path, content, 1),
+			chunks: chunkFile(path, pathRevision, metadata.after_file_sha256, content, 1, null),
+		};
+		await this.persistFileView(payload, event, provenanceEventIds, toolCallIds);
+	}
+
+	/**
+	 * [函数级]
+	 * 目的：在编辑后内容无法验证时保存新版本的未知覆盖标记。
+	 * 输入/输出：编辑事件、版本、元数据和来源；追加 partial_unknown file view。
+	 * 约束：保持已推进的 revision，不复用或恢复旧版本 Coverage。
+	 */
+	private async persistUnknownEditView(
+		event: MemoryL2Event,
+		path: string,
+		pathRevision: number,
+		metadata: RepoEditMetadata,
+		provenanceEventIds: readonly string[],
+		toolCallIds: readonly string[],
+	): Promise<void> {
+		const payload: MemoryFileViewPayload = {
+			schema_version: "v1",
+			memory_type: "file_view",
+			path,
+			repository_revision: event.repository_revision,
+			path_revision: pathRevision,
+			logical_evidence_key: canonicalContractSha256({
+				kind: "unknown_edit_migration",
+				path,
+				path_revision: pathRevision,
+				file_sha256: metadata.after_file_sha256,
+			}),
+			file_sha256: metadata.after_file_sha256,
+			source_sha256: null,
+			coverage_key: fileCoverageKey(path, pathRevision, metadata.after_file_sha256),
+			coverage_status: "partial_unknown",
+			total_lines: metadata.after_total_lines,
+			covered_ranges: [],
+			missing_ranges: null,
+			provenance_event_ids: provenanceEventIds,
+			structure: [],
+			chunks: [],
+		};
+		await this.persistFileView(payload, event, provenanceEventIds, toolCallIds);
+	}
+
+	/**
+	 * [函数级]
+	 * 目的：追加不可变 file-view artifact，并维护全部等价来源关系。
+	 * 输入/输出：视图载荷、来源事件和工具调用 ID；写入或复用已有 artifact。
+	 * 约束：相同 artifact 正文只落盘一次，但所有来源引用都必须保留。
+	 */
+	private async persistFileView(
+		payload: MemoryFileViewPayload,
+		event: MemoryL2Event,
+		sourceEventIds: readonly string[],
+		toolCallIds: readonly string[],
+	): Promise<void> {
 		const view = bindMemorySha256(payload);
 		const artifactId = `memory/l2/files/${view.sha256}.json`;
 		const existing = this.fileViews.get(artifactId);
 		if (existing !== undefined) {
-			if (event.tool_call_id !== null) existing.tool_call_ids.add(event.tool_call_id);
-			existing.source_event_ids.add(event.event_id);
+			for (const toolCallId of toolCallIds) existing.tool_call_ids.add(toolCallId);
+			for (const sourceEventId of sourceEventIds) existing.source_event_ids.add(sourceEventId);
 			this.assertActive().evidence_refs.push(existing.ref);
 			return;
 		}
@@ -1157,10 +1760,10 @@ export class RepoFixMemoryStore {
 		this.fileViews.set(artifactId, {
 			view,
 			ref,
-			source_event_ids: new Set([event.event_id]),
+			source_event_ids: new Set(sourceEventIds),
 			stage_sequence: event.stage_sequence,
 			event_sequence: event.event_sequence,
-			tool_call_ids: new Set(event.tool_call_id === null ? [] : [event.tool_call_id]),
+			tool_call_ids: new Set(toolCallIds),
 		});
 		this.assertActive().evidence_refs.push(ref);
 	}

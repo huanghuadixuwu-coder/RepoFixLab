@@ -74,6 +74,12 @@ export interface MemoryL2EventPayload {
 	readonly path_revision: number | null;
 	/** 字段约束：仅用于 L0 合并当前版本等价证据，不改变 L2 原始事件身份。 */
 	readonly logical_evidence_key: string | null;
+	/** 字段约束：存在结构化文件元数据时，绑定该 path revision 的完整文件正文。 */
+	readonly file_sha256: string | null;
+	/** 字段约束：仅 repo_read 使用，绑定经过 Controller 完整行限制后实际返回的 stdout。 */
+	readonly source_sha256: string | null;
+	/** 字段约束：仅文件 Coverage 使用；空文件为 0，其他工具为 null。 */
+	readonly coverage_total_lines: number | null;
 	readonly event_kind: "message" | "tool_evidence";
 	readonly tool_call_id: string | null;
 	readonly tool_name: string | null;
