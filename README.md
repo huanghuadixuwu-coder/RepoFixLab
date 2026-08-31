@@ -1,141 +1,132 @@
-# RepoFixLab
+# RepoFix PLAN Post-Training
 
-基于真实 GitHub Issue 的容器化代码修复智能体与可信评测平台。
+RepoFix 的实际修复效果受 PLAN 阶段输出质量限制。本项目面向 RepoFix 的 PLAN 阶段，通过 SFT 与 DPO，强化模型拆解任务、构造禁止发生的反例及识别非法状态转移的能力。
 
-RepoFixLab 建立在 [Pi](https://github.com/earendil-works/pi) 的公开 session API 之上：Pi 提供通用 Agent 运行时，RepoFixLab 负责将真实代码修复任务组织为受控工作流，并将修复结果交给独立、全新的官方评测环境裁决。项目关注的不是“能否生成一段看起来合理的补丁”，而是能否在冻结的任务、环境、模型和预算条件下，留下可复核的修复、回归、安全和资源证据。
-
-当前实现覆盖冻结任务准备、Docker 隔离执行、RepoFix 阶段化工作流、官方 Evaluator、实验账本和离线分析。任务接入目前是受控的实验清单/命令行入口；尚未提供把任意 GitHub URL 直接提交给平台执行的公网触发层。
-
-## 架构
-
-```mermaid
-flowchart LR
-    issue["真实 GitHub Issue\nSWE-bench 任务"] --> locks["冻结输入\nDataset / Environment / Model / Harness Locks"]
-    locks --> orchestrator["Node Orchestrator\n实验计划、账本与制品发布"]
-    pi["Pi Session API"] --> fsm["RepoFix FSM\nUNDERSTAND → LOCALIZE → PLAN → PATCH → VERIFY → REFINE → REVIEW"]
-    fsm --> orchestrator
-    orchestrator --> controller["受信 Python Controller\n唯一 Docker socket 持有者"]
-    controller --> worker["Worker\n无特权、隔离的修复工作树"]
-    worker --> snapshot["候选补丁快照"]
-    snapshot --> evaluator["Fresh Evaluator\n固定官方 Harness"]
-    locks --> evaluator
-    evaluator --> artifacts["不可变制品\nResult / Evaluation / Ledger / Report"]
-    controller --> artifacts
-```
-
-职责边界如下：
-
-- **Orchestrator**：固定运行身份、预算、实验矩阵和证据发布，不直接给予 Agent Docker 权限。
-- **RepoFix Agent**：以 Pi session 为运行底座，按阶段产出定位、计划、补丁、自审和修订决策。
-- **Controller**：唯一可访问 Docker daemon 的受信控制面；调用方不能自定义镜像、命令、挂载、网络或 capability。
-- **Worker**：仅用于仓库探索和候选补丁，使用受限文件系统、网络和资源配额。
-- **Evaluator**：在 Worker 销毁后重新创建；只接收最终补丁快照，以固定官方 Harness 执行 F2P/P2P。
-
-## 工作流
+模型读取 Issue、UNDERSTAND/LOCALIZE 阶段产物与仓库证据，生成结构化 PLAN：
 
 ```text
-冻结任务清单
-  → 预检并绑定 DatasetLock / TaskEnvironmentLock / 模型与预算
-  → Pi Session 启动 RepoFix FSM
-  → UNDERSTAND / LOCALIZE / PLAN
-  → PATCH_P0 → Controller-owned controlled verification (V0)
-  → REFINE_1 → PATCH_V1 → verification (V1)
-  → REFINE_2 → PATCH_V2 → verification (V2)
-  → SELF_REVIEW → PATCH_P1
-  → 销毁 Worker，创建新的官方 Evaluator
-  → F2P、P2P、Token、耗时、安全事件写入不可变报告
+Issue 目标
+→ 验收义务
+→ 不可接受反例
+→ 可观察状态
+→ 禁止状态转移
 ```
 
-受控验证不是让模型执行任意 shell 命令：Controller 从冻结 `package.json` 预检得到候选测试目录，模型只选择候选 ID。私有 F2P/P2P 定义、官方日志和 Harness 不暴露给 Agent；通用回归通过也不能替代官方验收。
+## 核心结果
 
-## 输入与输出示例
+Qwen3-4B 在同一份 50 条冻结测试集、同一套解码配置和判分规则下完成 Base、SFT、DPO 对比：
 
-下面是一次正式任务的简化输入。真实运行还会绑定哈希、镜像、Harness 和预算账本；这些字段由实验计划生成，而不是由外部调用者自由传入。
+| 模型阶段 | protocol | task correctness | effective pass |
+| --- | ---: | ---: | ---: |
+| Base | 6%（3/50） | 2.75%（11/400） | 0%（0/50） |
+| SFT | 74%（37/50） | 40.75%（163/400） | 14%（7/50） |
+| SFT → DPO（β=0.1） | **86%（43/50）** | **51.50%（206/400）** | **32%（16/50）** |
 
-```json
-{
-  "instance_id": "preactjs__preact-3454",
-  "source": "SWE-bench Multilingual / GitHub Issue",
-  "base_commit": "<frozen commit>",
-  "configuration": "repofix-full",
-  "max_model_turns": 128,
-  "task_environment_lock": "<sha256-bound lock>"
-}
+`qwen3-4b-dpo-b01` 在 8 个对照对象中取得最高 `effective_pass`。相较 4B SFT，DPO 将 `protocol`、`task correctness`、`effective pass` 分别提升 **12、10.75、18 个百分点**。
+
+## 项目亮点
+
+- 完成 Qwen3-1.7B、Qwen3-4B 的 2 个 SFT run 与 4 个 DPO run，并统一评估 8 个 Base/SFT/DPO 对象。
+- 从 2,228 条候选 Issue 中构建 410 条标准 PLAN 与 300 对 DPO 偏好数据，覆盖 C、Go、Java、JavaScript、TypeScript。
+- 训练、验证、测试按仓库隔离，五种语言等量切分，任务清单由固定 SHA-256 规则确定性生成。
+- Gold patch 与测试结果只供标签教师确认答案，不进入学生输入，实现标签侧证据隔离。
+- 标准 PLAN 经 Schema 校验、独立语义审查与固定重生成门禁，DPO rejected PLAN 每条只包含一种目标缺陷。
+- 50 条冻结测试任务均配备 8 项原子判分清单；两个独立 Judge 分别判分，分歧项由第三次隔离调用仲裁。
+- 胜出模型完成 Adapter 合并、`Q4_K_M` GGUF 量化，并通过 5 条本机 llama.cpp PLAN Schema 冒烟验证。
+
+## 训练目标
+
+项目在 RepoFix 既有 PLAN 合同上强化两项语义能力：
+
+### 验收反例
+
+每个 Issue 核心目标形成独立 `acceptance_obligation`：
+
+```text
+target_behavior
+→ counterexample
+→ probe
+→ expected_result
 ```
 
-一次完成的输出不是只有 `patch.diff`，而是一组可追溯制品：
+`counterexample` 描述修复后禁止继续出现的错误行为，与用于保护正常路径的 `preservation_invariant` 分离。
 
-```json
-{
-  "run_id": "run-...",
-  "terminal_status": "completed",
-  "resolved": true,
-  "candidate_patch": "patch snapshot sha256",
-  "official_evaluation": {
-    "fail_to_pass": "passed/total",
-    "pass_to_pass": "passed/total"
-  },
-  "usage": {
-    "accounted_tokens": 0,
-    "model_turns": 0,
-    "wall_time_ms": 0
-  },
-  "evidence": ["trajectory", "verification records", "evaluator result", "token ledger"]
-}
+### 状态转移约束
+
+`state_transition_checks` 将关键运行过程拆成可观察状态，并明确错误路径：
+
+```text
+states: 关键运行节点及其可观察条件
+forbidden_transitions: 起点、终点、禁止原因
 ```
 
-其中 `resolved` 仅在全部 F2P 通过且没有 P2P 回归时成立。数值 `0` 仅表示示意；正式结果使用实际 Provider 账本和官方 Evaluator 制品。
+## 数据集
 
-## 已完成实验与报告
+数据源固定为 `PrimeIntellect/Multi-SWE-RL-Verified` revision `80de95c62ac792c99dcfa8e26569bcd7d036bdc3`。
 
-完整结果与口径见 [实验结果摘要](docs/reports/repofixlab-experiment-summary.md)。核心结论分为两类，不能混为单一的同质对照：
+| 数据产物 | 训练 | 验证 | 冻结测试 | 合计 |
+| --- | ---: | ---: | ---: | ---: |
+| 标准 PLAN / SFT | 315 | 45 | 50 | 410 |
+| DPO pair | 270 | 30 | 0 | 300 |
 
-| 视图 | 任务成功率 | F2P | P2P | 说明 |
-| --- | ---: | ---: | ---: | --- |
-| Pi-general，M9 26 任务首次结果 | 21/26（80.77%） | 29/32（90.63%） | 587/592（99.16%） | 每个冻结任务仅选择一条 Pi 官方结果；64-turn 结果保留原轮次标签。 |
-| RepoFix，R2 最新替换视图 | 24/26（92.31%） | 30/32（93.75%） | 592/592（100%） | R3、恢复批次、R9/R12 和携带制品组成的 provenance-labelled composite，不是重新执行的单一同质批次。 |
+每种语言包含 63 条 SFT 训练、9 条 SFT 验证和 10 条冻结测试任务；DPO 每种语言包含 54 对训练与 6 对验证数据。每个 Issue 只生成一条标准 PLAN。
 
-因此，R2 的 24/26 说明阶段化工作流经定向修复后的当前官方结果；它不能被表述为对 Pi 21/26 的一次固定预算、同批次显著性胜出。冻结 M7/M8 的 74 条逻辑运行仍按 64/128 turns 分层分析，且保留失败与无最终快照样本。
+## 实验流程
 
-- [M7 continuation 协议](docs/designs/repofixlab-m7-protocol-1.7.md)
-- [M8 离线分析契约](docs/designs/repofixlab-m8-analysis.md)
-- [M9 26 任务复用与完成协议](docs/designs/repofixlab-m9-reuse-protocol.md)
-- [R2 阶段化修复复盘](docs/designs/repofixlab-r2-remediation-postmortem.md)
-- [R2 执行契约](docs/designs/repofixlab-r2-execution-contract.md)
-
-## 本地运行
-
-前提：Docker Desktop 使用 Linux containers，已准备冻结数据/环境制品，并按实验计划配置模型凭据。不要将凭据写入制品或传给 Controller、Worker、Evaluator。
-
-```powershell
-npm ci --ignore-scripts
-npm run check
-
-# 构建并执行受控的锁定输入流程
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repofixlab.ps1 images lock-input
-
-# 启动受信 Controller 并运行 Bootstrap Doctor
-docker compose up -d --force-recreate --no-build controller
-docker compose run --rm --no-deps --pull never orchestrator doctor --profile bootstrap --output m0/bootstrap-doctor-<unique-id>.json
+```text
+STAGE00 冻结实验配置
+→ STAGE01 构建并审查数据
+→ STAGE02 渲染数据与计算上下文
+→ STAGE03 A100 40GB 最长样本预检
+→ STAGE04 SFT
+→ STAGE05 DPO
+→ STAGE06 生成 400 条冻结测试输出
+→ STAGE07 统一判分与模型选择
+→ STAGE08 合并、量化与部署冒烟
+→ STAGE09 报告归档
 ```
 
-正式实验必须使用已冻结的计划和唯一输出目录；失败运行同样需要保留终态证据，不能通过覆盖、静默重试或替换任务改善结果。
+| 项目 | 配置 |
+| --- | --- |
+| Base Model | Qwen3-1.7B、Qwen3-4B |
+| 训练框架 | LLaMA-Factory + LoRA |
+| 训练设备 | NVIDIA A100-PCIE-40GB |
+| 上下文长度 | 13,568 tokens，无训练样本截断 |
+| 数据教师与判分 | DeepSeek V4 Flash 隔离调用 |
+| SFT | 3 epochs，LoRA rank 16 |
+| DPO | 1 epoch，β=0.1 / 0.3 |
+| 随机种子 | 42 |
+
+## 评估指标
+
+| 指标 | 定义 |
+| --- | --- |
+| `protocol` | PLAN JSON 通过 Schema 的任务比例 |
+| `task_correctness` | 通过的验收反例与状态转移原子项占比 |
+| `effective_pass` | Schema 与该任务全部 8 项语义原子判分同时通过的任务比例 |
+
+模型选择以 `effective_pass` 为第一排序键，训练 loss 与 DPO reward 只用于训练诊断。
 
 ## 项目结构
 
 ```text
-packages/repofixlab/
-  src/                 Node Orchestrator、RepoFix FSM、契约与报告
-  controller/          受信 Python Controller
-  evaluator/           官方评测适配与规范化
-  configs/             冻结实验计划
-  test/                工作流、评测、账本与安全回归测试
-docs/designs/          设计、协议、复盘与实验边界
-docs/reports/          面向阅读者的实验结果摘要
-artifacts/             本地不可变运行制品（通常不提交 Git）
-.pi/skills/            项目内 Pi 技能
+docs/post_train/             任务设计、数据集设计、实验执行与 PLAN Schema
+scripts/post_train/          数据构建、校验、训练编排、判分与报告脚本
+configs/post_train/v1/       A100、LLaMA-Factory 与模型运行配置
+artifacts/post_train/v1/     本地训练、评估、部署与报告产物
 ```
 
-## 许可与上游
+核心文档：
 
-RepoFixLab 基于 [earendil-works/pi](https://github.com/earendil-works/pi) 的 MIT 代码和公开 API 扩展而来，不修改 Pi 的核心 agent loop。Pi 提供通用 Agent runtime；RepoFixLab 新增的是修复工作流、容器控制面、可信评测和实验报告能力。仓库按 [MIT License](LICENSE) 发布。
+- [后训练设计](docs/post_train/design.md)
+- [数据集设计](docs/post_train/dataset_design.md)
+- [实验执行](docs/post_train/experiment_execution.md)
+- [PLAN JSON Schema](docs/post_train/plan.schema.json)
+
+## 技术栈
+
+Qwen3 · SFT · DPO · LoRA · LLaMA-Factory · DeepSeek V4 Flash · Multi-SWE-RL-Verified · llama.cpp
+
+## License
+
+[MIT](LICENSE)
