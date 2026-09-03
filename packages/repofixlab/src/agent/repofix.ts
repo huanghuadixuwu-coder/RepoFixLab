@@ -33,6 +33,7 @@ import {
 import type { RepoToolTransport } from "../controller/client.ts";
 import type { RepoFixMemoryRuntime } from "../memory/assembler.ts";
 import { createRepoTools, MODEL_VISIBLE_STAGE_OUTPUT_LIMIT, RepoToolOutputBudget } from "../sandbox/repo-tools.ts";
+import { injectPlanSkill, loadPlanSkill, type PlanSkillBundle, type PlanSkillPolicyId } from "./plan-skill.ts";
 import {
 	assertRepoFixWorkflowConfig,
 	type RepoFixConfigId,
@@ -64,6 +65,7 @@ export interface RepoFixSessionOptions {
 	/** Some providers reject tool_choice while thinking is enabled. */
 	readonly forceStageCompletionToolChoice?: boolean;
 	readonly memory?: RepoFixMemoryRuntime;
+	readonly planSkillPolicy?: PlanSkillPolicyId;
 }
 
 /** Live session objects and workflow controls owned by one RepoFix attempt. */
@@ -83,6 +85,9 @@ export interface RepoFixSessionResult {
 	/** Direct Provider stream captured before RepoFix stage-control wrapping. */
 	readonly providerStream: RepoFixProviderStream;
 	readonly memory?: RepoFixMemoryRuntime;
+	readonly planSkill: PlanSkillBundle | null;
+	/** Assemble memory first, then add the PLAN-only instruction before token admission. */
+	readonly prepareProviderContext: (context: Context, requestId: string) => Promise<Context>;
 }
 
 /** Sanitized Controller-owned verification result that may be shown to refinement stages. */
@@ -132,6 +137,8 @@ export type RepoFixTrajectoryEvent =
 			readonly stage_prompt_sha256: string;
 			readonly sealed_handoff_chars: number;
 			readonly sealed_handoff_sha256: string | null;
+			readonly plan_skill_id: string | null;
+			readonly plan_skill_sha256: string | null;
 	  }
 	| {
 			readonly schema_version: "v1";
@@ -145,6 +152,7 @@ export type RepoFixTrajectoryEvent =
 			readonly context_chars: number;
 			readonly sealed_repository_tool_results: number;
 			readonly current_stage_repository_tool_results: number;
+			readonly provider_context_sha256: string;
 	  }
 	| {
 			readonly schema_version: "v1";
@@ -195,6 +203,8 @@ interface RepoFixStageCompletionControl {
 	consumeStopAfterTurn(): boolean;
 	/** Bind the next Provider request to token-ledger and trajectory evidence. */
 	setProviderRequestId(requestId: string): void;
+	/** Compose memory and the stable PLAN instruction before Provider token admission. */
+	prepareProviderContext(context: Context, requestId: string): Promise<Context>;
 	/** Release completion control after the active stage finishes or aborts. */
 	finish(stage: RepoFixStage): void;
 }
@@ -292,6 +302,11 @@ function stagePrompt(
 	if (stage === "LOCALIZE") {
 		base.push(
 			'For LOCALIZE, candidates must be an array of objects with path, symbol, and evidence fields, for example [{"path":"src/file.ts","symbol":"target","evidence":"why this code is relevant"}]. A prose string list is invalid.',
+		);
+	}
+	if (stage === "IMPLEMENT") {
+		base.push(
+			"The PLAN handoff is authoritative for what and where to change. Its target code excerpts are supplied from L2 memory as executable edit material. Edit directly; do not read the same repository content again unless the exact text required for the edit is absent or the current repository revision conflicts with it.",
 		);
 	}
 	if (stage === "REFINE_1" || stage === "REFINE_2") {
@@ -488,6 +503,7 @@ function stageCompletionContext(
 	stage: RepoFixStage,
 	completionOnly: boolean,
 	historyMessageCount: number,
+	planSkill: PlanSkillBundle | null,
 ): Context {
 	const stageCompleteTool = context.tools?.find((tool) => tool.name === REPOFIX_STAGE_COMPLETE_TOOL_NAME);
 	if (stageCompleteTool === undefined) {
@@ -507,11 +523,14 @@ function stageCompletionContext(
 			],
 		};
 	});
+	const prepared =
+		stage === "PLAN" && planSkill !== null
+			? injectPlanSkill({ ...context, messages }, planSkill, historyMessageCount + 1)
+			: { ...context, messages };
 	return completionOnly
-		? { ...context, messages, tools: [stageTool] }
+		? { ...prepared, tools: [stageTool] }
 		: {
-				...context,
-				messages,
+				...prepared,
 				tools: context.tools?.map((tool) => (tool.name === stageTool.name ? stageTool : tool)),
 			};
 }
@@ -522,6 +541,7 @@ function createStageCompletionControl(
 	stageMachine: RepoFixStageMachine,
 	forceToolChoice: boolean,
 	memory: RepoFixMemoryRuntime | undefined,
+	planSkill: PlanSkillBundle | null,
 ): RepoFixStageCompletionControl {
 	type ActiveStage = {
 		readonly stage: RepoFixStage;
@@ -578,6 +598,7 @@ function createStageCompletionControl(
 				active.stage,
 				active.completion_forced,
 				active.history_message_count,
+				planSkill,
 			);
 			await emitTrajectory(active.onTrajectoryEvent, {
 				schema_version: "v1",
@@ -591,6 +612,7 @@ function createStageCompletionControl(
 				context_chars: JSON.stringify(providerContext).length,
 				sealed_repository_tool_results: repositoryToolResults.sealed,
 				current_stage_repository_tool_results: repositoryToolResults.currentStage,
+				provider_context_sha256: sha256(JSON.stringify(providerContext)),
 			});
 			if (active.completion_forced) {
 				return originalStream(model, providerContext, completionOnlyStreamOptions(streamOptions, forceToolChoice));
@@ -665,6 +687,13 @@ function createStageCompletionControl(
 			if (active === null) throw new Error("RepoFix provider request identity requires an active stage");
 			active.request_id = requestId;
 		},
+		async prepareProviderContext(context, requestId): Promise<Context> {
+			if (active === null) throw new Error("RepoFix Provider context preparation requires an active stage");
+			const prepared = memory === undefined ? context : await memory.prepareProviderContext(context, requestId);
+			return active.stage === "PLAN" && planSkill !== null
+				? injectPlanSkill(prepared, planSkill, active.history_message_count + 1)
+				: prepared;
+		},
 		finish(stage): void {
 			if (active?.stage !== stage) throw new Error(`RepoFix stage completion control cannot finish ${stage}`);
 			active = null;
@@ -737,6 +766,7 @@ export async function createRepoFixSession(options: RepoFixSessionOptions): Prom
 	if (options.config.workflow_kind !== "repofix") {
 		throw new Error("createRepoFixSession requires a RepoFix configuration, not pi-general");
 	}
+	const planSkill = await loadPlanSkill(options.planSkillPolicy ?? "disabled");
 	const attemptDirectory = resolve(options.attemptDirectory);
 	const cwd = resolve(options.cwd);
 	const settingsManager = SettingsManager.inMemory({
@@ -788,6 +818,7 @@ export async function createRepoFixSession(options: RepoFixSessionOptions): Prom
 		stageMachine,
 		options.forceStageCompletionToolChoice ?? true,
 		options.memory,
+		planSkill,
 	);
 	const result: RepoFixSessionResult = {
 		session,
@@ -798,6 +829,8 @@ export async function createRepoFixSession(options: RepoFixSessionOptions): Prom
 		repoToolOutputBudget,
 		providerStream,
 		memory: options.memory,
+		planSkill,
+		prepareProviderContext: (context, requestId) => stageCompletionControl.prepareProviderContext(context, requestId),
 	};
 	installStageHooks(result);
 	return result;
@@ -854,6 +887,8 @@ export async function runRepoFixWorkflow(
 				stage_prompt_sha256: sha256(prompt),
 				sealed_handoff_chars: handoff?.length ?? 0,
 				sealed_handoff_sha256: handoff === undefined ? null : sha256(handoff),
+				plan_skill_id: stage === "PLAN" ? (result.planSkill?.skill_id ?? null) : null,
+				plan_skill_sha256: stage === "PLAN" ? (result.planSkill?.sha256 ?? null) : null,
 			});
 			await result.session.prompt(prompt);
 			let initialRecoveryTrigger: StageRecovery["trigger"] | null = null;

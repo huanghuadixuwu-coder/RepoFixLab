@@ -17,7 +17,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { Context } from "@earendil-works/pi-ai/compat";
 import type { PiGeneralSessionResult } from "../agent/pi-general.ts";
+import type { PlanSkillPolicyId } from "../agent/plan-skill.ts";
 import {
 	type ControlledVerificationFeedback,
 	type RepoFixSessionResult,
@@ -94,6 +96,7 @@ type RepoFixSessionFactory = (options: {
 	readonly transport: RepoToolTransport;
 	readonly configId: Exclude<RepoFixConfigId, "pi-general">;
 	readonly memory?: RepoFixMemoryRuntime;
+	readonly planSkillPolicy?: PlanSkillPolicyId;
 }) => Promise<RepoFixSessionResult>;
 
 export interface M4DevWorkflowDependencies {
@@ -114,6 +117,7 @@ export interface M4DevWorkflowOptions {
 	readonly accountedAdmissionCapTokens?: number;
 	readonly tokenAdmissionEstimator?: TokenAdmissionEstimatorSpec;
 	readonly memoryPolicy?: RepoFixMemoryPolicyId;
+	readonly planSkillPolicy?: PlanSkillPolicyId;
 	/** Formal continuations may raise this uniformly for their own frozen cohort. */
 	readonly maxModelTurns?: number;
 	/** M7 supplies its immutable logical identities instead of allocating Dev-only IDs. */
@@ -148,6 +152,8 @@ export interface M4DevWorkflowSummary {
 	readonly repofix_context_budget?: RepoToolOutputBudgetSnapshot;
 	/** Emitted by memory-aware M4 runs; absent from older v1 summaries. */
 	readonly memory_policy?: RepoFixMemoryPolicyId;
+	readonly plan_skill_policy?: PlanSkillPolicyId;
+	readonly plan_skill_sha256?: string | null;
 	readonly repofix_memory_metrics?: RepoFixMemoryMetrics;
 	readonly agent_wall_ms?: number;
 }
@@ -304,8 +310,12 @@ export async function runM4DevWorkflow(
 	assertModelTurnLimit(maxModelTurns);
 	getRepoFixWorkflowConfig(options.configId);
 	const memoryPolicyId = options.memoryPolicy ?? "legacy-context-v1";
+	const planSkillPolicy = options.planSkillPolicy ?? "disabled";
 	if (options.configId === "pi-general" && memoryPolicyId !== "legacy-context-v1") {
 		throw new M4PreProviderInputError("Layered RepoFix memory cannot be enabled for pi-general");
+	}
+	if (options.configId === "pi-general" && planSkillPolicy !== "disabled") {
+		throw new M4PreProviderInputError("RepoFix PLAN skill cannot be enabled for pi-general");
 	}
 	const layeredMemoryPolicy =
 		memoryPolicyId === "layered-memory-v1" ? createLayeredMemoryPolicy(dependencies.modelSpecSha256) : null;
@@ -465,7 +475,7 @@ export async function runM4DevWorkflow(
 			/** Install reservation-based Provider admission on the active Pi session. */
 			const installSupervisor = (
 				session: PiGeneralSessionResult["session"] | RepoFixSessionResult["session"],
-				memory?: RepoFixMemoryRuntime,
+				prepareContext?: (context: Context, requestId: string) => Promise<Context>,
 				stageId?: () => string | null,
 				onRequestId?: (requestId: string) => void,
 			): void => {
@@ -481,10 +491,7 @@ export async function runM4DevWorkflow(
 					next_request_id: () => `${attemptId}:provider:${String(requestSequence++).padStart(4, "0")}`,
 					request_kind: "agent",
 					stage_id: stageId,
-					prepare_context:
-						memory === undefined
-							? undefined
-							: (context, requestId) => memory.prepareProviderContext(context, requestId),
+					prepare_context: prepareContext,
 					on_request_id: onRequestId,
 				});
 			};
@@ -548,6 +555,7 @@ export async function runM4DevWorkflow(
 					transport,
 					configId: repoFixConfigId,
 					memory: memoryRuntime ?? undefined,
+					planSkillPolicy,
 				});
 				if (memoryRuntime !== null && layeredMemoryPolicy !== null) {
 					const activeLayeredMemoryPolicy = layeredMemoryPolicy;
@@ -602,7 +610,7 @@ export async function runM4DevWorkflow(
 				);
 				installSupervisor(
 					repoFixSession.session,
-					memoryRuntime ?? undefined,
+					repoFixSession.prepareProviderContext,
 					() => repoFixSession?.stageMachine.activeStage ?? null,
 					(requestId) => repoFixSession?.stageCompletionControl.setProviderRequestId(requestId),
 				);
@@ -813,6 +821,8 @@ export async function runM4DevWorkflow(
 		controlled_verification_sha256: controlledVerificationSha256,
 		controlled_verification_sha256s: controlledVerificationSha256s,
 		memory_policy: memoryPolicyId,
+		plan_skill_policy: planSkillPolicy,
+		plan_skill_sha256: repoFixSession?.planSkill?.sha256 ?? null,
 		...(agentWallMs === null ? {} : { agent_wall_ms: agentWallMs }),
 		...(repoFixSession === null
 			? {}
@@ -858,6 +868,7 @@ export function createDefaultM4DevWorkflowDependencies(
 				transport: options.transport,
 				config: getRepoFixWorkflowConfig(options.configId),
 				memory: options.memory,
+				planSkillPolicy: options.planSkillPolicy,
 			}),
 		modelSpecSha256: runtime.modelSpecSha256,
 		now: () => new Date(),

@@ -16,6 +16,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { PlanSkillPolicyId } from "../agent/plan-skill.ts";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import type { RepoFixMemoryPolicyId } from "../contracts/memory.ts";
@@ -58,6 +59,7 @@ export interface M7FormalRunOptions {
 	readonly maxModelTurns: number;
 	readonly maxWallTimeMs?: number;
 	readonly memoryPolicy?: RepoFixMemoryPolicyId;
+	readonly planSkillPolicy?: PlanSkillPolicyId;
 	readonly accountedAdmissionCapTokens?: number;
 	readonly hooks?: { readonly agentFinished: () => Promise<void>; readonly evaluating: () => Promise<void> };
 }
@@ -191,6 +193,7 @@ export async function runM7FormalRun(
 						cwd: "/testbed",
 						transport: dependencies.controller.toolTransport(options.attemptId),
 						configId: options.configId,
+						planSkillPolicy: options.planSkillPolicy,
 					});
 		try {
 			identity = runtimeIdentityFromSession(manifestSession.session, runtime.modelSpecSha256);
@@ -246,6 +249,7 @@ export async function runM7FormalRun(
 				configId: options.configId,
 				accountedAdmissionCapTokens,
 				memoryPolicy: options.memoryPolicy,
+				planSkillPolicy: options.planSkillPolicy,
 				tokenAdmissionEstimator: {
 					version: "m6-deepseek-v4-flash-v1",
 					multiplier: 1.351,

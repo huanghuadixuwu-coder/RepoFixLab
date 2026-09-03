@@ -5,6 +5,7 @@
  * 负责：确定性召回、protected index、ActiveEvidence 去重与 revision 失效、大文件 chunk 选择、工作集连续性、checkpoint/delta 和滚动压缩。
  * 不负责：保存 L3、执行仓库工具、选择/切换阶段、判断补丁完成、循环检测，或根据 activity 决定 Agent 动作。
  * 数据流：L1/L2 + 冻结阶段 query + 当前消息 → 高密度 L0 messages；systemPrompt + tools + L0 才是完整 Provider Context；L0 审计回写 L2。
+ * 交接：IMPLEMENT 以 PLAN 的修改步骤和 code_scope 选择 L2 代码片段，使决策与可执行 old_text 同时进入首轮上下文。
  * 压缩：只压缩进入 L0 的自由文本，protected index 与 L1/L2 原文不压缩；达到 70% 触发，目标 50%，滚动输入为上一摘要加新增 delta。
  * 缓存：阶段首轮或 revision/压缩变化建立 checkpoint；普通轮次只追加 delta，使前一轮 messages 成为后一轮严格前缀。
  * 完整性：source key 必须由 head、原文 delta、协议 tail 或 Condensation 覆盖；query 只能追加工作集，不能重新筛掉已进入 L0 的有效来源。
@@ -260,26 +261,62 @@ function explicitlyReferencesEvent(
 
 /**
  * [函数级]
- * 目的：从显式路径引用旁提取用户要求的具体行范围。
- * 输入/输出：选择器文本与路径；合法的一基闭区间集合。
- * 约束：只有路径已明确出现时才解析 `#Lx-Ly`、`:x-y` 或 `lines x-y`。
+ * 目的：从当前请求或 PLAN 修改范围中提取显式代码行，供 L2 chunk 精确召回。
+ * 输入/输出：分离的选择文本、当前路径及已知路径；去重排序的一基闭区间集合。
+ * 约束：每个路径的解析止于下一已知路径，仅接受 `#Lx-Ly`、`:x-y` 或 `[~]lines x-y`。
  */
 function requestedLineRanges(
-	selectorText: string,
+	selectorTexts: readonly string[],
 	path: string,
+	knownPaths: readonly string[],
 ): readonly { readonly start: number; readonly end: number }[] {
-	if (!explicitlyReferencesPath(selectorText, path)) return [];
-	const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const pattern = new RegExp(`${escapedPath}(?:#L|:|\\s+lines?\\s+)(\\d+)(?:\\s*[-:]\\s*L?(\\d+))?`, "g");
-	const ranges: { start: number; end: number }[] = [];
-	for (const match of selectorText.matchAll(pattern)) {
-		const start = Number(match[1]);
-		const end = match[2] === undefined ? start : Number(match[2]);
-		if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start > 0 && end >= start) {
-			ranges.push({ start, end });
+	const normalizedPath = path.replaceAll("\\", "/");
+	const normalizedKnownPaths = knownPaths.map((item) => item.replaceAll("\\", "/"));
+	const ranges = new Map<string, { readonly start: number; readonly end: number }>();
+	for (const selectorText of selectorTexts) {
+		const normalizedText = selectorText.replaceAll("\\", "/");
+		let pathIndex = normalizedText.indexOf(normalizedPath);
+		while (pathIndex >= 0) {
+			const scopeStart = pathIndex + normalizedPath.length;
+			let scopeEnd = normalizedText.length;
+			for (const knownPath of normalizedKnownPaths) {
+				const nextPathIndex = normalizedText.indexOf(knownPath, scopeStart);
+				if (nextPathIndex >= 0) scopeEnd = Math.min(scopeEnd, nextPathIndex);
+			}
+			const scope = normalizedText.slice(scopeStart, scopeEnd);
+			const patterns = [/^\s*(?:#L|:)\s*(\d+)(?:\s*[-:]\s*L?(\d+))?/g, /~?lines?\s+(\d+)(?:\s*[-:]\s*L?(\d+))?/gi];
+			for (const pattern of patterns) {
+				for (const match of scope.matchAll(pattern)) {
+					const start = Number(match[1]);
+					const end = match[2] === undefined ? start : Number(match[2]);
+					if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start > 0 && end >= start) {
+						ranges.set(`${String(start)}:${String(end)}`, { start, end });
+					}
+				}
+			}
+			pathIndex = normalizedText.indexOf(normalizedPath, scopeStart);
 		}
 	}
-	return ranges;
+	return [...ranges.values()].sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+/**
+ * [函数级]
+ * 目的：提取 PLAN 已决定修改位置的最小选择文本，供 IMPLEMENT 从 L2 装入可直接编辑的代码片段。
+ * 输入/输出：完整 PLAN handoff；仅返回 minimal_change_steps 与 obligation code_scope 中的字符串。
+ * 约束：不把风险、排除项或一般调查证据扩成 IMPLEMENT 工作集，也不改变原始 L1。
+ */
+function planExecutableSelectors(handoff: unknown): readonly string[] {
+	if (!isRecord(handoff) || handoff.stage !== "PLAN") return [];
+	const minimalSteps = Array.isArray(handoff.minimal_change_steps)
+		? handoff.minimal_change_steps.filter((item): item is string => typeof item === "string")
+		: [];
+	const obligationScopes = Array.isArray(handoff.obligations)
+		? handoff.obligations.flatMap((item) =>
+				isRecord(item) && typeof item.code_scope === "string" ? [item.code_scope] : [],
+			)
+		: [];
+	return [...minimalSteps, ...obligationScopes];
 }
 
 /**
@@ -703,7 +740,17 @@ export class RepoFixContextAssembler {
 		const latestAssistant = [...input.current_stage_messages]
 			.reverse()
 			.find((message) => message.role === "assistant");
-		const selectorText = `${query}\n${latestAssistant === undefined ? "" : messageText(latestAssistant)}`;
+		const l1Records = this.store.listL1();
+		const planSelectors =
+			input.stage_id === "IMPLEMENT"
+				? planExecutableSelectors(l1Records.find((record) => record.stage_id === "PLAN")?.handoff)
+				: [];
+		const selectorTexts = [
+			query,
+			latestAssistant === undefined ? "" : messageText(latestAssistant),
+			...planSelectors,
+		];
+		const selectorText = selectorTexts.join("\n");
 
 		// ── 组装步骤 3/10：完整保护 L1 集合成员，并按冻结 query/显式引用从 L1、L2 追加可追溯证据。 ──
 		const protectedEntries: MemoryProtectedEntry[] = [];
@@ -719,7 +766,7 @@ export class RepoFixContextAssembler {
 		const currentRefs = this.store.currentEvidenceRefs();
 		const currentEvents = this.store.readEvents(currentRefs);
 		const currentRefByArtifactId = new Map(currentRefs.map((ref) => [ref.artifact_id, ref]));
-		for (const record of this.store.listL1()) {
+		for (const record of l1Records) {
 			const sourceId = `l1:${String(record.stage_sequence)}`;
 			collectProtectedArrays(record.handoff, "/handoff", sourceId, record.sha256, protectedEntries);
 			protectedEntries.push({
@@ -854,6 +901,7 @@ export class RepoFixContextAssembler {
 			group.push(item);
 			fileViewGroups.set(item.view.path, group);
 		}
+		const knownFilePaths = [...fileViewGroups.keys()];
 		for (const [path, group] of [...fileViewGroups.entries()].sort(([left], [right]) => left.localeCompare(right))) {
 			const selectedChunkIds = new Set(
 				group
@@ -861,7 +909,7 @@ export class RepoFixContextAssembler {
 					.filter((chunk) => selectorText.includes(chunk.chunk_id))
 					.map((chunk) => chunk.chunk_id),
 			);
-			const lineRanges = requestedLineRanges(selectorText, path);
+			const lineRanges = requestedLineRanges(selectorTexts, path, knownFilePaths);
 			const addressedViews = group.filter((item) => selectorText.includes(item.ref.artifact_id));
 			const retainedViews = group.filter((item) => this.stageSelectedEvidenceArtifactIds.has(item.ref.artifact_id));
 			const tailViews = group.filter((item) => item.tool_call_ids.some((id) => tailToolResultIds.has(id)));
