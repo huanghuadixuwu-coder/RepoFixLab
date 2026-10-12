@@ -9,12 +9,12 @@ import {
 	createStaticExperimentReport,
 	publishExperimentReport,
 } from "../src/report/experiment-report.ts";
-import { createBatchRunSpecs, executeBatch, type BatchRunExecutor } from "../src/runner/batch-runner.ts";
+import { type BatchRunExecutor, createBatchRunSpecs, executeBatch } from "../src/runner/batch-runner.ts";
 import {
-	BatchStateStore,
-	evaluateAttemptRecovery,
-	ExperimentOwnerLease,
 	type BatchRunSpec,
+	BatchStateStore,
+	ExperimentOwnerLease,
+	evaluateAttemptRecovery,
 } from "../src/runner/batch-state.ts";
 import { GlobalBudgetLedger } from "../src/runner/global-budget-ledger.ts";
 
@@ -109,7 +109,9 @@ describe("M5 durable batch state and report", () => {
 			expect.objectContaining({ run_id: "run-a", status: "preparing", attempt_id: "attempt-run-a-001" }),
 		]);
 		await reopened.transition("run-a", "failed", "attempt-run-a-001", "interrupted_attempt_requires_recovery");
-		await expect(reopened.transition("run-a", "preparing", "attempt-run-a-002")).rejects.toThrow(/Invalid M5 transition/);
+		await expect(reopened.transition("run-a", "preparing", "attempt-run-a-002")).rejects.toThrow(
+			/Invalid M5 transition/,
+		);
 	});
 
 	it("serializes one batch owner and records queued through official evaluation transitions", async () => {
@@ -127,7 +129,7 @@ describe("M5 durable batch state and report", () => {
 				return result(spec.run_id, attemptId, spec.run_id === "run-b");
 			},
 		};
-		const summary = await executeBatch(root, specs, executor);
+		const summary = await executeBatch(root, specs, executor, { concurrency: 1 });
 		expect(summary.completed_run_ids).toEqual(["run-a", "run-b"]);
 		expect(summary.failed_run_ids).toEqual([]);
 		expect(await readFile(summary.report.json_path, "utf8")).toContain(summary.report.aggregate_sha256);
@@ -195,10 +197,18 @@ describe("M5 durable batch state and report", () => {
 		const ledger = await GlobalBudgetLedger.open(join(await directory(), "global-budget.json"), 100);
 		expect(await ledger.reserve(60)).toBe(true);
 		await ledger.settle(60, 45);
-		expect(ledger.snapshot).toMatchObject({ accounted_tokens: 45, reserved_tokens: 0, reconciliation_required: false });
+		expect(ledger.snapshot).toMatchObject({
+			accounted_tokens: 45,
+			reserved_tokens: 0,
+			reconciliation_required: false,
+		});
 		expect(await ledger.reserve(40)).toBe(true);
 		await ledger.chargeUnverified(40);
-		expect(ledger.snapshot).toMatchObject({ accounted_tokens: 85, reserved_tokens: 0, reconciliation_required: true });
+		expect(ledger.snapshot).toMatchObject({
+			accounted_tokens: 85,
+			reserved_tokens: 0,
+			reconciliation_required: true,
+		});
 		expect(await ledger.reserve(1)).toBe(false);
 	});
 
@@ -235,36 +245,47 @@ describe("M5 durable batch state and report", () => {
 	it("admits only affordable runs and freezes later admission after an executor leaves usage unknown", async () => {
 		const root = await directory();
 		let calls = 0;
-		const bounded = await executeBatch(root, specs, {
-			execute: async (spec, attemptId, hooks) => {
-				calls += 1;
-				await hooks.agentFinished();
-				await hooks.evaluating();
-				return result(spec.run_id, attemptId, false);
+		const bounded = await executeBatch(
+			root,
+			specs,
+			{
+				execute: async (spec, attemptId, hooks) => {
+					calls += 1;
+					await hooks.agentFinished();
+					await hooks.evaluating();
+					return result(spec.run_id, attemptId, false);
+				},
 			},
-		}, {
-			budget_admission: {
-				ledger_path: join(root, "budget.json"),
-				cap_tokens: 150,
-				per_run_reservation_tokens: 100,
+			{
+				budget_admission: {
+					ledger_path: join(root, "budget.json"),
+					cap_tokens: 150,
+					per_run_reservation_tokens: 100,
+				},
 			},
-		});
+		);
 		expect(calls).toBe(1);
 		expect(bounded.completed_run_ids).toEqual(["run-a"]);
 		expect(bounded.failed_run_ids).toEqual(["run-b"]);
 
 		const unknownRoot = await directory();
-		const unknown = await executeBatch(unknownRoot, specs, {
-			execute: async () => {
-				throw new Error("transport result is unknown");
+		const unknown = await executeBatch(
+			unknownRoot,
+			specs,
+			{
+				execute: async () => {
+					throw new Error("transport result is unknown");
+				},
 			},
-		}, {
-			budget_admission: {
-				ledger_path: join(unknownRoot, "budget.json"),
-				cap_tokens: 200,
-				per_run_reservation_tokens: 100,
+			{
+				concurrency: 1,
+				budget_admission: {
+					ledger_path: join(unknownRoot, "budget.json"),
+					cap_tokens: 200,
+					per_run_reservation_tokens: 100,
+				},
 			},
-		});
+		);
 		expect(unknown.failed_run_ids).toEqual(["run-a", "run-b"]);
 		expect((await GlobalBudgetLedger.open(join(unknownRoot, "budget.json"), 200)).snapshot).toMatchObject({
 			accounted_tokens: 100,
@@ -294,9 +315,9 @@ runtime_status: lifecycle_unavailable
 		const assignments = [{ group_id: "dev", instance_ids: ["repo__one-1", "repo__two-2"] }] as const;
 		expect(createBatchRunSpecs(plan, assignments)).toEqual(createBatchRunSpecs(plan, assignments));
 		expect(createBatchRunSpecs(plan, assignments)).toHaveLength(4);
-		expect(() => createBatchRunSpecs(plan, [{ group_id: "dev", instance_ids: ["repo__one-1", "not-frozen"] }])).toThrow(
-			"unfrozen task",
-		);
+		expect(() =>
+			createBatchRunSpecs(plan, [{ group_id: "dev", instance_ids: ["repo__one-1", "not-frozen"] }]),
+		).toThrow("unfrozen task");
 		const valid = evaluateAttemptRecovery({
 			attempt_id: "attempt-run-a-001",
 			status: "running",
@@ -326,5 +347,75 @@ runtime_status: lifecycle_unavailable
 				open_reservations: 1,
 			}).reason,
 		).toBe("open_reservation_present");
+	});
+
+	it("charges interrupted reservations once and blocks queued admission across repeated recovery", async () => {
+		const root = await directory();
+		const ledgerPath = join(root, "budget.json");
+		const store = await BatchStateStore.open(root);
+		for (const spec of specs) await store.register(spec);
+		await store.transition("run-a", "preparing", "interrupted-attempt");
+		await store.transition("run-a", "running", "interrupted-attempt");
+		const ledger = await GlobalBudgetLedger.open(ledgerPath, 300);
+		await ledger.reserve(100);
+		const executor: BatchRunExecutor = {
+			execute: async () => {
+				throw new Error("Unreconciled usage must block new provider calls");
+			},
+		};
+		const options = {
+			budget_admission: { ledger_path: ledgerPath, cap_tokens: 300, per_run_reservation_tokens: 100 },
+		};
+		await executeBatch(root, specs, executor, options);
+		expect((await GlobalBudgetLedger.open(ledgerPath, 300)).snapshot).toMatchObject({
+			accounted_tokens: 100,
+			reserved_tokens: 0,
+			reconciliation_required: true,
+		});
+		const balance = await readFile(ledgerPath, "utf8");
+		const events = await readFile(join(root, "batch-events.jsonl"), "utf8");
+		await executeBatch(root, specs, executor, options);
+		expect(await readFile(ledgerPath, "utf8")).toBe(balance);
+		expect(await readFile(join(root, "batch-events.jsonl"), "utf8")).toBe(events);
+	});
+
+	it("replays completed results without changing artifacts or settling their budget twice", async () => {
+		const root = await directory();
+		const ledgerPath = join(root, "budget.json");
+		const options = {
+			budget_admission: { ledger_path: ledgerPath, cap_tokens: 300, per_run_reservation_tokens: 100 },
+		};
+		await executeBatch(
+			root,
+			specs,
+			{
+				execute: async (spec, attemptId, hooks) => {
+					await hooks.agentFinished();
+					await hooks.evaluating();
+					return result(spec.run_id, attemptId, true);
+				},
+			},
+			options,
+		);
+		const budget = await readFile(ledgerPath, "utf8");
+		const artifacts = await Promise.all(
+			specs.map((spec) => readFile(join(root, "results", `${spec.run_id}.json`), "utf8")),
+		);
+		for (let index = 0; index < 3; index++) {
+			await executeBatch(
+				root,
+				specs,
+				{
+					execute: async () => {
+						throw new Error("Completed executor replayed");
+					},
+				},
+				options,
+			);
+		}
+		expect(await readFile(ledgerPath, "utf8")).toBe(budget);
+		expect(
+			await Promise.all(specs.map((spec) => readFile(join(root, "results", `${spec.run_id}.json`), "utf8"))),
+		).toEqual(artifacts);
 	});
 });

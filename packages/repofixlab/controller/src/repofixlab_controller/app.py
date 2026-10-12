@@ -192,6 +192,9 @@ def _load_runtime_from_environment(
     schema_directory = Path(
         os.environ.get("REPOFIXLAB_SCHEMA_DIR", "/opt/repofixlab/schemas")
     )
+    reuse_value = os.environ.get("REPOFIXLAB_CONTAINER_REUSE", "true")
+    if reuse_value not in {"true", "false"}:
+        raise RuntimeError("REPOFIXLAB_CONTAINER_REUSE must be exactly true or false")
     configuration = RuntimeDockerConfiguration(
         task_environment_lock_path=Path(task_lock_value or "/runtime-lock-required"),
         task_environment_lock_schema_path=(
@@ -207,6 +210,11 @@ def _load_runtime_from_environment(
         ),
         evaluator_kernel_sha256=kernel_sha256,
         runtime_lock_root=Path(task_lock_root_value) if task_lock_root_value else None,
+        worker_pool_capacity=int(os.environ.get("REPOFIXLAB_WORKER_POOL_CAPACITY", "2")),
+        worker_pool_idle_seconds=float(os.environ.get("REPOFIXLAB_WORKER_POOL_IDLE_SECONDS", "300")),
+        evaluator_pool_capacity=int(os.environ.get("REPOFIXLAB_EVALUATOR_POOL_CAPACITY", "1")),
+        evaluator_pool_idle_seconds=float(os.environ.get("REPOFIXLAB_EVALUATOR_POOL_IDLE_SECONDS", "300")),
+        reuse_containers=reuse_value == "true",
     )
     backend = DockerRuntimeBackend(client, factory.catalog, configuration)
     operation_root = Path(

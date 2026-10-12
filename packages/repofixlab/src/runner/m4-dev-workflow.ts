@@ -789,11 +789,9 @@ export async function runM4DevWorkflow(
 			terminalStatus === "completed" &&
 			leaseId !== null &&
 			finalSnapshotId !== null;
-		if (leaseId !== null && !retainForFormalEvaluation) {
-			// M4 is a Dev-only workflow: P0/P1 evidence is already persisted locally
-			// and no official evaluation follows. destroy() intentionally retains a
-			// policy-passing snapshot for M5 evaluation, so abort() is the correct
-			// terminal cleanup operation here and releases the single controller slot.
+		if (!retainForFormalEvaluation) {
+			// Preparation can reserve capacity before returning a lease. Abort also
+			// cleans this path and releases the attempt's audited reservation.
 			try {
 				workerReleased = (await dependencies.controller.abort(attemptId, `${attemptId}:abort`)).clean;
 			} catch {

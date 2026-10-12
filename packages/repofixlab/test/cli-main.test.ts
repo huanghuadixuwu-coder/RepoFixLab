@@ -350,6 +350,9 @@ function runtime(overrides: Partial<CliRuntime> = {}): CliRuntime {
 		runExperiment: async () => {
 			throw new Error("must not execute experiment");
 		},
+		runM7Experiment: async () => {
+			throw new Error("must not execute M7 experiment");
+		},
 		resolveInputPath: async (artifactsRoot, requestedPath) => resolve(artifactsRoot, requestedPath),
 		resolveRunConfigPath: async (artifactsRoot, requestedPath) => resolve(artifactsRoot, requestedPath),
 		resolveOutputPath: async (artifactsRoot, requestedPath) => resolve(artifactsRoot, requestedPath),

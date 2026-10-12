@@ -12,6 +12,7 @@ import {
 	type RepoToolRequest,
 	type RepoToolResponse,
 } from "../src/sandbox/protocol.ts";
+import { successfulToolResult } from "./runtime-tool-fixture.ts";
 
 class RecordingRepoToolTransport implements RepoToolTransport {
 	readonly requests: RepoToolRequest[] = [];
@@ -48,15 +49,7 @@ class RecordingRepoToolTransport implements RepoToolTransport {
 					: "ok";
 		return {
 			tool: request.tool,
-			result: this.results[request.tool] ?? {
-				tool: request.tool,
-				exit_code: 0,
-				stdout,
-				stderr: "",
-				truncated: false,
-				timed_out: false,
-				duration_ms: 1,
-			},
+			result: this.results[request.tool] ?? successfulToolResult(request, stdout),
 		};
 	}
 }

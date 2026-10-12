@@ -29,6 +29,7 @@ import { assertM1Plan, runM1Experiment } from "../src/runner/run-m1.ts";
 import type { PublicTaskBinding, PublicTaskSource, TaskEnvironmentBinding } from "../src/runner/task-source.ts";
 import { FileTaskEnvironmentLockSource } from "../src/runner/task-source.ts";
 import type { RepoToolRequest, RepoToolResponse } from "../src/sandbox/protocol.ts";
+import { successfulToolResult } from "./runtime-tool-fixture.ts";
 
 const BASE_COMMIT = "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b";
 const PLAN = parseExperimentPlan(`schema_version: v1
@@ -95,15 +96,7 @@ class FakeToolTransport implements RepoToolTransport {
 		if (this.fail) throw new Error("sandbox exploded");
 		return {
 			tool: request.tool,
-			result: {
-				tool: request.tool,
-				exit_code: 0,
-				stdout: "ok",
-				stderr: "",
-				truncated: false,
-				timed_out: false,
-				duration_ms: 1,
-			},
+			result: successfulToolResult(request),
 		};
 	}
 }

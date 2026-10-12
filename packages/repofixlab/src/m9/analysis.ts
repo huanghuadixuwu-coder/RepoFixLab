@@ -218,9 +218,7 @@ async function writeImmutable(path: string, content: string): Promise<void> {
 	}
 }
 
-export async function publishM9Analysis(
-	artifactsRoot: string,
-): Promise<{
+export async function publishM9Analysis(artifactsRoot: string): Promise<{
 	readonly report: M9AnalysisReport;
 	readonly json_path: string;
 	readonly markdown_path: string;

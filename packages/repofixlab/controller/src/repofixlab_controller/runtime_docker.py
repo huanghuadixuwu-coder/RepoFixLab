@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from contextlib import ExitStack
+from dataclasses import asdict, dataclass, field, replace
 import base64
 import hashlib
 import io
 import json
+from math import isfinite
 import os
 from pathlib import Path, PurePosixPath
 import re
 import socket
 import tarfile
+from threading import Lock
 from time import monotonic, sleep
 from types import MappingProxyType
+from uuid import uuid4
 
 from jsonschema import Draft202012Validator
+
+from .runtime_timing import runtime_phase, timed
+from .runtime_admission import RuntimeAdmission, RuntimeAdmissionCancelled
+from .runtime_worker_pool import WorkerPool
 
 from .container_factory import DockerClientProtocol, RoleLaunchPolicy
 from .factory_service import (
@@ -61,6 +69,9 @@ _MANAGED_LABEL = "io.repofixlab.runtime.managed"
 _ATTEMPT_LABEL = "io.repofixlab.runtime.attempt-id"
 _CANDIDATE_LABEL = "io.repofixlab.runtime.candidate-id"
 _ROLE_LABEL = "io.repofixlab.runtime.role"
+_POOL_LABEL = "io.repofixlab.runtime.worker-pool"
+_EVALUATOR_POOL_LABEL = "io.repofixlab.runtime.evaluator-pool"
+_ENVIRONMENT_LABEL = "io.repofixlab.runtime.environment-sha256"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _IMAGE_ID = re.compile(r"^sha256:[a-f0-9]{64}$")
@@ -86,6 +97,15 @@ _M6_DATASET_ROOT = "/data/private"
 _M6_PRISTINE_IMAGE = "repofixlab/pristine-harness:m0-726c5461-final"
 
 _KEEPALIVE_SCRIPT = "import signal; signal.pause()"
+_WORKER_READY_SCRIPT = """
+import json
+import subprocess
+def git(*args):
+    return subprocess.run(['git', *args], check=True, capture_output=True, timeout=30).stdout
+head = git('rev-parse', 'HEAD').decode('ascii').strip()
+clean = not git('status', '--porcelain', '--untracked-files=normal')
+print(json.dumps({'base_commit': head, 'clean': clean}))
+""".strip()
 
 
 def _task_environment_lock_id(instance_id: str, seal_sha256: str) -> str:
@@ -182,6 +202,48 @@ finally:
     os.close(descriptor)
 print(f'{size}:{digest.hexdigest()}')
 """.strip()
+_MATERIAL_WRITE_SCRIPT = r"""
+import os
+from pathlib import PurePosixPath
+import shutil
+import sys
+import tarfile
+
+root, bundle = sys.argv[1:]
+flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0)
+count = 0
+with os.fdopen(os.open(bundle, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)), 'rb') as stream:
+    with tarfile.open(fileobj=stream, mode='r:') as archive:
+        for member in archive:
+            path = PurePosixPath(member.name)
+            if path.is_absolute() or not path.parts or any(part in {'', '.', '..'} for part in path.parts):
+                raise ValueError('material path escapes trusted root')
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise ValueError('material entry is not a regular file')
+            directory = os.open(root, flags)
+            try:
+                for part in path.parts[:-1]:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=directory)
+                    except FileExistsError:
+                        pass
+                    child = os.open(part, flags, dir_fd=directory)
+                    os.close(directory)
+                    directory = child
+                descriptor = os.open(path.parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    | getattr(os, 'O_NOFOLLOW', 0), 0o400, dir_fd=directory)
+                with os.fdopen(descriptor, 'wb') as destination, archive.extractfile(member) as content:
+                    shutil.copyfileobj(content, destination)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+                count += 1
+            finally:
+                os.close(directory)
+os.unlink(bundle)
+print(count)
+""".strip()
 _PUBLISH_READY_SCRIPT = r"""
 import hashlib
 import os
@@ -243,6 +305,52 @@ if arguments and arguments[0] == 'm6-candidate-patch':
 os.execvpe('python3', ['python3', '-m', 'repofixlab_evaluator', *arguments], environment)
 """.strip()
 
+# PID 1 waits for an exclusively staged, atomically published command. Docker
+# mounts are fixed before readiness; task-specific patch bytes arrive at claim.
+_EVALUATOR_STANDBY_SCRIPT = r"""
+import json
+import os
+from pathlib import Path
+import sys
+import time
+activation = Path('/tmp/repofixlab-runtime/.activation')
+while not activation.is_file():
+    time.sleep(0.05)
+with activation.open('rb') as stream:
+    content = stream.read(32769)
+if len(content) > 32768:
+    raise SystemExit(73)
+binding = json.loads(content)
+if (set(binding) != {'environment_sha256', 'arguments'} or binding['environment_sha256'] != sys.argv[2]
+        or not isinstance(binding['arguments'], list) or not 1 <= len(binding['arguments']) <= 64
+        or any(not isinstance(item, str) for item in binding['arguments'])):
+    raise SystemExit(74)
+os.execvpe('python3', ['python3', '-c', sys.argv[1], *binding['arguments']], dict(os.environ))
+""".strip()
+
+_EVALUATOR_READY_SCRIPT = r"""
+import hashlib
+import json
+from pathlib import Path
+root = Path('/tmp/repofixlab-runtime/repofixlab_evaluator')
+entries = []
+for path in sorted(root.rglob('*')):
+    relative = path.relative_to(root)
+    if '__pycache__' in relative.parts or path.suffix == '.pyc':
+        continue
+    if path.is_symlink():
+        raise SystemExit(71)
+    if path.is_file():
+        content = path.read_bytes()
+        entries.append({'path': relative.as_posix(), 'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()})
+canonical = (json.dumps({'files': entries}, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
+print(json.dumps({'kernel_sha256': hashlib.sha256(canonical).hexdigest(),
+    'ready_marker': Path('/tmp/repofixlab-runtime/.ready').read_text().strip(),
+    'input_empty': not any(Path('/run/repofixlab/input').iterdir()),
+    'evidence_empty': not any(Path('/run/repofixlab/evidence').iterdir()),
+    'activation_absent': not any(Path('/tmp/repofixlab-runtime').glob('.activation*'))}))
+""".strip()
+
 
 class RuntimeDockerError(RuntimeError):
     """The production Docker runtime violated a trusted server-side policy."""
@@ -271,6 +379,7 @@ class RuntimePreparedM6Task:
     kernel_volume: object
     strict_spec_sha256: str
     repo: str
+    official_eval_script_sha256: str
 
 
 @dataclass(frozen=True)
@@ -282,6 +391,15 @@ class RuntimeDockerConfiguration:
     evaluator_kernel_root: Path
     evaluator_kernel_sha256: str
     runtime_lock_root: Path | None = None
+    total_nano_cpus: int = 10_000_000_000
+    total_memory_bytes: int = 18 * 1024**3
+    controller_nano_cpus: int = 1_000_000_000
+    controller_memory_bytes: int = 512 * 1024**2
+    worker_pool_capacity: int = 0
+    worker_pool_idle_seconds: float = 300
+    evaluator_pool_capacity: int = 0
+    evaluator_pool_idle_seconds: float = 300
+    reuse_containers: bool = False
 
 
 @dataclass
@@ -291,6 +409,29 @@ class DockerRuntimeWorker:
     container: object
     volumes: tuple[object, ...]
     labels: Mapping[str, str]
+    resource_owner: str | None = None
+    generation: int = 0
+    parked: bool = False
+    reset_evidence: Mapping[str, object] | None = None
+
+
+@dataclass
+class DockerRuntimeEvaluator:
+    """A ready environment with immutable mounts and no job or patch yet."""
+
+    attempt_id: str
+    candidate: TrustedCandidate
+    container: object
+    volumes: tuple[object, ...]
+    labels: Mapping[str, str]
+    mounts: Mapping[str, object]
+    input_volume: object
+    evidence_volume: object
+    prepared_m6_task: RuntimePreparedM6Task | None = None
+    resource_owner: str | None = None
+    generation: int = 0
+    parked: bool = False
+    reset_evidence: Mapping[str, object] | None = None
 
 
 @dataclass
@@ -307,6 +448,9 @@ class DockerRuntimeJob:
     prepared_m6_task: RuntimePreparedM6Task | None = None
     m6_finalized: bool = False
     artifacts: dict[str, bytes] | None = field(default=None)
+    resource_owner: str | None = None
+    generation: int = 0
+    evaluator: DockerRuntimeEvaluator | None = None
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -692,6 +836,11 @@ class DockerRuntimeBackend:
         self._client = client
         self._catalog = catalog
         self._configuration = configuration
+        self.resource_admission = RuntimeAdmission(
+            configuration.total_nano_cpus, configuration.total_memory_bytes,
+            baseline_nano_cpus=configuration.controller_nano_cpus,
+            baseline_memory_bytes=configuration.controller_memory_bytes,
+        )
         self._kernel_files = _kernel_material(
             configuration.evaluator_kernel_root,
             aggregate,
@@ -760,7 +909,529 @@ class DockerRuntimeBackend:
         self._private_task_bindings = MappingProxyType(private_task_bindings)
         for binding in self._private_task_bindings.values():
             self._require_private_volume(binding.volume_name)
+        if (configuration.worker_pool_capacity not in {0, 1, 2}
+                or not isfinite(configuration.worker_pool_idle_seconds) or configuration.worker_pool_idle_seconds <= 0):
+            raise RuntimeDockerError("invalid Worker pool configuration")
+        self.worker_pool: WorkerPool[DockerRuntimeWorker] | None = None
+        if (configuration.evaluator_pool_capacity not in {0, 1}
+                or not isfinite(configuration.evaluator_pool_idle_seconds) or configuration.evaluator_pool_idle_seconds <= 0):
+            raise RuntimeDockerError("invalid Evaluator pool configuration")
+        self.evaluator_pool: WorkerPool[DockerRuntimeEvaluator] | None = None
+        self._pool_namespace: str | None = None
+        self._worker_owners: dict[str, str] = {}
+        self._evaluator_owners: dict[str, str] = {}
+        self._worker_owner_lock = Lock()
+        self._active_generations: dict[tuple[str, str], tuple[str, int]] = {}
+        self._reset_script = (Path(__file__).with_name("runtime_reset.py")).read_text(encoding="utf-8")
+        if configuration.reuse_containers and not (configuration.worker_pool_capacity and configuration.evaluator_pool_capacity):
+            raise RuntimeDockerError("container reuse requires both bounded role pools")
+        self._pool_candidates = {self._worker_environment_key(candidate): candidate
+                                 for candidate in catalog.candidates.values()
+                                 if candidate.candidate_id in self._task_locks}
+        self._evaluator_candidates = {self._evaluator_environment_key(candidate): candidate
+                                     for candidate in catalog.candidates.values()
+                                     if candidate.candidate_id in self._task_locks}
 
+    def start_runtime(self, journal_identity: str) -> None:
+        """Recover this journal's immutable pool labels after taking its owner lock."""
+        self._pool_namespace = hashlib.sha256(journal_identity.encode("utf-8")).hexdigest()
+        owners = set()
+        for pool_label in (_POOL_LABEL, _EVALUATOR_POOL_LABEL):
+            filters = {"label": [f"{_MANAGED_LABEL}=true", f"{pool_label}={self._pool_namespace}"]}
+            for collection in (self._client.containers, self._client.volumes):
+                resources = collection.list(all=True, filters=filters) if collection is self._client.containers else collection.list(filters=filters)
+                for resource in resources:
+                    labels = getattr(resource, "labels", None)
+                    if not isinstance(labels, Mapping):
+                        attrs = getattr(resource, "attrs", {})
+                        labels = attrs.get("Labels", {})
+                    owner = labels.get(_ATTEMPT_LABEL)
+                    if not isinstance(owner, str) or _IDENTIFIER.fullmatch(owner) is None:
+                        raise RuntimeDockerError("pool resource ownership is invalid")
+                    owners.add(owner)
+        for owner in owners:
+            if not self._recover_resources(owner).clean:
+                raise RuntimeDockerError("Worker pool startup cleanup left residuals")
+        if self._configuration.worker_pool_capacity:
+            self.worker_pool = WorkerPool(
+                self._configuration.worker_pool_capacity, self._configuration.worker_pool_idle_seconds,
+                reserve=self._reserve_warm_worker, prepare=self._prepare_warm_worker,
+                bind=self._bind_warm_worker, cleanup=lambda owner: self._recover_resources(owner).clean,
+                interrupt=self._interrupt_owner,
+            )
+        if self._configuration.evaluator_pool_capacity:
+            self.evaluator_pool = WorkerPool(
+                1, self._configuration.evaluator_pool_idle_seconds, role="evaluator",
+                reserve=self._reserve_warm_evaluator, prepare=self._prepare_warm_evaluator,
+                bind=self._bind_warm_evaluator, cleanup=lambda owner: self._recover_resources(owner).clean,
+                interrupt=self._interrupt_owner,
+            )
+
+    def close(self) -> None:
+        """Drain both roles before the service releases journal ownership."""
+        failures = []
+        for pool in (self.worker_pool, self.evaluator_pool):
+            if pool is not None:
+                try:
+                    pool.close()
+                except Exception as error:
+                    failures.append(error)
+        with self._worker_owner_lock:
+            attempts = list(set(self._worker_owners) | set(self._evaluator_owners))
+        for attempt_id in attempts:
+            try:
+                if not self.recover_attempt(attempt_id).clean:
+                    failures.append(RuntimeDockerError("leased role shutdown cleanup left residuals"))
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise RuntimeDockerError("runtime shutdown cleanup failed") from failures[0]
+
+    def prewarm_worker(self, attempt_id: str, candidate_id: str, instance_id: str) -> None:
+        """Accept known tasks through their sealed server-side candidate binding."""
+        candidate = self._candidate(candidate_id, instance_id)
+        if self.worker_pool is not None:
+            self.worker_pool.offer(attempt_id, self._worker_environment_key(candidate))
+            self.prewarm_evaluator(attempt_id, candidate_id, instance_id)
+
+    def _worker_environment_key(self, candidate: TrustedCandidate) -> str:
+        return _canonical_sha256({
+            "role": "worker", "candidate_sha256": candidate.candidate_sha256,
+            "task_lock_sha256": self._task_locks[candidate.candidate_id].seal_sha256,
+            "policy": asdict(candidate.definition.worker), "helper_sha256": self._worker_aggregate,
+            "network_mode": "none", "read_only": True, "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"], "platform": "linux/amd64",
+        })
+
+    def _reserve_warm_worker(self, owner_id: str, key: str) -> bool:
+        policy = self._pool_candidates[key].definition.worker
+        return self.resource_admission.try_acquire(owner_id, policy.nano_cpus, policy.memory_bytes)
+
+    def _prepare_warm_worker(self, owner_id: str, key: str) -> DockerRuntimeWorker:
+        candidate = self._pool_candidates[key]
+        self._validate_local_images()
+        labels = {**_labels(owner_id, candidate.candidate_id, "worker"),
+                  _POOL_LABEL: self._pool_namespace, _ENVIRONMENT_LABEL: key}
+        return self._create_worker(owner_id, candidate, labels)
+
+    def _bind_warm_worker(self, worker: DockerRuntimeWorker, attempt_id: str, key: str) -> DockerRuntimeWorker:
+        if self._worker_environment_key(worker.candidate) != key or worker.labels.get(_ENVIRONMENT_LABEL) != key:
+            raise RuntimeDockerError("Worker pool environment identity drifted")
+        if worker.parked:
+            policy = worker.candidate.definition.worker
+            self.resource_admission.transfer(worker.attempt_id, attempt_id,
+                                             nano_cpus=policy.nano_cpus, memory_bytes=policy.memory_bytes)
+            with self._worker_owner_lock:
+                self._worker_owners[attempt_id] = worker.attempt_id
+            try:
+                self._resume_role(worker)
+            except Exception:
+                cleanup = self._recover_resources(worker.attempt_id, reservation_id=attempt_id)
+                if cleanup.clean:
+                    with self._worker_owner_lock:
+                        self._worker_owners.pop(attempt_id, None)
+                raise
+        else:
+            self._check_worker_ready(worker)
+            self.resource_admission.transfer(worker.attempt_id, attempt_id)
+        with self._worker_owner_lock:
+            self._worker_owners[attempt_id] = worker.attempt_id
+        claimed = replace(worker, attempt_id=attempt_id, resource_owner=worker.attempt_id,
+                          generation=worker.generation + 1, parked=False)
+        self._register_lease(claimed, "worker")
+        return claimed
+
+    def prewarm_evaluator(self, attempt_id: str, candidate_id: str, instance_id: str) -> None:
+        """Prepare trusted environment state independently of task activation."""
+        candidate = self._candidate(candidate_id, instance_id)
+        if self.evaluator_pool is not None:
+            self.evaluator_pool.offer(attempt_id, self._evaluator_environment_key(candidate))
+
+    def _evaluator_environment_key(self, candidate: TrustedCandidate) -> str:
+        return _canonical_sha256({
+            "role": "evaluator", "candidate_sha256": candidate.candidate_sha256,
+            "task_lock_sha256": self._task_locks[candidate.candidate_id].seal_sha256,
+            "policy": asdict(candidate.definition.evaluator),
+            "kernel_sha256": self._configuration.evaluator_kernel_sha256,
+            "dataset_lock_sha256": candidate.dataset_lock_sha256,
+            "private_task": asdict(self._private_task_bindings[candidate.candidate_id]),
+            "m6_runtime": self._m6_runtime, "network_mode": "none", "read_only": True,
+            "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"], "platform": "linux/amd64",
+        })
+
+    def _reserve_warm_evaluator(self, owner_id: str, key: str) -> bool:
+        policy = self._evaluator_candidates[key].definition.evaluator
+        return self.resource_admission.try_acquire(owner_id, policy.nano_cpus, policy.memory_bytes)
+
+    def _register_lease(self, handle: DockerRuntimeWorker | DockerRuntimeEvaluator, role: str) -> None:
+        if not self._configuration.reuse_containers:
+            return
+        with self._worker_owner_lock:
+            identity = (role, handle.container.id)
+            if identity in self._active_generations:
+                raise RuntimeDockerError("physical container already has an active lease")
+            self._active_generations[identity] = (handle.attempt_id, handle.generation)
+        pool = self.worker_pool if role == "worker" else self.evaluator_pool
+        pool._record("lease_started", attempt_id=handle.attempt_id, generation=handle.generation,
+                     owner_id=handle.resource_owner, container_id=handle.container.id,
+                     environment_sha256=handle.labels[_ENVIRONMENT_LABEL])
+
+    def _assert_lease(self, handle: DockerRuntimeWorker | DockerRuntimeJob, role: str) -> None:
+        # Generation zero is an unpublished environment used only by readiness.
+        if not self._configuration.reuse_containers or handle.generation == 0:
+            return
+        with self._worker_owner_lock:
+            if self._active_generations.get((role, handle.container.id)) != (handle.attempt_id, handle.generation):
+                raise RuntimeDockerError("runtime lease generation has ended")
+
+    def publish_release(self, evidence: Mapping[str, object] | None) -> None:
+        """Publish an idle allocation only after the operation journal fsync."""
+        if evidence is None or evidence.get("disposition") != "parked":
+            return
+        pool = self.worker_pool if evidence["role"] == "worker" else self.evaluator_pool
+        pool.publish(str(evidence["owner_id"]), int(evidence["generation"]))
+
+    def _mutable_roots(self, handle: DockerRuntimeWorker | DockerRuntimeEvaluator) -> list[dict[str, object]]:
+        if isinstance(handle, DockerRuntimeWorker):
+            return [{"volume": volume, "root": mount.target, "source": mount.target}
+                    for volume, mount in zip(handle.volumes, handle.candidate.definition.worker.managed_volumes)]
+        return [{"volume": handle.volumes[0], "root": _WORKSPACE_ROOT, "source": _WORKSPACE_ROOT},
+                {"volume": handle.input_volume, "root": _INPUT_ROOT, "source": None},
+                {"volume": handle.evidence_volume, "root": _EVIDENCE_ROOT, "source": None}]
+
+    def _volume_reset(self, handle: DockerRuntimeWorker | DockerRuntimeEvaluator, *, verify_only: bool = False,
+                      container: object | None = None) -> Mapping[str, object]:
+        """Use a fresh read-only image as baseline; expose only owned writable volumes."""
+        role = "worker" if isinstance(handle, DockerRuntimeWorker) else "evaluator"
+        policy = getattr(handle.candidate.definition, role)
+        helper_policy = replace(policy, user="0:0", nano_cpus=min(policy.nano_cpus, 2_000_000_000),
+                                memory_bytes=min(policy.memory_bytes, 4 * 1024**3),
+                                memory_swap_bytes=min(policy.memory_bytes, 4 * 1024**3), pids_limit=256)
+        roots = self._mutable_roots(handle)
+        descriptors = [{"root": root["root"], "source": root["source"], "destination": f"/reset/volume-{index}",
+                        "verify_only": verify_only} for index, root in enumerate(roots)]
+        if container is not None:
+            if not verify_only or handle.reset_evidence is None:
+                raise RuntimeDockerError("live verification lacks a trusted reset receipt")
+            for descriptor, expected in zip(descriptors, handle.reset_evidence["roots"]):
+                descriptor["baseline"] = expected.get("baseline")
+                if isinstance(handle, DockerRuntimeWorker):
+                    descriptor["destination"] = descriptor["root"]
+                elif descriptor["root"] == _INPUT_ROOT:
+                    descriptor["destination"] = _INPUT_ROOT
+            result = self._exec_json(container, ["python3", "-c", self._reset_script, json.dumps(descriptors)], user="0:0")
+            return self._exec_reset_report(_canonical_bytes(result), descriptors)
+        helper = self._run_container(helper_policy,
+            name=_resource_name(handle.resource_owner or handle.attempt_id, role, "reset-helper"), labels=handle.labels,
+            volumes={_volume_name(root["volume"]): {"bind": descriptor["destination"], "mode": "rw"}
+                     for root, descriptor in zip(roots, descriptors)},
+            command=["-c", self._reset_script, json.dumps(descriptors)], entrypoint=["python3"], environment={},
+            cap_add=("CHOWN", "FOWNER"))
+        try:
+            if helper.wait(timeout=120).get("StatusCode") != 0:
+                raise RuntimeDockerError("role volume reset helper failed: " + helper.logs().decode("utf-8", errors="replace")[-2048:])
+            evidence = self._exec_reset_report(helper.logs(stdout=True, stderr=False), descriptors)
+        finally:
+            _remove_container(helper)
+        return evidence
+
+    def _exec_reset_report(self, raw: bytes, descriptors: list[dict[str, object]]) -> Mapping[str, object]:
+        evidence = _m6_json_output(raw, "role reset")
+        roots = evidence.get("roots")
+        if (set(evidence) != {"roots", "verified"} or evidence["verified"] is not True
+                or not isinstance(roots, list) or len(roots) != len(descriptors)):
+            raise RuntimeDockerError("role reset evidence is malformed")
+        for observed, expected in zip(roots, descriptors):
+            if not isinstance(observed, Mapping) or observed.get("root") != expected["root"]:
+                raise RuntimeDockerError("role reset root identity drifted")
+            if expected["source"] is None:
+                if set(observed) != {"root", "empty"} or observed["empty"] is not True:
+                    raise RuntimeDockerError("role reset output volume is dirty")
+            elif (set(observed) != {"root", "baseline", "restored"}
+                    or not isinstance(observed["baseline"], Mapping)
+                    or observed["baseline"] != observed["restored"]
+                    or set(observed["baseline"]) != {"sha256", "entries", "bytes"}
+                    or _SHA256.fullmatch(str(observed["baseline"].get("sha256"))) is None):
+                raise RuntimeDockerError("role reset baseline identity drifted")
+        return evidence
+
+    def _resume_role(self, handle: DockerRuntimeWorker | DockerRuntimeEvaluator, *,
+                     verify_volumes: bool = True, input_empty: bool = True) -> None:
+        """Recheck parked volumes, start the same container, restore trusted tmpfs tools."""
+        self._validate_local_images()
+        role = "worker" if isinstance(handle, DockerRuntimeWorker) else "evaluator"
+        policy = getattr(handle.candidate.definition, role)
+        mounts = (handle.mounts if role == "evaluator" else
+                  {_volume_name(root["volume"]): {"bind": root["root"], "mode": "rw"} for root in self._mutable_roots(handle)})
+        self._check_role_container(handle.container, policy, handle.labels, mounts, running=False)
+        config = getattr(handle.container, "attrs", {}).get("Config", {})
+        command = (["-c", _KEEPALIVE_SCRIPT] if role == "worker" else
+                   ["-c", _EVALUATOR_STANDBY_SCRIPT, _EVALUATOR_WAIT_SCRIPT, self._evaluator_environment_key(handle.candidate)])
+        if config.get("Entrypoint") != ["python3"] or config.get("Cmd") != command:
+            raise RuntimeDockerError("parked role command drifted")
+        handle.container.start()
+        if verify_volumes:
+            self._volume_reset(handle, verify_only=True, container=handle.container)
+        roots = _policy_writable_roots(policy)
+        clean = self._exec_json(handle.container, ["python3", "-c",
+            "import json; from pathlib import Path; print(json.dumps({'tmpfs_empty': all(not any(Path(p).iterdir()) for p in "
+            + repr([mount.target for mount in policy.tmpfs]) + ")}))"], user=policy.user)
+        if clean != {"tmpfs_empty": True}:
+            raise RuntimeDockerError("restarted role tmpfs is contaminated")
+        files = self._worker_files if role == "worker" else self._kernel_files
+        _inject_material(handle.container, files, user=policy.user, writable_roots=roots)
+        if role == "evaluator":
+            _publish_ready_marker(handle.container, f"{_EVALUATOR_KERNEL_ROOT}/.ready.pending", f"{_EVALUATOR_KERNEL_ROOT}/.ready",
+                f"{self._configuration.evaluator_kernel_sha256}\n".encode("ascii"), user=policy.user, writable_roots=roots)
+            self._check_evaluator_ready(handle, input_empty=input_empty)
+        else:
+            self._check_worker_ready(handle)
+
+    def _return_role(self, handle: DockerRuntimeWorker | DockerRuntimeEvaluator, role: str) -> RuntimeCleanupResult:
+        """End the generation, reset under budget, then await durable publication."""
+        pool = self.worker_pool if role == "worker" else self.evaluator_pool
+        owner = handle.resource_owner or handle.attempt_id
+        receipt: dict[str, object] = {"role": role, "owner_id": owner, "attempt_id": handle.attempt_id,
+            "generation": handle.generation, "container_id": handle.container.id,
+            "environment_sha256": handle.labels[_ENVIRONMENT_LABEL], "disposition": "destroyed"}
+        with self._worker_owner_lock:
+            self._active_generations.pop((role, handle.container.id), None)
+
+        def reset(current: DockerRuntimeWorker | DockerRuntimeEvaluator):
+            with runtime_phase(f"{role}.reset", role=role):
+                current.container.stop(timeout=0)
+                _reload(current.container)
+                if _container_state(current.container).get("Status") != "exited":
+                    raise RuntimeDockerError("role reset failed to stop all processes")
+                policy = getattr(current.candidate.definition, role)
+                mounts = (current.mounts if role == "evaluator" else
+                    {_volume_name(root["volume"]): {"bind": root["root"], "mode": "rw"} for root in self._mutable_roots(current)})
+                self._check_role_container(current.container, policy, current.labels, mounts, running=False)
+                self.resource_admission.transfer(current.attempt_id, owner,
+                    nano_cpus=min(policy.nano_cpus, 2_000_000_000), memory_bytes=min(policy.memory_bytes, 4 * 1024**3))
+                receipt["reset"] = dict(self._volume_reset(current))
+                receipt["stopped"] = True
+                receipt["readonly_image_id"] = policy.image_id
+                receipt["tmpfs_roots"] = [mount.target for mount in policy.tmpfs]
+                self.resource_admission.transfer(owner, owner, nano_cpus=0, memory_bytes=0)
+                with self._worker_owner_lock:
+                    self._worker_owners.pop(current.attempt_id, None)
+                    self._evaluator_owners.pop(current.attempt_id, None)
+                receipt["disposition"] = "parked"
+                return replace(current, attempt_id=owner, resource_owner=None, parked=True,
+                               reset_evidence=MappingProxyType(receipt["reset"]))
+
+        try:
+            retained = pool.recycle(handle, handle.labels[_ENVIRONMENT_LABEL], reset)
+        except Exception as error:
+            receipt.update(disposition="quarantined_destroyed", reset_error_class=type(error).__name__)
+            retained = False
+        if retained:
+            return RuntimeCleanupResult(0, 0, release_evidence=MappingProxyType(receipt))
+        cleanup = self._recover_resources(owner, reservation_id=owner)
+        if not cleanup.clean:
+            receipt["disposition"] = "quarantined"
+        if cleanup.clean:
+            self.resource_admission.release(handle.attempt_id)
+            with self._worker_owner_lock:
+                self._worker_owners.pop(handle.attempt_id, None)
+                self._evaluator_owners.pop(handle.attempt_id, None)
+        return replace(cleanup, release_evidence=MappingProxyType(receipt))
+
+    def _prepare_warm_evaluator(self, owner_id: str, key: str) -> DockerRuntimeEvaluator:
+        candidate = self._evaluator_candidates[key]
+        labels = {**_labels(owner_id, candidate.candidate_id, "evaluator"),
+                  _EVALUATOR_POOL_LABEL: self._pool_namespace, _ENVIRONMENT_LABEL: key}
+        evaluator = self._create_prepared_evaluator(owner_id, candidate, labels)
+        evaluator.container.stop(timeout=0)
+        _reload(evaluator.container)
+        if _container_state(evaluator.container).get("Status") != "exited":
+            raise RuntimeDockerError("prepared Evaluator did not stop before parking")
+        policy = candidate.definition.evaluator
+        self.resource_admission.transfer(owner_id, owner_id, nano_cpus=min(policy.nano_cpus, 2_000_000_000),
+                                         memory_bytes=min(policy.memory_bytes, 4 * 1024**3))
+        # Initial git status may refresh the index; restore the exact image
+        # tree before publishing a stopped, verified environment.
+        evidence = self._volume_reset(evaluator)
+        self.resource_admission.transfer(owner_id, owner_id, nano_cpus=0, memory_bytes=0)
+        return replace(evaluator, parked=True, reset_evidence=MappingProxyType(dict(evidence)))
+
+    def _bind_warm_evaluator(self, evaluator: DockerRuntimeEvaluator, attempt_id: str, key: str) -> DockerRuntimeEvaluator:
+        if self._evaluator_environment_key(evaluator.candidate) != key or evaluator.labels.get(_ENVIRONMENT_LABEL) != key:
+            raise RuntimeDockerError("Evaluator pool environment identity drifted")
+        if not evaluator.parked:
+            self._check_evaluator_ready(evaluator)
+            evaluator.container.stop(timeout=0)
+            _reload(evaluator.container)
+            if _container_state(evaluator.container).get("Status") != "exited":
+                raise RuntimeDockerError("standby Evaluator did not stop before input preparation")
+        self.resource_admission.transfer(evaluator.attempt_id, attempt_id,
+                                         nano_cpus=2_000_000_000, memory_bytes=4 * 1024**3)
+        with self._worker_owner_lock:
+            self._evaluator_owners[attempt_id] = evaluator.attempt_id
+        claimed = replace(evaluator, attempt_id=attempt_id, resource_owner=evaluator.attempt_id,
+                          generation=evaluator.generation + 1, parked=True)
+        self._register_lease(claimed, "evaluator")
+        return claimed
+
+    @timed("evaluator.environment_prepare", role="evaluator")
+    def _create_prepared_evaluator(self, owner_id: str, candidate: TrustedCandidate,
+                                   labels: Mapping[str, str], *, patch: bytes | None = None) -> DockerRuntimeEvaluator:
+        """Create standby mounts; a cold claim seals its patch before first start."""
+        self._validate_local_images()
+        private_task = self._private_task_bindings[candidate.candidate_id]
+        self._require_private_volume(private_task.volume_name)
+        try:
+            workspace, input_volume, evidence = [
+                self._create_volume(_resource_name(owner_id, "evaluator", kind), labels)
+                for kind in ("testbed", "input", "evidence")
+            ]
+            volumes = (workspace, input_volume, evidence)
+            prepared = self._prepare_m6_task(owner_id, candidate, private_task, labels) if self._m6_runtime else None
+            if prepared is not None:
+                volumes += (prepared.private_volume, prepared.kernel_volume)
+            mounts = {
+                _volume_name(workspace): {"bind": _WORKSPACE_ROOT, "mode": "rw"},
+                _volume_name(input_volume): {"bind": _INPUT_ROOT, "mode": "ro"},
+                _volume_name(evidence): {"bind": _EVIDENCE_ROOT, "mode": "rw"},
+                _volume_name(prepared.private_volume) if prepared else private_task.volume_name:
+                    {"bind": _PRIVATE_ROOT, "mode": "ro"},
+            }
+            if patch is not None:
+                self._stage_evaluator_input(candidate, owner_id, labels, input_volume, patch)
+            container = self._run_container(
+                candidate.definition.evaluator, name=_resource_name(owner_id, "evaluator", "container"),
+                labels=labels, volumes=mounts,
+                command=["-c", _EVALUATOR_STANDBY_SCRIPT, _EVALUATOR_WAIT_SCRIPT, self._evaluator_environment_key(candidate)],
+                entrypoint=["python3"],
+                environment={"REPOFIXLAB_EVALUATOR_KERNEL_SHA256": self._configuration.evaluator_kernel_sha256},
+            )
+            roots = _policy_writable_roots(candidate.definition.evaluator)
+            _inject_material(container, self._kernel_files, user=candidate.definition.evaluator.user, writable_roots=roots)
+            _publish_ready_marker(container, f"{_EVALUATOR_KERNEL_ROOT}/.ready.pending", f"{_EVALUATOR_KERNEL_ROOT}/.ready",
+                                  f"{self._configuration.evaluator_kernel_sha256}\n".encode("ascii"),
+                                  user=candidate.definition.evaluator.user, writable_roots=roots)
+            evaluator = DockerRuntimeEvaluator(owner_id, candidate, container, volumes, labels, mounts, input_volume, evidence, prepared)
+            self._check_evaluator_ready(evaluator, input_empty=patch is None)
+            return evaluator
+        except Exception:
+            self._recover_resources(owner_id)
+            raise
+
+    def _stage_evaluator_input(self, candidate: TrustedCandidate, owner_id: str, labels: Mapping[str, str],
+                               input_volume: object, patch: bytes, evaluator: DockerRuntimeEvaluator | None = None) -> None:
+        """Verify parked volumes and write exact input while the role is stopped."""
+        policy = replace(candidate.definition.evaluator, nano_cpus=2_000_000_000, memory_bytes=4 * 1024**3,
+                         memory_swap_bytes=4 * 1024**3, pids_limit=256)
+        mounts = {_volume_name(input_volume): {"bind": _INPUT_ROOT, "mode": "rw"}}
+        if evaluator is not None and evaluator.reset_evidence is not None:
+            mounts.update({_volume_name(root["volume"]): {"bind": f"/reset/volume-{index}", "mode": "rw"}
+                           for index, root in enumerate(self._mutable_roots(evaluator))
+                           if root["volume"] is not input_volume})
+        seed = self._run_container(policy, name=_resource_name(owner_id, "evaluator", "seed"), labels=labels,
+                                   volumes=mounts, command=["-c", _KEEPALIVE_SCRIPT], entrypoint=["python3"], environment={})
+        try:
+            if evaluator is not None and evaluator.reset_evidence is not None:
+                self._volume_reset(evaluator, verify_only=True, container=seed)
+            _inject_file(seed, f"{_INPUT_ROOT}/candidate.patch", patch, user=policy.user, writable_roots=(_INPUT_ROOT,))
+        finally:
+            _remove_container(seed)
+
+    @timed("evaluator.ready", role="evaluator")
+    def _check_evaluator_ready(self, evaluator: DockerRuntimeEvaluator, *, input_empty: bool = True) -> None:
+        """Verify physical policy, clean state, kernel and private task scope."""
+        policy = evaluator.candidate.definition.evaluator
+        self._check_role_container(evaluator.container, policy, evaluator.labels, evaluator.mounts)
+        config = getattr(evaluator.container, "attrs", {}).get("Config", {})
+        if (config.get("Entrypoint") != ["python3"]
+                or config.get("Cmd") != ["-c", _EVALUATOR_STANDBY_SCRIPT, _EVALUATOR_WAIT_SCRIPT,
+                                         self._evaluator_environment_key(evaluator.candidate)]):
+            raise RuntimeDockerError("Evaluator standby command drifted")
+        workspace = self._exec_json(evaluator.container, ["python3", "-c", _WORKER_READY_SCRIPT], user=policy.user)
+        if workspace != {"base_commit": evaluator.candidate.base_commit, "clean": True}:
+            raise RuntimeDockerError("Evaluator readiness workspace drifted")
+        ready = self._exec_json(evaluator.container, ["python3", "-c", _EVALUATOR_READY_SCRIPT], user=policy.user)
+        if ready != {"kernel_sha256": self._configuration.evaluator_kernel_sha256,
+                     "ready_marker": self._configuration.evaluator_kernel_sha256,
+                     "input_empty": input_empty, "evidence_empty": True, "activation_absent": True}:
+            raise RuntimeDockerError("Evaluator readiness kernel or empty state drifted")
+        if evaluator.prepared_m6_task is not None:
+            expected = {"spec.json": evaluator.prepared_m6_task.strict_spec_sha256,
+                        "eval.sh": evaluator.prepared_m6_task.official_eval_script_sha256}
+        else:
+            task = self._private_task_bindings[evaluator.candidate.candidate_id]
+            expected = {task.task_path: task.task_sha256}
+        for path, digest in expected.items():
+            if _verified_file_identity(evaluator.container, f"{_PRIVATE_ROOT}/{path}", user=policy.user).split(":", 1)[1] != digest:
+                raise RuntimeDockerError("Evaluator private task identity drifted")
+
+    def _start_pooled_evaluation(self, attempt_id: str, run_id: str, job_id: str, evaluation_id: str,
+                                 candidate: TrustedCandidate, patch: bytes) -> DockerRuntimeJob:
+        """Claim a standby environment, seal input, then activate its PID 1."""
+        for identifier in (run_id, job_id, evaluation_id):
+            if _IDENTIFIER.fullmatch(identifier) is None:
+                raise RuntimeDockerError("evaluation identity is malformed")
+        with ExitStack() as stack:
+            if self.worker_pool is not None:
+                stack.enter_context(self.worker_pool.demand())
+            evaluator = self.evaluator_pool.take(attempt_id, self._evaluator_environment_key(candidate))
+            cold = evaluator is None
+            if cold:
+                if not self._reserve_evaluator(attempt_id, candidate, wait=False):
+                    with self.evaluator_pool.demand():
+                        self._reserve_evaluator(attempt_id, candidate)
+                owner = f"warm-evaluator-{uuid4().hex}" if self._configuration.reuse_containers else attempt_id
+                labels = {**_labels(owner, candidate.candidate_id, "evaluator"),
+                          **({_EVALUATOR_POOL_LABEL: self._pool_namespace,
+                              _ENVIRONMENT_LABEL: self._evaluator_environment_key(candidate)} if self._configuration.reuse_containers else {})}
+                with self._worker_owner_lock:
+                    self._evaluator_owners[attempt_id] = owner
+                try:
+                    evaluator = self._create_prepared_evaluator(owner, candidate, labels, patch=patch)
+                except Exception:
+                    self._recover_resources(owner, reservation_id=attempt_id)
+                    raise
+                evaluator = replace(evaluator, attempt_id=attempt_id,
+                                    resource_owner=owner if self._configuration.reuse_containers else None, generation=1)
+                self._register_lease(evaluator, "evaluator")
+        owner_id = evaluator.resource_owner or attempt_id
+        try:
+            policy = candidate.definition.evaluator
+            if not cold:
+                self._stage_evaluator_input(candidate, owner_id, evaluator.labels, evaluator.input_volume, patch, evaluator)
+                self.resource_admission.transfer(attempt_id, attempt_id, nano_cpus=policy.nano_cpus,
+                                                 memory_bytes=policy.memory_bytes)
+                self._resume_role(evaluator, verify_volumes=False, input_empty=False)
+            digest = hashlib.sha256(patch).hexdigest()
+            if _verified_file_identity(evaluator.container, f"{_INPUT_ROOT}/candidate.patch", user=policy.user) != f"{len(patch)}:{digest}":
+                raise RuntimeDockerError("Evaluator candidate patch identity drifted")
+            prepared = evaluator.prepared_m6_task
+            private_task = self._private_task_bindings[candidate.candidate_id]
+            command = (["m6-candidate-patch", "execute"] if prepared else ["agent-patch"]) + [
+                "--private-spec", f"{_PRIVATE_ROOT}/spec.json" if prepared else f"{_PRIVATE_ROOT}/{private_task.task_path}",
+                "--private-root", _PRIVATE_ROOT, "--workspace", _WORKSPACE_ROOT,
+                "--candidate-root", _INPUT_ROOT, "--evidence-root", _EVIDENCE_ROOT,
+                "--private-spec-sha256", prepared.strict_spec_sha256 if prepared else private_task.task_sha256,
+                "--candidate-patch-sha256", digest, "--evaluation-id", evaluation_id,
+                "--job-id", job_id, "--run-id", run_id, "--attempt-id", attempt_id,
+                "--timeout-seconds", str(min(policy.timeout_seconds, 300)),
+            ]
+            if prepared:
+                command += ["--instance-id", candidate.instance_id, "--base-commit", candidate.base_commit]
+            activation = _canonical_bytes({"environment_sha256": self._evaluator_environment_key(candidate), "arguments": command})
+            roots = _policy_writable_roots(policy)
+            _inject_file(evaluator.container, f"{_EVALUATOR_KERNEL_ROOT}/.activation.pending", activation, user=policy.user, writable_roots=roots)
+            _publish_ready_marker(evaluator.container, f"{_EVALUATOR_KERNEL_ROOT}/.activation.pending", f"{_EVALUATOR_KERNEL_ROOT}/.activation",
+                                  activation, user=policy.user, writable_roots=roots)
+            return DockerRuntimeJob(attempt_id, run_id, job_id, evaluation_id, candidate, evaluator.container,
+                                    evaluator.volumes, evaluator.labels, evidence_volume=evaluator.evidence_volume,
+                                    prepared_m6_task=prepared, resource_owner=evaluator.resource_owner,
+                                    generation=evaluator.generation, evaluator=evaluator)
+        except Exception:
+            self._remove_resources(evaluator.container, evaluator.volumes, owner_id, reservation_id=attempt_id)
+            raise
+
+    @timed("runtime.preflight", role="controller")
     def preflight(
         self, candidate_id: str, instance_id: str
     ) -> RuntimePreflightManifest:
@@ -793,12 +1464,46 @@ class DockerRuntimeBackend:
             base_commit=candidate.base_commit,
         )
 
+    @timed("worker.prepare", role="worker")
     def prepare_worker(
         self, attempt_id: str, candidate_id: str, instance_id: str
     ) -> object:
         candidate = self._candidate(candidate_id, instance_id)
         self._validate_local_images()
-        labels = _labels(attempt_id, candidate_id, "worker")
+        if self.worker_pool is not None:
+            worker = self.worker_pool.take(attempt_id, self._worker_environment_key(candidate))
+            if worker is not None:
+                return worker
+        # Keep useful preparation when the cold stage already fits the budget.
+        if not self.resource_admission.try_acquire(attempt_id, candidate.definition.worker.nano_cpus,
+                                                   candidate.definition.worker.memory_bytes):
+            with ExitStack() as stack:
+                if self.worker_pool is not None:
+                    stack.enter_context(self.worker_pool.demand())
+                if self.evaluator_pool is not None:
+                    stack.enter_context(self.evaluator_pool.demand())
+                self.resource_admission.acquire(
+                    attempt_id, candidate.definition.worker.nano_cpus, candidate.definition.worker.memory_bytes,
+                )
+        owner = f"warm-worker-{uuid4().hex}" if self._configuration.reuse_containers else attempt_id
+        labels = {**_labels(owner, candidate_id, "worker"),
+                  **({_POOL_LABEL: self._pool_namespace, _ENVIRONMENT_LABEL: self._worker_environment_key(candidate)}
+                     if self._configuration.reuse_containers else {})}
+        with self._worker_owner_lock:
+            self._worker_owners[attempt_id] = owner
+        try:
+            worker = self._create_worker(owner, candidate, labels)
+        except Exception:
+            self._recover_resources(owner, reservation_id=attempt_id)
+            raise
+        worker = replace(worker, attempt_id=attempt_id,
+                         resource_owner=owner if self._configuration.reuse_containers else None, generation=1)
+        self._register_lease(worker, "worker")
+        return worker
+
+    def _create_worker(self, attempt_id: str, candidate: TrustedCandidate,
+                       labels: Mapping[str, str]) -> DockerRuntimeWorker:
+        """Build and check the same fresh environment for cold and warm paths."""
         volumes: list[object] = []
         container: object | None = None
         try:
@@ -822,27 +1527,7 @@ class DockerRuntimeBackend:
                 environment={},
             )
             worker_roots = _policy_writable_roots(candidate.definition.worker)
-            for relative, content in self._worker_files.items():
-                _inject_file(
-                    container,
-                    f"/tmp/{relative}",
-                    content,
-                    user=candidate.definition.worker.user,
-                    writable_roots=worker_roots,
-                )
-            output = self._exec_json(
-                container,
-                ["python3", _WORKER_ENTRY, "self-check"],
-                user=candidate.definition.worker.user,
-            )
-            if (
-                set(output)
-                != {"schema_version", "response_type", "aggregate_sha256"}
-                or output.get("schema_version") != "v1"
-                or output.get("response_type") != "runtime_worker_self_check"
-                or output.get("aggregate_sha256") != self._worker_aggregate
-            ):
-                raise RuntimeDockerError("worker helper self-check drifted")
+            _inject_material(container, self._worker_files, user=candidate.definition.worker.user, writable_roots=worker_roots)
             worker = DockerRuntimeWorker(
                 attempt_id=attempt_id,
                 candidate=candidate,
@@ -857,11 +1542,56 @@ class DockerRuntimeBackend:
                 or readiness.timed_out
             ):
                 raise RuntimeDockerError("worker repository tool readiness probe failed")
+            self._check_worker_ready(worker)
             return worker
         except Exception:
             self._remove_resources(container, tuple(volumes), attempt_id)
             raise
 
+    @timed("worker.ready", role="worker")
+    def _check_worker_ready(self, worker: DockerRuntimeWorker) -> None:
+        """Inspect physical policy and clean Git state before publishing or claiming."""
+        policy = worker.candidate.definition.worker
+        mounts = {_volume_name(volume): {"bind": mount.target, "mode": "rw"}
+                  for volume, mount in zip(worker.volumes, policy.managed_volumes)}
+        self._check_role_container(worker.container, policy, worker.labels, mounts)
+        output = self._exec_json(worker.container, ["python3", "-c", _WORKER_READY_SCRIPT], user=policy.user)
+        if output != {"base_commit": worker.candidate.base_commit, "clean": True}:
+            raise RuntimeDockerError("Worker readiness workspace drifted")
+        helper = self._exec_json(worker.container, ["python3", _WORKER_ENTRY, "self-check"], user=policy.user)
+        if helper != {"schema_version": "v1", "response_type": "runtime_worker_self_check",
+                      "aggregate_sha256": self._worker_aggregate}:
+            raise RuntimeDockerError("worker helper self-check drifted")
+
+    def _check_role_container(self, container: object, policy: RoleLaunchPolicy,
+                              labels: Mapping[str, str], mounts: Mapping[str, object], *, running: bool = True) -> None:
+        """Check the actual container against a trusted role and fixed mounts."""
+        _reload(container)
+        attrs = getattr(container, "attrs", {})
+        host = attrs.get("HostConfig", {})
+        config = attrs.get("Config", {})
+        expected = {"NanoCpus": policy.nano_cpus, "Memory": policy.memory_bytes,
+                    "MemorySwap": policy.memory_swap_bytes, "PidsLimit": policy.pids_limit,
+                    "NetworkMode": "none", "ReadonlyRootfs": True, "Privileged": False,
+                    "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"]}
+        if (attrs.get("Image") != policy.image_id or _container_state(container).get("Status") != ("running" if running else "exited")
+                or config.get("User") != policy.user
+                or any(config.get("Labels", {}).get(name) != value for name, value in labels.items())
+                or any(host.get(name) != value for name, value in expected.items())
+                or host.get("CapAdd") or host.get("Devices") or host.get("PortBindings")
+                or sorted(host.get("Binds") or []) != sorted(f"{source}:{mount['bind']}:{mount['mode']}"
+                                                             for source, mount in mounts.items())
+                or host.get("Tmpfs") != {mount.target: mount.options for mount in policy.tmpfs}):
+            raise RuntimeDockerError("runtime readiness container policy drifted: " + str({
+                "image_matches": attrs.get("Image") == policy.image_id,
+                "running": _container_state(container).get("Status") == "running",
+                "user_matches": config.get("User") == policy.user,
+                "labels_match": all(config.get("Labels", {}).get(name) == value for name, value in labels.items()),
+                "host_mismatches": {name: host.get(name) for name, value in expected.items() if host.get(name) != value},
+                "binds": host.get("Binds"), "tmpfs": host.get("Tmpfs"),
+            }))
+
+    @timed("worker.tool", role="worker")
     def execute_tool(
         self,
         worker: object,
@@ -869,6 +1599,7 @@ class DockerRuntimeBackend:
         arguments: Mapping[str, object],
     ) -> RuntimeToolResult:
         handle = _worker_handle(worker)
+        self._assert_lease(handle, "worker")
         encoded = base64.b64encode(
             _canonical_bytes({"tool": tool, "input": dict(arguments)})
         ).decode("ascii")
@@ -889,8 +1620,10 @@ class DockerRuntimeBackend:
             raise RuntimeDockerError("worker tool result is malformed")
         return _runtime_tool_result(result, tool, arguments)
 
+    @timed("worker.verification_catalog", role="worker")
     def verification_catalog(self, worker: object) -> RuntimeVerificationCatalog:
         handle = _worker_handle(worker)
+        self._assert_lease(handle, "worker")
         output = self._exec_json(
             handle.container,
             ["python3", _WORKER_ENTRY, "verification-catalog"],
@@ -946,6 +1679,7 @@ class DockerRuntimeBackend:
             entries=tuple(parsed_entries),
         )
 
+    @timed("worker.verification", role="worker")
     def verify_catalog_entry(
         self,
         worker: object,
@@ -954,6 +1688,7 @@ class DockerRuntimeBackend:
         patch: bytes,
     ) -> RuntimeVerificationResult:
         handle = _worker_handle(worker)
+        self._assert_lease(handle, "worker")
         encoded = base64.b64encode(
             _canonical_bytes(
                 {
@@ -980,8 +1715,10 @@ class DockerRuntimeBackend:
             raise RuntimeDockerError("worker verification result is malformed")
         return _runtime_verification_result(result, catalog.catalog_id, candidate_id)
 
+    @timed("worker.snapshot", role="worker")
     def snapshot_patch(self, worker: object) -> RuntimeSnapshotEvidence:
         handle = _worker_handle(worker)
+        self._assert_lease(handle, "worker")
         output = self._exec_json(
             handle.container,
             ["python3", _WORKER_ENTRY, "snapshot"],
@@ -989,14 +1726,20 @@ class DockerRuntimeBackend:
         )
         return _snapshot_evidence(output)
 
+    @timed("worker.cleanup", role="worker")
     def destroy_worker(self, worker: object) -> RuntimeCleanupResult:
         handle = _worker_handle(worker)
+        self._assert_lease(handle, "worker")
+        if self._configuration.reuse_containers:
+            return self._return_role(handle, "worker")
         return self._remove_resources(
             handle.container,
             handle.volumes,
-            handle.attempt_id,
+            handle.resource_owner or handle.attempt_id,
+            reservation_id=handle.attempt_id,
         )
 
+    @timed("evaluator.prepare", role="evaluator")
     def start_evaluation(
         self,
         attempt_id: str,
@@ -1008,6 +1751,17 @@ class DockerRuntimeBackend:
         patch: bytes,
     ) -> object:
         candidate = self._candidate(candidate_id, instance_id)
+        if self.evaluator_pool is not None:
+            return self._start_pooled_evaluation(attempt_id, run_id, job_id, evaluation_id, candidate, patch)
+        # Helpers finish before the role starts; grading begins after role exit.
+        if self.worker_pool is not None:
+            with self.worker_pool.demand():
+                self._reserve_evaluator(attempt_id, candidate)
+        else:
+            self._reserve_evaluator(attempt_id, candidate)
+        # Close must also recover cold jobs that have not reached artifact ACK.
+        with self._worker_owner_lock:
+            self._evaluator_owners[attempt_id] = attempt_id
         if self._m6_runtime:
             return self._start_m6_evaluation(
                 attempt_id,
@@ -1129,14 +1883,7 @@ class DockerRuntimeBackend:
             evaluator_roots = _policy_writable_roots(
                 candidate.definition.evaluator
             )
-            for relative, content in self._kernel_files.items():
-                _inject_file(
-                    evaluator,
-                    f"/tmp/{relative}",
-                    content,
-                    user=candidate.definition.evaluator.user,
-                    writable_roots=evaluator_roots,
-                )
+            _inject_material(evaluator, self._kernel_files, user=candidate.definition.evaluator.user, writable_roots=evaluator_roots)
             _publish_ready_marker(
                 evaluator,
                 f"{_EVALUATOR_KERNEL_ROOT}/.ready.pending",
@@ -1166,6 +1913,15 @@ class DockerRuntimeBackend:
             self._remove_resources(evaluator, tuple(created), attempt_id)
             raise
 
+    def _reserve_evaluator(self, attempt_id: str, candidate: TrustedCandidate, *, wait: bool = True) -> bool:
+        """Reserve the largest successive stage, optionally without queueing."""
+        cpu = max(candidate.definition.evaluator.nano_cpus, 2_000_000_000) if self._m6_runtime or self.evaluator_pool is not None else candidate.definition.evaluator.nano_cpus
+        memory = max(candidate.definition.evaluator.memory_bytes, 4 * 1024**3) if self._m6_runtime or self.evaluator_pool is not None else candidate.definition.evaluator.memory_bytes
+        if not wait:
+            return self.resource_admission.try_acquire(attempt_id, cpu, memory)
+        self.resource_admission.acquire(attempt_id, cpu, memory)
+        return True
+
     def _m6_repository(self, instance_id: str) -> str:
         owner, separator, _task = instance_id.partition("__")
         repositories = {
@@ -1190,6 +1946,8 @@ class DockerRuntimeBackend:
         user: str,
         cap_add: tuple[str, ...] = (),
     ) -> object:
+        owner = labels[_ATTEMPT_LABEL]
+        self.resource_admission.check_cancelled(owner)
         container = self._client.containers.run(
             _M6_PRISTINE_IMAGE,
             command,
@@ -1222,8 +1980,14 @@ class DockerRuntimeBackend:
         container_id = getattr(container, "id", None)
         if not isinstance(container_id, str) or _CONTAINER_ID.fullmatch(container_id) is None:
             raise RuntimeDockerError("M6 pristine container ID is malformed")
+        try:
+            self.resource_admission.check_cancelled(owner)
+        except RuntimeAdmissionCancelled:
+            _remove_container(container)
+            raise
         return container
 
+    @timed("kernel.prepare", role="evaluator")
     def _create_m6_kernel_volume(
         self,
         attempt_id: str,
@@ -1238,6 +2002,10 @@ class DockerRuntimeBackend:
             _M6_PRISTINE_IMAGE,
             ["-c", "sleep 30"],
             entrypoint=["/bin/sh"],
+            name=_resource_name(attempt_id, "m6", "kernel-initializer"),
+            network_mode="none", read_only=True, cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            nano_cpus=2_000_000_000, mem_limit="4g", memswap_limit="4g", pids_limit=256,
             volumes={_volume_name(volume): {"bind": _M6_KERNEL_ROOT, "mode": "rw"}},
             labels=dict(labels),
         )
@@ -1248,6 +2016,7 @@ class DockerRuntimeBackend:
             _remove_container(initializer)
         return volume
 
+    @timed("private.prepare", role="evaluator")
     def _prepare_m6_task(
         self,
         attempt_id: str,
@@ -1332,6 +2101,7 @@ class DockerRuntimeBackend:
                 kernel_volume=kernel_volume,
                 strict_spec_sha256=strict_spec_sha256,
                 repo=repository,
+                official_eval_script_sha256=str(report["official_eval_script_sha256"]),
             )
         except Exception:
             if prepared_volume is not None:
@@ -1434,14 +2204,7 @@ class DockerRuntimeBackend:
                 environment={"REPOFIXLAB_EVALUATOR_KERNEL_SHA256": self._configuration.evaluator_kernel_sha256},
             )
             evaluator_roots = _policy_writable_roots(candidate.definition.evaluator)
-            for relative, content in self._kernel_files.items():
-                _inject_file(
-                    evaluator,
-                    f"/tmp/{relative}",
-                    content,
-                    user=candidate.definition.evaluator.user,
-                    writable_roots=evaluator_roots,
-                )
+            _inject_material(evaluator, self._kernel_files, user=candidate.definition.evaluator.user, writable_roots=evaluator_roots)
             _publish_ready_marker(
                 evaluator,
                 f"{_EVALUATOR_KERNEL_ROOT}/.ready.pending",
@@ -1471,11 +2234,17 @@ class DockerRuntimeBackend:
             self._remove_resources(evaluator, tuple(created), attempt_id)
             raise
 
+    @timed("evaluator.official_grade", role="evaluator")
     def _finalize_m6_evaluation(self, handle: DockerRuntimeJob) -> None:
         prepared = handle.prepared_m6_task
         evidence = handle.evidence_volume
         if prepared is None or evidence is None:
             raise RuntimeDockerError("M6 evaluation job lacks sealed finalization inputs")
+        _reload(handle.container)
+        if _container_state(handle.container).get("Status") != "exited":
+            raise RuntimeDockerError("official grading requires a stopped Evaluator")
+        self.resource_admission.transfer(handle.attempt_id, handle.attempt_id,
+                                         nano_cpus=2_000_000_000, memory_bytes=4 * 1024**3)
         finalizer = self._run_m6_pristine(
             [
                 "-m", "repofixlab_evaluator.m6_candidate_patch", "finalize",
@@ -1506,6 +2275,7 @@ class DockerRuntimeBackend:
 
     def get_job(self, job: object) -> RuntimeJobStatus:
         handle = _job_handle(job)
+        self._assert_lease(handle, "evaluator")
         _reload(handle.container)
         state = _container_state(handle.container)
         status = state.get("Status")
@@ -1519,7 +2289,8 @@ class DockerRuntimeBackend:
         if isinstance(exit_code, bool) or not isinstance(exit_code, int):
             raise RuntimeDockerError("evaluator exit code is malformed")
         if exit_code != 0:
-            return RuntimeJobStatus("failed", False, "evaluator_process_failed")
+            return RuntimeJobStatus("failed", False,
+                                    "evaluator_oom" if state.get("OOMKilled") is True else "evaluator_process_failed")
         if handle.prepared_m6_task is not None and not handle.m6_finalized:
             try:
                 self._finalize_m6_evaluation(handle)
@@ -1535,8 +2306,10 @@ class DockerRuntimeBackend:
             raise RuntimeDockerError("evaluation resolution is malformed")
         return RuntimeJobStatus("completed", resolved, None)
 
+    @timed("artifact.read", role="evaluator")
     def get_artifacts(self, job: object) -> Mapping[str, bytes]:
         handle = _job_handle(job)
+        self._assert_lease(handle, "evaluator")
         if handle.artifacts is None:
             artifacts = {
                 name: _read_container_file(
@@ -1549,17 +2322,41 @@ class DockerRuntimeBackend:
             handle.artifacts = artifacts
         return MappingProxyType(dict(handle.artifacts))
 
+    @timed("evaluator.cleanup", role="evaluator")
     def acknowledge_artifacts(self, job: object) -> RuntimeCleanupResult:
         handle = _job_handle(job)
+        self._assert_lease(handle, "evaluator")
         if handle.artifacts is None:
             self.get_artifacts(handle)
+        if self._configuration.reuse_containers and handle.evaluator is not None:
+            return self._return_role(handle.evaluator, "evaluator")
         return self._remove_resources(
             handle.container,
             handle.volumes,
-            handle.attempt_id,
+            handle.resource_owner or handle.attempt_id,
+            reservation_id=handle.attempt_id,
         )
 
+    @timed("runtime.recovery", role="controller")
     def recover_attempt(self, attempt_id: str) -> RuntimeCleanupResult:
+        """Audit every owned role even when a speculative pool cleanup fails."""
+        errors = []
+        for role, pool in (("worker", self.worker_pool), ("evaluator", self.evaluator_pool)):
+            if pool is not None:
+                try:
+                    pool.cancel(attempt_id, wait=True)
+                except RuntimeError as error:
+                    errors.append(f"{role}_pool_cleanup:{type(error).__name__}")
+        with self._worker_owner_lock:
+            owner_id = self._worker_owners.get(attempt_id) or self._evaluator_owners.get(attempt_id) or attempt_id
+        cleanup = self._recover_resources(owner_id, reservation_id=attempt_id)
+        if cleanup.clean:
+            with self._worker_owner_lock:
+                self._worker_owners.pop(attempt_id, None)
+                self._evaluator_owners.pop(attempt_id, None)
+        return replace(cleanup, errors=cleanup.errors + tuple(errors))
+
+    def _recover_resources(self, attempt_id: str, *, reservation_id: str | None = None) -> RuntimeCleanupResult:
         errors: list[str] = []
         try:
             containers = list(
@@ -1585,11 +2382,50 @@ class DockerRuntimeBackend:
                 errors.append(f"volume_remove:{type(error).__name__}")
         residual_containers, residual_volumes, audit_errors = self._audit(attempt_id)
         errors.extend(audit_errors)
-        return RuntimeCleanupResult(
+        cleanup = RuntimeCleanupResult(
             residual_container_count=residual_containers,
             residual_volume_count=residual_volumes,
             errors=tuple(errors),
         )
+        if cleanup.clean:
+            self.resource_admission.release(reservation_id or attempt_id)
+            with self._worker_owner_lock:
+                for key, value in list(self._active_generations.items()):
+                    if value[0] == (reservation_id or attempt_id):
+                        self._active_generations.pop(key)
+        return cleanup
+
+    def cancel_pending(self, attempt_id: str) -> None:
+        """Interrupt owned execution; ordered cleanup retains the reservation."""
+        self.resource_admission.cancel(attempt_id)
+        with self._worker_owner_lock:
+            owners = {self._worker_owners.get(attempt_id, attempt_id),
+                      self._evaluator_owners.get(attempt_id, attempt_id)}
+        # Interrupt a resumed claim's mapped physical owner before cancellation.
+        for owner in owners:
+            self._interrupt_owner(owner)
+        if self.worker_pool is not None:
+            self.worker_pool.cancel(attempt_id, retire_ready=False)
+        if self.evaluator_pool is not None:
+            self.evaluator_pool.cancel(attempt_id, retire_ready=False)
+
+    def _interrupt_owner(self, owner_id: str) -> None:
+        """Stop only this trusted physical owner, leaving removal to its audit."""
+        self.resource_admission.cancel(owner_id)
+        try:
+            containers = self._client.containers.list(all=True, filters=_filters(owner_id))
+            for container in containers:
+                try:
+                    _reload(container)
+                    if _container_state(container).get("Status") in {"running", "paused", "restarting"}:
+                        container.kill()
+                except Exception:
+                    # Completion can race kill. Recovery still force-removes
+                    # every owned resource and releases only after a clean audit.
+                    continue
+        except Exception:
+            # A failed Docker lookup cannot authorize release of this charge.
+            return
 
     def _candidate(self, candidate_id: str, instance_id: str) -> TrustedCandidate:
         task_lock = self._task_locks.get(candidate_id)
@@ -1600,6 +2436,7 @@ class DockerRuntimeBackend:
             raise RuntimeDockerError("runtime instance is not TaskEnvironmentLock bound")
         return candidate
 
+    @timed("image.validate")
     def _validate_local_images(self) -> None:
         validate_candidate_images(self._client, self._catalog)
 
@@ -1615,6 +2452,7 @@ class DockerRuntimeBackend:
             raise RuntimeDockerError("trusted private task volume identity drifted")
         return volume
 
+    @timed("volume.create")
     def _create_volume(
         self, name: str, labels: Mapping[str, str]
     ) -> object:
@@ -1633,7 +2471,10 @@ class DockerRuntimeBackend:
         command: list[str],
         entrypoint: list[str],
         environment: Mapping[str, str],
+        cap_add: tuple[str, ...] = (),
     ) -> object:
+        owner = labels[_ATTEMPT_LABEL]
+        self.resource_admission.check_cancelled(owner)
         container = self._client.containers.run(
             policy.image_id,
             command,
@@ -1646,7 +2487,7 @@ class DockerRuntimeBackend:
             network_mode="none",
             read_only=True,
             cap_drop=["ALL"],
-            cap_add=[],
+            cap_add=list(cap_add),
             security_opt=["no-new-privileges:true"],
             privileged=False,
             devices=[],
@@ -1666,6 +2507,11 @@ class DockerRuntimeBackend:
         container_id = getattr(container, "id", None)
         if not isinstance(container_id, str) or _CONTAINER_ID.fullmatch(container_id) is None:
             raise RuntimeDockerError("Docker container ID is malformed")
+        try:
+            self.resource_admission.check_cancelled(owner)
+        except RuntimeAdmissionCancelled:
+            _remove_container(container)
+            raise
         return container
 
     def _exec_json(
@@ -1699,6 +2545,7 @@ class DockerRuntimeBackend:
         container: object | None,
         volumes: tuple[object, ...],
         attempt_id: str,
+        *, reservation_id: str | None = None,
     ) -> RuntimeCleanupResult:
         errors: list[str] = []
         if container is not None:
@@ -1713,11 +2560,20 @@ class DockerRuntimeBackend:
                 errors.append(f"volume_remove:{type(error).__name__}")
         residual_containers, residual_volumes, audit_errors = self._audit(attempt_id)
         errors.extend(audit_errors)
-        return RuntimeCleanupResult(
+        cleanup = RuntimeCleanupResult(
             residual_container_count=residual_containers,
             residual_volume_count=residual_volumes,
             errors=tuple(errors),
         )
+        if cleanup.clean:
+            self.resource_admission.release(reservation_id or attempt_id)
+            with self._worker_owner_lock:
+                self._worker_owners.pop(reservation_id or attempt_id, None)
+                self._evaluator_owners.pop(reservation_id or attempt_id, None)
+                for key, value in list(self._active_generations.items()):
+                    if value[0] == (reservation_id or attempt_id):
+                        self._active_generations.pop(key)
+        return cleanup
 
     def _audit(self, attempt_id: str) -> tuple[int, int, list[str]]:
         errors: list[str] = []
@@ -1803,6 +2659,20 @@ def _injection_binding(
     return max(matches, key=lambda item: len(item[0]))
 
 
+@timed("input.inject")
+def _inject_material(container: object, files: Mapping[str, bytes], *, user: str,
+                      writable_roots: tuple[str, ...]) -> None:
+    """Transfer trusted tools once, then verify their existing aggregate at readiness."""
+    for relative in files:
+        _injection_binding(f"/tmp/{relative}", writable_roots)
+    bundle = "/tmp/repofixlab-material.tar"
+    _inject_file(container, bundle, _tar_bytes(files), user=user, writable_roots=writable_roots)
+    observed = _exec_text_static(container, ["python3", "-c", _MATERIAL_WRITE_SCRIPT, "/tmp", bundle], user=user)
+    if observed.strip() != str(len(files)):
+        raise RuntimeDockerError("trusted material extraction drifted")
+
+
+@timed("input.inject")
 def _inject_file(
     container: object,
     target: str,
@@ -1895,6 +2765,7 @@ def _verified_file_identity(container: object, path: str, *, user: str) -> str:
     ).strip()
 
 
+@timed("kernel.ready")
 def _publish_ready_marker(
     container: object,
     source: str,

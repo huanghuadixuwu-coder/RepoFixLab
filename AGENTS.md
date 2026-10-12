@@ -157,6 +157,14 @@ Attribution:
 
 5. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the tag workflow after fixing CI or transient npm issues. Do not rerun `npm run release:patch` or `npm run release:minor` for the same version.
 
+## RepoFix Runtime Iteration
+
+- For RepoFix concurrency, environment prewarming, container pooling, or reset reuse work, first read `docs/plans/repofixlab-runtime-iteration.md` in full.
+- Use its confirmed goal, frozen skill baseline, requirements, and progress as the execution contract.
+- Execute one workflow per user request. After acceptance, update the same document with evidence, remaining issues, and the next workflow, then end the turn.
+- When the user asks to continue, first resume an in-progress or blocked active workflow; start the recorded next workflow only when no active workflow remains. Verify prior acceptance and actual workspace state first.
+- Changes to the final goal or removal of a required workflow need explicit user confirmation and a spec update.
+
 ## User Override
 
 If the user's instructions conflict with any rule in this document, ask for explicit confirmation before overriding. Only then execute their instructions.

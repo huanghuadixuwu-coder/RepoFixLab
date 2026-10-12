@@ -26,7 +26,7 @@ function record(repo: string, index: number): string {
 }
 
 function metadata(): string {
-	return [
+	return `${[
 		...Array.from({ length: 6 }, (_, index) => record("axios/axios", index)),
 		...Array.from({ length: 5 }, (_, index) => record("babel/babel", index)),
 		...Array.from({ length: 5 }, (_, index) => record("facebook/docusaurus", index)),
@@ -34,7 +34,7 @@ function metadata(): string {
 		...Array.from({ length: 3 }, (_, index) => record("mrdoob/three.js", index)),
 		...Array.from({ length: 17 }, (_, index) => record("preactjs/preact", index)),
 		...Array.from({ length: 5 }, (_, index) => record("vuejs/core", index)),
-	].join("\n") + "\n";
+	].join("\n")}\n`;
 }
 
 function eligibility(candidateSamplingMetadataSha256 = "b".repeat(64)) {

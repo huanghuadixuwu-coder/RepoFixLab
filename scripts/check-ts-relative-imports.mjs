@@ -1,24 +1,18 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import ts from "typescript";
 
 const ignoredDirectories = new Set([".git", "coverage", "dist", "node_modules"]);
-const files = [];
-
-function collectTypescriptFiles(directory) {
-	for (const entry of readdirSync(directory, { withFileTypes: true })) {
-		if (entry.isDirectory()) {
-			if (!ignoredDirectories.has(entry.name)) {
-				collectTypescriptFiles(join(directory, entry.name));
-			}
-			continue;
-		}
-
-		if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
-			files.push(join(directory, entry.name));
-		}
-	}
-}
+// Audit repository files, including new source files, while respecting Git ignores.
+const files = [
+	...new Set(
+		execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { encoding: "utf8" })
+			.split("\0")
+			.filter((file) =>
+				file.endsWith(".ts") && !file.endsWith(".d.ts") && !file.split("/").some((part) => ignoredDirectories.has(part)),
+			),
+	),
+];
 
 function isRelativeJavaScriptSpecifier(specifier) {
 	return /^\.\.?\//.test(specifier) && /\.js(?:[?#].*)?$/.test(specifier);
@@ -31,8 +25,6 @@ function getImportTypeSpecifier(node) {
 }
 
 const failures = [];
-
-collectTypescriptFiles(".");
 
 for (const file of files.sort()) {
 	const sourceText = readFileSync(file, "utf8");

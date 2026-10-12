@@ -1,25 +1,20 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies"];
 const exactVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const ignoredDirectories = new Set([".git", "dist", "node_modules"]);
-const packageJsonFiles = [];
-
-function collectPackageJsonFiles(directory) {
-	for (const entry of readdirSync(directory, { withFileTypes: true })) {
-		if (entry.isDirectory()) {
-			if (!ignoredDirectories.has(entry.name)) {
-				collectPackageJsonFiles(join(directory, entry.name));
-			}
-			continue;
-		}
-
-		if (entry.isFile() && entry.name === "package.json") {
-			packageJsonFiles.push(join(directory, entry.name));
-		}
-	}
-}
+// Audit tracked manifests and new, non-ignored manifests. Downloaded repository
+// caches follow .gitignore, while a new workspace dependency is checked immediately.
+const packageJsonFiles = [
+	...new Set(
+		execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "**/package.json", "package.json"], {
+			encoding: "utf8",
+		})
+			.split("\0")
+			.filter((file) => file && !file.split("/").some((part) => ignoredDirectories.has(part))),
+	),
+];
 
 function isInternalWorkspaceDependency(name) {
 	return name.startsWith("@earendil-works/pi-");
@@ -38,8 +33,6 @@ function getVersionSpecifier(specifier) {
 }
 
 const failures = [];
-
-collectPackageJsonFiles(".");
 
 for (const file of packageJsonFiles.sort()) {
 	const packageJson = JSON.parse(readFileSync(file, "utf8"));

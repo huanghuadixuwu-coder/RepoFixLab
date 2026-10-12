@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import { HttpRepoToolTransport, type RepoToolTransport } from "../controller/client.ts";
 
-const DEFAULT_TIMEOUT_MS = 310_000;
+// Cover a 300-second admission wait plus one bounded runtime operation.
+const DEFAULT_TIMEOUT_MS = 650_000;
 const DEFAULT_RESPONSE_LIMIT = 12_000_000;
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA1 = /^[a-f0-9]{40}$/;

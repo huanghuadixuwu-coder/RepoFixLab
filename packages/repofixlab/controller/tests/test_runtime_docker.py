@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import base64
+from contextlib import redirect_stdout
 import hashlib
 import io
 import json
@@ -12,6 +13,7 @@ import sys
 import tarfile
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +34,8 @@ from repofixlab_controller.runtime_docker import (  # noqa: E402
     RuntimeDockerConfiguration,
     RuntimeDockerError,
     evaluator_kernel_aggregate,
+    _MATERIAL_WRITE_SCRIPT,
+    _tar_bytes,
 )
 from repofixlab_controller.runtime_journal import (  # noqa: E402
     RuntimeOperationJournal,
@@ -105,7 +109,7 @@ class _InjectionStream:
     def shutdown(self, direction: int) -> None:
         if direction != 1:
             raise AssertionError("stdin injection shutdown direction drifted")
-        self.container.files[self.target] = bytes(self.content)
+        self.container.write_file(self.target, bytes(self.content))
         if self.container.kind == "evaluator" and self.target.endswith("/.ready"):
             self.container.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
 
@@ -126,6 +130,8 @@ class _RuntimeVolume:
         self.name = name
         self.labels = dict(labels)
         self.trusted = trusted
+        self.files: dict[str, bytes] = {}
+        self.identities: dict[str, str] = {}
         self.removed = False
 
     def remove(self, *, force: bool = False) -> None:
@@ -171,12 +177,12 @@ class _RuntimeVolumes:
         return volume
 
     def list(self, *, filters: Mapping[str, object]) -> list[_RuntimeVolume]:
-        attempt_id = _attempt_filter(filters)
+        _attempt_filter(filters)
         return [
             volume
             for volume in self.created
             if not volume.removed
-            and volume.labels.get("io.repofixlab.runtime.attempt-id") == attempt_id
+            and _matches_labels(volume.labels, filters)
         ]
 
 
@@ -196,29 +202,50 @@ class _RuntimeContainer:
         self.command = list(command)
         self.removed = False
         self.files: dict[str, bytes] = {}
+        self.mounts: dict[str, tuple[_RuntimeVolume, str]] = {}
         self.attrs: dict[str, object] = {
             "State": {"Status": "running", "ExitCode": 0}
         }
         self.artifacts: dict[str, bytes] = {}
-        if kind == "evaluator":
-            arguments = command[3:]
-            identities = {
-                option: arguments[arguments.index(option) + 1]
-                for option in ("--run-id", "--attempt-id", "--job-id", "--evaluation-id")
-            }
-            self.artifacts = {
-                "evaluation.json": _canonical_bytes(
-                    {
-                        "schema_version": "v1",
-                        "resolved": True,
-                        **{name[2:].replace("-", "_"): value for name, value in identities.items()},
-                    }
-                ),
-                "evaluator.log": b"strict fake evaluator completed\n",
-                "patch-apply.json": _canonical_bytes(
-                    {"schema_version": "v1", "applied": True}
-                ),
-            }
+        if kind == "evaluator" and "--run-id" in command:
+            self._prepare_artifacts(command[3:])
+
+    def _prepare_artifacts(self, arguments: list[str]) -> None:
+        if any(item.kind == "worker" and not item.removed and item.labels["io.repofixlab.runtime.attempt-id"] == arguments[arguments.index("--attempt-id") + 1]
+               for item in self.collection.created):
+            raise AssertionError("evaluation activated before its Worker was cleaned")
+        identities = {
+            option: arguments[arguments.index(option) + 1]
+            for option in ("--run-id", "--attempt-id", "--job-id", "--evaluation-id")
+        }
+        self.artifacts = {
+            "evaluation.json": _canonical_bytes(
+                {"schema_version": "v1", "resolved": True,
+                 **{name[2:].replace("-", "_"): value for name, value in identities.items()}}
+            ),
+            "evaluator.log": b"strict fake evaluator completed\n",
+            "patch-apply.json": _canonical_bytes({"schema_version": "v1", "applied": True}),
+        }
+
+    def write_file(self, path: str, content: bytes) -> None:
+        for root, (volume, mode) in self.mounts.items():
+            if path.startswith(root + "/"):
+                if mode != "rw":
+                    raise AssertionError("injection into a read-only mount")
+                volume.files[path[len(root) + 1:]] = content
+                return
+        self.files[path] = content
+
+    def file_identity(self, path: str) -> str:
+        for root, (volume, _mode) in self.mounts.items():
+            if path.startswith(root + "/"):
+                relative = path[len(root) + 1:]
+                if relative in volume.identities:
+                    return volume.identities[relative]
+                content = volume.files[relative]
+                return f"{len(content)}:{hashlib.sha256(content).hexdigest()}"
+        content = self.files[path]
+        return f"{len(content)}:{hashlib.sha256(content).hexdigest()}"
 
     def put_archive(self, path: str, content: bytes) -> bool:
         files = _archive_files(content)
@@ -285,17 +312,46 @@ class _RuntimeContainer:
         ):
             raise AssertionError("runtime exec safety policy drifted")
         self.collection.events.append(f"container.exec:{self.kind}")
+        if len(command) == 5 and "material entry is not a regular file" in command[2]:
+            files = _archive_files(self.files.pop(command[4]))
+            self.files.update({f"{command[3]}/{name}": content for name, content in files.items()})
+            return _ExecResult(0, ((str(len(files)) + "\n").encode(), b""))
+        if len(command) == 4 and "def tree_identity" in command[2]:
+            roots = []
+            for item in json.loads(command[3]):
+                volume = self.mounts[item["destination"]][0]
+                if volume.files:
+                    return _ExecResult(1, (b"", b"idle volume contamination"))
+                roots.append({"root": item["root"], **({"empty": True} if item["source"] is None else
+                    {"baseline": item["baseline"], "restored": item["baseline"]})})
+            return _ExecResult(0, (_canonical_bytes({"roots": roots, "verified": True}), b""))
+        if len(command) == 3 and "git('status'" in command[2]:
+            return _ExecResult(0, (_canonical_bytes({"base_commit": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b", "clean": True}), b""))
+        if len(command) == 3 and "tmpfs_empty" in command[2]:
+            return _ExecResult(0, (_canonical_bytes({"tmpfs_empty": not self.files}), b""))
         if len(command) == 4 and "descriptor = os.open(sys.argv[1]" in command[2]:
-            content = self.files[command[3]]
-            identity = f"{len(content)}:{hashlib.sha256(content).hexdigest()}\n"
+            identity = self.file_identity(command[3]) + "\n"
             return _ExecResult(0, (identity.encode("ascii"), b""))
+        if len(command) == 3 and "activation_absent" in command[2]:
+            entries = [{"path": path.removeprefix("/tmp/repofixlab-runtime/repofixlab_evaluator/"), "bytes": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest()}
+                       for path, content in sorted(self.files.items()) if path.startswith("/tmp/repofixlab-runtime/repofixlab_evaluator/")]
+            ready = {"kernel_sha256": hashlib.sha256(_canonical_bytes({"files": entries})).hexdigest(),
+                     "ready_marker": self.files["/tmp/repofixlab-runtime/.ready"].decode().strip(),
+                     "input_empty": not self.mounts["/run/repofixlab/input"][0].files,
+                     "evidence_empty": not self.mounts["/run/repofixlab/evidence"][0].files,
+                     "activation_absent": not any(path.startswith("/tmp/repofixlab-runtime/.activation") for path in self.files)}
+            return _ExecResult(0, (_canonical_bytes(ready), b""))
         if len(command) == 7 and "os.link(source, target" in command[2]:
             content = self.files.pop(command[3])
             if len(content) != int(command[5]) or hashlib.sha256(content).hexdigest() != command[6]:
                 raise AssertionError("runtime ready marker identity drifted")
             self.files[command[4]] = content
-            if self.kind == "evaluator":
-                self.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+            if self.kind == "evaluator" and command[4].endswith("/.activation"):
+                self._prepare_artifacts(json.loads(content)["arguments"])
+                self.attrs["State"] = {"Status": "exited", "ExitCode": 0}
+            elif self.kind == "evaluator" and "--run-id" in self.command:
+                self.attrs["State"] = {"Status": "exited", "ExitCode": 0}
             return _ExecResult(0, ((command[6] + "\n").encode("ascii"), b""))
         if command[-1:] == ["self-check"]:
             entries = []
@@ -327,6 +383,15 @@ class _RuntimeContainer:
         if len(command) == 4 and command[2] == "tool":
             request = json.loads(base64.b64decode(command[3], validate=True))
             tool = request["tool"]
+            metadata = {}
+            if tool == "repo_read":
+                digest = hashlib.sha256(b"strict fake output\n").hexdigest()
+                metadata["read_metadata"] = {
+                    "path": request["input"]["path"],
+                    "returned_range": {"start_line": 1, "end_line_exclusive": 2},
+                    "total_lines": 1, "file_sha256": digest,
+                    "source_sha256": digest, "complete": True,
+                }
             return _ExecResult(
                 0,
                 (
@@ -342,6 +407,7 @@ class _RuntimeContainer:
                                 "truncated": False,
                                 "timed_out": False,
                                 "duration_ms": 1,
+                                **metadata,
                             },
                         }
                     ),
@@ -384,6 +450,35 @@ class _RuntimeContainer:
 
     def reload(self) -> None:
         self.collection.events.append(f"container.reload:{self.kind}")
+
+    def stop(self, *, timeout: int = 1) -> None:
+        self.collection.events.append(f"container.stop:{self.kind}")
+        self.attrs["State"] = {"Status": "exited", "ExitCode": 0}
+        self.files.clear()
+
+    def start(self) -> None:
+        self.collection.events.append(f"container.start:{self.kind}")
+        self.attrs["State"] = {"Status": "running", "ExitCode": 0}
+        self.files.clear()
+        self.artifacts.clear()
+
+    def wait(self, *, timeout: int = 120) -> dict[str, int]:
+        return {"StatusCode": 0}
+
+    def logs(self, **kwargs: object) -> bytes:
+        if self.kind != "reset":
+            raise AssertionError("unexpected fake logs")
+        descriptors = json.loads(self.command[2])
+        roots = []
+        for item in descriptors:
+            volume = self.mounts[item["destination"]][0]
+            if item["verify_only"] and volume.files:
+                raise RuntimeError("injected idle volume contamination")
+            volume.files.clear()
+            identity = {"sha256": "1" * 64, "entries": 1, "bytes": 1}
+            roots.append({"root": item["root"], **({"empty": True} if item["source"] is None else
+                                                  {"baseline": identity, "restored": identity})})
+        return _canonical_bytes({"roots": roots, "verified": True})
 
     def remove(self, *, force: bool = False) -> None:
         if force is not True:
@@ -441,7 +536,7 @@ class _RuntimeContainers:
             or kwargs["network_mode"] != "none"
             or kwargs["read_only"] is not True
             or kwargs["cap_drop"] != ["ALL"]
-            or kwargs["cap_add"] != []
+            or kwargs["cap_add"] != (["CHOWN", "FOWNER"] if "reset-helper" in str(kwargs["name"]) else [])
             or kwargs["security_opt"] != ["no-new-privileges:true"]
             or kwargs["privileged"] is not False
             or kwargs["devices"] != []
@@ -459,12 +554,15 @@ class _RuntimeContainers:
             raise AssertionError("runtime managed labels drifted")
         name = str(kwargs["name"])
         kind = "worker"
-        if "evaluator-seed" in name:
+        if "reset-helper" in name:
+            kind = "reset"
+        elif "evaluator-seed" in name:
             kind = "seed"
         elif "evaluator-container" in name:
             kind = "evaluator"
-        if kind != "worker" and any(
-            item.kind == "worker" and not item.removed for item in self.created
+        if kind not in {"worker", "reset"} and any(
+            item.kind == "worker" and not item.removed and item.labels["io.repofixlab.runtime.attempt-id"] == labels["io.repofixlab.runtime.attempt-id"]
+            for item in self.created
         ):
             raise AssertionError("evaluator started before worker zero residual cleanup")
         container = _RuntimeContainer(
@@ -475,6 +573,18 @@ class _RuntimeContainers:
             command,
         )
         self.created.append(container)
+        container.mounts = {mount["bind"]: (next((volume for volume in self.collection_volumes.created if volume.name == source), self.collection_volumes.private), mount["mode"])
+                            for source, mount in volumes.items()}
+        container.attrs.update({"Image": image, "Config": {"User": kwargs["user"], "Labels": labels,
+                                                           "Cmd": command, "Entrypoint": kwargs["entrypoint"]},
+                                "HostConfig": {
+                                    "NanoCpus": kwargs["nano_cpus"], "Memory": kwargs["mem_limit"],
+                                    "MemorySwap": kwargs["memswap_limit"], "PidsLimit": kwargs["pids_limit"],
+                                    "NetworkMode": kwargs["network_mode"], "ReadonlyRootfs": kwargs["read_only"],
+                                    "Privileged": kwargs["privileged"], "CapDrop": kwargs["cap_drop"],
+                                    "SecurityOpt": kwargs["security_opt"], "Tmpfs": kwargs["tmpfs"],
+                                    "Binds": [f"{source}:{mount['bind']}:{mount['mode']}" for source, mount in volumes.items()],
+                                }})
         self.run_calls.append((image, list(command), dict(kwargs)))
         self.events.append(f"container.run:{kind}")
         return container
@@ -487,13 +597,18 @@ class _RuntimeContainers:
     ) -> list[_RuntimeContainer]:
         if all is not True:
             raise AssertionError("runtime cleanup must include stopped containers")
-        attempt_id = _attempt_filter(filters)
+        _attempt_filter(filters)
         return [
             container
             for container in self.created
             if not container.removed
-            and container.labels.get("io.repofixlab.runtime.attempt-id") == attempt_id
+            and _matches_labels(container.labels, filters)
         ]
+
+
+def _matches_labels(labels: Mapping[str, str], filters: Mapping[str, object]) -> bool:
+    actual = {f"{key}={value}" for key, value in labels.items()}
+    return set(filters["label"]).issubset(actual)
 
 
 class _RuntimeDockerClient:
@@ -502,6 +617,7 @@ class _RuntimeDockerClient:
         self.images = FakeImages(self.events, None)
         self.volumes = _RuntimeVolumes(self.events)
         self.containers = _RuntimeContainers(self.events)
+        self.containers.collection_volumes = self.volumes
 
 
 def _attempt_filter(filters: Mapping[str, object]) -> str:
@@ -510,6 +626,8 @@ def _attempt_filter(filters: Mapping[str, object]) -> str:
         raise AssertionError("runtime cleanup labels are malformed")
     prefix = "io.repofixlab.runtime.attempt-id="
     matches = [value for value in labels if isinstance(value, str) and value.startswith(prefix)]
+    if not matches and any(value.startswith(("io.repofixlab.runtime.worker-pool=", "io.repofixlab.runtime.evaluator-pool=")) for value in labels):
+        return ""
     if len(matches) != 1:
         raise AssertionError("runtime attempt cleanup filter drifted")
     return matches[0][len(prefix) :]
@@ -616,6 +734,8 @@ def _backend_fixture(root: Path) -> tuple[DockerRuntimeBackend, _RuntimeDockerCl
         configuration,
         read_only_check=lambda _path: True,
     )
+    binding = backend._private_task_bindings[candidate.candidate_id]
+    client.volumes.private.identities[binding.task_path] = f"{binding.task_bytes}:{binding.task_sha256}"
     return backend, client, candidate
 
 
@@ -645,6 +765,26 @@ def _write_request(
 
 
 class DockerRuntimeBackendTests(unittest.TestCase):
+    def test_bulk_material_rejects_symlink_parents_and_existing_files(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = {"trusted/nested/code.py": b"trusted code"}
+            bundle = root / "material.tar"
+            bundle.write_bytes(_tar_bytes(files))
+            outside = root / "outside"
+            outside.mkdir()
+            (root / "trusted").symlink_to(outside, target_is_directory=True)
+            with patch("sys.argv", ["material", str(root), str(bundle)]), self.assertRaises(OSError):
+                exec(_MATERIAL_WRITE_SCRIPT, {})
+            self.assertFalse(list(outside.iterdir()))
+            (root / "trusted").unlink()
+            with patch("sys.argv", ["material", str(root), str(bundle)]), redirect_stdout(io.StringIO()):
+                exec(_MATERIAL_WRITE_SCRIPT, {})
+            self.assertEqual((root / "trusted/nested/code.py").read_bytes(), b"trusted code")
+            bundle.write_bytes(_tar_bytes(files))
+            with patch("sys.argv", ["material", str(root), str(bundle)]), self.assertRaises(FileExistsError):
+                exec(_MATERIAL_WRITE_SCRIPT, {})
+
     def test_locked_worker_snapshot_and_fresh_evaluator_lifecycle(self) -> None:
         with TemporaryDirectory() as temporary:
             backend, client, candidate = _backend_fixture(Path(temporary).resolve())
@@ -688,6 +828,30 @@ class DockerRuntimeBackendTests(unittest.TestCase):
             evaluator_volumes = evaluator_run[2]["volumes"]
             self.assertEqual(evaluator_volumes[RUNTIME_PRIVATE_VOLUME]["mode"], "ro")
             self.assertNotIn(RUNTIME_PRIVATE_VOLUME, client.volumes.created)
+
+    def test_close_cleans_unacknowledged_on_demand_evaluator(self) -> None:
+        with TemporaryDirectory() as temporary:
+            backend, client, candidate = _backend_fixture(Path(temporary).resolve())
+            attempt_id = "attempt-cold-shutdown"
+            worker = backend.prepare_worker(
+                attempt_id, candidate.candidate_id, candidate.instance_id,
+            )
+            snapshot = backend.snapshot_patch(worker)
+            self.assertTrue(backend.destroy_worker(worker).clean)
+            job = backend.start_evaluation(
+                attempt_id, "run-shutdown", "job-shutdown", "evaluation-shutdown",
+                candidate.candidate_id, candidate.instance_id, snapshot.patch,
+            )
+
+            backend.close()
+
+            self.assertTrue(job.container.removed)
+            self.assertTrue(all(volume.removed for volume in client.volumes.created))
+            self.assertFalse(client.volumes.private.removed)
+            self.assertEqual(backend.resource_admission.snapshot["active"], 0)
+            self.assertEqual(backend.resource_admission.snapshot["waiting"], 0)
+            self.assertEqual(backend._worker_owners, {})
+            self.assertEqual(backend._evaluator_owners, {})
 
     def test_abort_retries_residual_cleanup_and_releases_capacity(self) -> None:
         with TemporaryDirectory() as temporary:

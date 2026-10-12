@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type FileHandle, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { stableStringify } from "../contracts/canonical-json.ts";
+import { SerializedWriter } from "./serialized-writer.ts";
 
 export interface GlobalBudgetState {
 	readonly schema_version: "v1";
@@ -74,6 +75,7 @@ async function writeAtomic(path: string, content: string): Promise<void> {
 }
 
 export class GlobalBudgetLedger {
+	private readonly writer = new SerializedWriter();
 	private readonly path: string;
 	private state: Omit<GlobalBudgetState, "state_sha256">;
 
@@ -127,65 +129,75 @@ export class GlobalBudgetLedger {
 	}
 
 	async reserve(tokens: number): Promise<boolean> {
-		assertTokens(tokens, "reservation_tokens");
-		if (
-			tokens === 0 ||
-			this.state.reconciliation_required ||
-			this.state.accounted_tokens + this.state.reserved_tokens + tokens > this.state.cap_tokens
-		) {
-			return false;
-		}
-		this.state = { ...this.state, reserved_tokens: this.state.reserved_tokens + tokens };
-		await this.persist();
-		return true;
+		return this.writer.run(async () => {
+			assertTokens(tokens, "reservation_tokens");
+			if (
+				tokens === 0 ||
+				this.state.reconciliation_required ||
+				this.state.accounted_tokens + this.state.reserved_tokens + tokens > this.state.cap_tokens
+			) {
+				return false;
+			}
+			this.state = { ...this.state, reserved_tokens: this.state.reserved_tokens + tokens };
+			await this.persist();
+			return true;
+		});
 	}
 
 	async settle(reservedTokens: number, actualTokens: number): Promise<void> {
-		assertTokens(reservedTokens, "reserved_tokens");
-		assertTokens(actualTokens, "actual_tokens");
-		if (actualTokens > reservedTokens || reservedTokens > this.state.reserved_tokens) {
-			this.state = { ...this.state, reconciliation_required: true };
+		return this.writer.run(async () => {
+			assertTokens(reservedTokens, "reserved_tokens");
+			assertTokens(actualTokens, "actual_tokens");
+			if (actualTokens > reservedTokens || reservedTokens > this.state.reserved_tokens) {
+				this.state = { ...this.state, reconciliation_required: true };
+				await this.persist();
+				throw new Error("Global budget settlement is invalid and requires reconciliation");
+			}
+			this.state = {
+				...this.state,
+				accounted_tokens: this.state.accounted_tokens + actualTokens,
+				reserved_tokens: this.state.reserved_tokens - reservedTokens,
+			};
 			await this.persist();
-			throw new Error("Global budget settlement is invalid and requires reconciliation");
-		}
-		this.state = {
-			...this.state,
-			accounted_tokens: this.state.accounted_tokens + actualTokens,
-			reserved_tokens: this.state.reserved_tokens - reservedTokens,
-		};
-		await this.persist();
+		});
 	}
 
 	async chargeUnverified(reservedTokens: number): Promise<void> {
-		assertTokens(reservedTokens, "reserved_tokens");
-		if (reservedTokens > this.state.reserved_tokens) throw new Error("Unknown budget reservation is not open");
-		this.state = {
-			...this.state,
-			accounted_tokens: this.state.accounted_tokens + reservedTokens,
-			reserved_tokens: this.state.reserved_tokens - reservedTokens,
-			reconciliation_required: true,
-		};
-		await this.persist();
+		return this.writer.run(async () => {
+			assertTokens(reservedTokens, "reserved_tokens");
+			if (reservedTokens > this.state.reserved_tokens) throw new Error("Unknown budget reservation is not open");
+			this.state = {
+				...this.state,
+				accounted_tokens: this.state.accounted_tokens + reservedTokens,
+				reserved_tokens: this.state.reserved_tokens - reservedTokens,
+				reconciliation_required: true,
+			};
+			await this.persist();
+		});
 	}
 
 	async recordObserved(actualTokens: number): Promise<void> {
-		assertTokens(actualTokens, "actual_tokens");
-		if (this.state.reconciliation_required || this.state.reserved_tokens !== 0) {
-			throw new Error("Observed usage cannot be recorded while budget reconciliation or a reservation is active");
-		}
-		if (
-			!Number.isSafeInteger(this.state.accounted_tokens + actualTokens) ||
-			this.state.accounted_tokens + actualTokens > this.state.cap_tokens
-		) {
-			throw new Error("Observed usage exceeds the global budget ledger representation limit");
-		}
-		this.state = { ...this.state, accounted_tokens: this.state.accounted_tokens + actualTokens };
-		await this.persist();
+		return this.writer.run(async () => {
+			assertTokens(actualTokens, "actual_tokens");
+			if (this.state.reconciliation_required || this.state.reserved_tokens !== 0) {
+				throw new Error("Observed usage cannot be recorded while budget reconciliation or a reservation is active");
+			}
+			if (
+				!Number.isSafeInteger(this.state.accounted_tokens + actualTokens) ||
+				this.state.accounted_tokens + actualTokens > this.state.cap_tokens
+			) {
+				throw new Error("Observed usage exceeds the global budget ledger representation limit");
+			}
+			this.state = { ...this.state, accounted_tokens: this.state.accounted_tokens + actualTokens };
+			await this.persist();
+		});
 	}
 
 	async markReconciliationRequired(): Promise<void> {
-		this.state = { ...this.state, reconciliation_required: true };
-		await this.persist();
+		return this.writer.run(async () => {
+			this.state = { ...this.state, reconciliation_required: true };
+			await this.persist();
+		});
 	}
 
 	private async persist(): Promise<void> {

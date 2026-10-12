@@ -32,13 +32,13 @@ function recordId(repo: string, index: number): string {
 }
 
 function metadata(): string {
-	return [
+	return `${[
 		...Array.from({ length: 4 }, (_, index) => record("axios/axios", index)),
 		...Array.from({ length: 2 }, (_, index) => record("immutable-js/immutable-js", index)),
 		...Array.from({ length: 3 }, (_, index) => record("mrdoob/three.js", index)),
 		...Array.from({ length: 17 }, (_, index) => record("preactjs/preact", index)),
 		...Array.from({ length: 17 }, (_, index) => record("vuejs/core", index)),
-	].join("\n") + "\n";
+	].join("\n")}\n`;
 }
 
 function eligibility(metadataSha256: string) {
@@ -76,8 +76,12 @@ describe("M6 evaluation cohorts", () => {
 		expect(cohorts.ablation_instance_ids).toHaveLength(M6_ABLATION_TASK_COUNT);
 		expect(cohorts.stability_instance_ids).toHaveLength(M6_STABILITY_TASK_COUNT);
 		expect(cohorts.main_test_instance_ids).toEqual([...cohorts.main_test_instance_ids].sort());
-		expect(cohorts.ablation_instance_ids.every((instanceId) => cohorts.main_test_instance_ids.includes(instanceId))).toBe(true);
-		expect(cohorts.stability_instance_ids.every((instanceId) => cohorts.main_test_instance_ids.includes(instanceId))).toBe(true);
+		expect(
+			cohorts.ablation_instance_ids.every((instanceId) => cohorts.main_test_instance_ids.includes(instanceId)),
+		).toBe(true);
+		expect(
+			cohorts.stability_instance_ids.every((instanceId) => cohorts.main_test_instance_ids.includes(instanceId)),
+		).toBe(true);
 		expect(createM6EvaluationCohorts(split, records)).toEqual(cohorts);
 		expect(verifyM6EvaluationCohorts(cohorts)).toEqual(cohorts);
 		expect(JSON.stringify(cohorts)).not.toContain("gold_changed_lines");

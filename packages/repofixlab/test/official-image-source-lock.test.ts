@@ -114,9 +114,9 @@ describe("OfficialImageSourceLock semantic verifier", () => {
 			verifyOfficialImageSourceLock({ ...lock, lock_id: "official-images-v1-axios-5892-deadbeef" }, expected),
 		).toThrow("ID");
 		expect(() => verifyOfficialImageSourceLock({ ...lock, unexpected: true }, expected)).toThrow("strict v1 schema");
-		expect(() => verifyOfficialImageSourceLock({ ...lock, images: [...lock.images, lock.images[0]!] }, expected)).toThrow(
-			"canonical-order",
-		);
+		expect(() =>
+			verifyOfficialImageSourceLock({ ...lock, images: [...lock.images, lock.images[0]!] }, expected),
+		).toThrow("canonical-order");
 		expect(() => verifyOfficialImageSourceLock(semanticTamper, expected)).toThrow("expected frozen facts");
 	});
 
@@ -183,8 +183,8 @@ describe("OfficialImageSourceLock semantic verifier", () => {
 		};
 		expect(multi.lock_id).toMatch(/^official-images-v1-set-2-[a-f0-9]{16}$/);
 		expect(verifyOfficialImageSourceLock(multi, expectedMulti)).toBe(multi);
-		expect(() => verifyOfficialImageSourceLock({ ...multi, images: [...multi.images].reverse() }, expectedMulti)).toThrow(
-			"canonical-order",
-		);
+		expect(() =>
+			verifyOfficialImageSourceLock({ ...multi, images: [...multi.images].reverse() }, expectedMulti),
+		).toThrow("canonical-order");
 	});
 });

@@ -3,6 +3,7 @@ import { type FileHandle, mkdir, open, readFile, rename, unlink, utimes } from "
 import { dirname, join, resolve } from "node:path";
 import type { RepoFixConfigId } from "../agent/repofix-config.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
+import { SerializedWriter } from "./serialized-writer.ts";
 
 export const BATCH_RUN_STATUSES = [
 	"queued",
@@ -234,6 +235,7 @@ export class ExperimentOwnerLease {
 }
 
 export class BatchStateStore {
+	private readonly writer = new SerializedWriter();
 	private readonly eventsPath: string;
 	private readonly snapshotPath: string;
 	private events: BatchStateEvent[];
@@ -271,25 +273,27 @@ export class BatchStateStore {
 	}
 
 	async register(spec: BatchRunSpec): Promise<void> {
-		assertIdentifier(spec.run_id, "run_id");
-		assertIdentifier(spec.group_id, "group_id");
-		assertIdentifier(spec.instance_id, "instance_id");
-		if (!Number.isSafeInteger(spec.replicate) || spec.replicate < 1) throw new Error("replicate must be positive");
-		if (this.runs.has(spec.run_id)) throw new Error(`Run is already registered: ${spec.run_id}`);
-		await this.append(
-			createEvent({
-				schema_version: "v1",
-				event_type: "run_registered",
-				sequence: this.events.length,
-				run_id: spec.run_id,
-				from_status: null,
-				to_status: "queued",
-				attempt_id: null,
-				terminal_reason: null,
-				result_sha256: null,
-				spec,
-			}),
-		);
+		return this.writer.run(async () => {
+			assertIdentifier(spec.run_id, "run_id");
+			assertIdentifier(spec.group_id, "group_id");
+			assertIdentifier(spec.instance_id, "instance_id");
+			if (!Number.isSafeInteger(spec.replicate) || spec.replicate < 1) throw new Error("replicate must be positive");
+			if (this.runs.has(spec.run_id)) throw new Error(`Run is already registered: ${spec.run_id}`);
+			await this.append(
+				createEvent({
+					schema_version: "v1",
+					event_type: "run_registered",
+					sequence: this.events.length,
+					run_id: spec.run_id,
+					from_status: null,
+					to_status: "queued",
+					attempt_id: null,
+					terminal_reason: null,
+					result_sha256: null,
+					spec,
+				}),
+			);
+		});
 	}
 
 	async transition(
@@ -299,33 +303,35 @@ export class BatchStateStore {
 		terminalReason: string | null = null,
 		resultSha256: string | null = null,
 	): Promise<void> {
-		const current = this.runs.get(runId);
-		if (current === undefined) throw new Error(`Unknown registered run: ${runId}`);
-		assertTransition(current.status, toStatus);
-		if ((toStatus === "completed" || toStatus === "failed") !== (terminalReason !== null)) {
-			throw new Error("Terminal batch transition must carry exactly one terminal reason");
-		}
-		assertSha256(resultSha256, "result_sha256");
-		if ((toStatus === "completed") !== (resultSha256 !== null)) {
-			throw new Error("Completed batch transition must carry exactly one immutable result SHA-256");
-		}
-		if (toStatus !== "completed" && resultSha256 !== null) {
-			throw new Error("Only a completed batch transition may carry a result SHA-256");
-		}
-		await this.append(
-			createEvent({
-				schema_version: "v1",
-				event_type: "run_transition",
-				sequence: this.events.length,
-				run_id: runId,
-				from_status: current.status,
-				to_status: toStatus,
-				attempt_id: attemptId,
-				terminal_reason: terminalReason,
-				result_sha256: resultSha256,
-				spec: null,
-			}),
-		);
+		return this.writer.run(async () => {
+			const current = this.runs.get(runId);
+			if (current === undefined) throw new Error(`Unknown registered run: ${runId}`);
+			assertTransition(current.status, toStatus);
+			if ((toStatus === "completed" || toStatus === "failed") !== (terminalReason !== null)) {
+				throw new Error("Terminal batch transition must carry exactly one terminal reason");
+			}
+			assertSha256(resultSha256, "result_sha256");
+			if ((toStatus === "completed") !== (resultSha256 !== null)) {
+				throw new Error("Completed batch transition must carry exactly one immutable result SHA-256");
+			}
+			if (toStatus !== "completed" && resultSha256 !== null) {
+				throw new Error("Only a completed batch transition may carry a result SHA-256");
+			}
+			await this.append(
+				createEvent({
+					schema_version: "v1",
+					event_type: "run_transition",
+					sequence: this.events.length,
+					run_id: runId,
+					from_status: current.status,
+					to_status: toStatus,
+					attempt_id: attemptId,
+					terminal_reason: terminalReason,
+					result_sha256: resultSha256,
+					spec: null,
+				}),
+			);
+		});
 	}
 
 	private async append(event: BatchStateEvent): Promise<void> {

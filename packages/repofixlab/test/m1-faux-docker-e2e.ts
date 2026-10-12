@@ -65,9 +65,7 @@ function createFauxModelRegistry(harness: Harness): ModelRegistry {
 }
 
 function loadTaskEnvironmentBinding(): TaskEnvironmentBinding {
-	const path = fileURLToPath(
-		new URL("../configs/runtime/axios-5892/task-environment-lock.json", import.meta.url),
-	);
+	const path = fileURLToPath(new URL("../configs/runtime/axios-5892/task-environment-lock.json", import.meta.url));
 	const value: unknown = JSON.parse(readFileSync(path, "utf8"));
 	assert(value !== null && typeof value === "object" && !Array.isArray(value));
 	const record = value as Record<string, unknown>;
@@ -176,7 +174,9 @@ describe("M1 faux Pi real Docker lifecycle", () => {
 					),
 					fauxAssistantMessage("faux repair trajectory complete"),
 				]);
-				await sessionResult.session.prompt("Exercise the locked repair environment without solving the hidden issue.");
+				await sessionResult.session.prompt(
+					"Exercise the locked repair environment without solving the hidden issue.",
+				);
 				assert.deepEqual(
 					transport.requests.map((request) => request.tool),
 					["repo_list", "repo_exec", "repo_edit", "repo_diff"],
@@ -185,23 +185,13 @@ describe("M1 faux Pi real Docker lifecycle", () => {
 				assert(transport.responses.every((response) => response.result.exit_code === 0));
 				assert.match(transport.responses[3]?.result.stdout ?? "", /repofixlab-faux-e2e\.txt/);
 
-				const snapshot = await controller.snapshot(
-					attemptId,
-					`${attemptId}:snapshot`,
-					prepared.leaseId,
-				);
+				const snapshot = await controller.snapshot(attemptId, `${attemptId}:snapshot`, prepared.leaseId);
 				assert.equal(snapshot.baseCommit, preflight.base_commit);
 				assert.equal(snapshot.policy.status, "pass");
 				assert(snapshot.patch.byteLength > 0);
-				assert(
-					snapshot.files.some((file) => file.path === "repofixlab-faux-e2e.txt" && file.status === "added"),
-				);
+				assert(snapshot.files.some((file) => file.path === "repofixlab-faux-e2e.txt" && file.status === "added"));
 
-				const workerCleanup = await controller.destroy(
-					attemptId,
-					`${attemptId}:destroy`,
-					prepared.leaseId,
-				);
+				const workerCleanup = await controller.destroy(attemptId, `${attemptId}:destroy`, prepared.leaseId);
 				assert.equal(workerCleanup.clean, true, "Worker destroy must prove zero managed residual resources");
 
 				const job = await controller.startEvaluation(
@@ -216,10 +206,11 @@ describe("M1 faux Pi real Docker lifecycle", () => {
 				assert.equal(jobStatus.errorClass, null);
 
 				const artifactSet = await controller.getArtifacts(attemptId, job.jobId);
-				assert.deepEqual(
-					artifactSet.artifacts.map((artifact) => artifact.name).sort(),
-					["evaluation.json", "evaluator.log", "patch-apply.json"],
-				);
+				assert.deepEqual(artifactSet.artifacts.map((artifact) => artifact.name).sort(), [
+					"evaluation.json",
+					"evaluator.log",
+					"patch-apply.json",
+				]);
 				const evaluation = verifyEvaluationResult(
 					JSON.parse(
 						new TextDecoder("utf-8", { fatal: true }).decode(

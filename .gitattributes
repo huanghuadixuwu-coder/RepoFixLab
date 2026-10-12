@@ -4,6 +4,9 @@
 # Preserve hash-sealed M0 evidence bytes exactly
 docs/evidence/repofixlab-m0/*.json -text whitespace=cr-at-eol
 
+# Preserve frozen unified-diff bytes, including required context whitespace
+packages/repofixlab/configs/benchmarks/docker-v1/*.patch -text -whitespace
+
 # Windows scripts should keep CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf

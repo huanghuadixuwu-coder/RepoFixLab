@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import re
+from threading import RLock
+from uuid import uuid4
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
@@ -151,15 +153,43 @@ class RuntimeOperationJournal:
             raise RuntimeJournalError("another runtime journal owner is active") from error
         self._records_by_operation: dict[str, RuntimeJournalRecord] = {}
         self._last_record: RuntimeJournalRecord | None = None
+        self._lock = RLock()
 
     def close(self) -> None:
-        if self._lease < 0:
-            return
-        try:
-            fcntl.flock(self._lease, fcntl.LOCK_UN)
-        finally:
-            os.close(self._lease)
-            self._lease = -1
+        with self._lock:
+            if self._lease < 0:
+                return
+            try:
+                fcntl.flock(self._lease, fcntl.LOCK_UN)
+            finally:
+                os.close(self._lease)
+                self._lease = -1
+
+    def pool_namespace(self) -> str:
+        """Persist one pool identity under the journal's exclusive owner lease.
+
+        Independent data volumes may use the same path inside different
+        Controllers. This identity distinguishes them and survives a restart.
+        """
+        with self._lock:
+            if self._lease < 0:
+                raise RuntimeJournalError("runtime journal owner is closed")
+            path = self.root / "worker-pool-namespace"
+            if not path.exists():
+                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                try:
+                    _write_all(descriptor, (uuid4().hex + "\n").encode("ascii"))
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                _fsync_directory(self.root)
+            if path.is_symlink() or not path.is_file() or path.stat().st_size != 33:
+                raise RuntimeJournalError("Worker pool namespace is malformed")
+            identity = path.read_text(encoding="ascii").strip()
+            if re.fullmatch(r"[a-f0-9]{32}", identity) is None:
+                raise RuntimeJournalError("Worker pool namespace is malformed")
+            return identity
+
 
     def begin(
         self,
@@ -168,18 +198,20 @@ class RuntimeOperationJournal:
         *,
         accepted_at: str | None = None,
     ) -> RuntimeJournalRecord:
-        attempt_id, operation_id = _validate_request_binding(request, request_sha256)
-        if operation_id in self._records_by_operation:
-            raise RuntimeJournalError("runtime operation journal already exists")
-        return self._append(
-            request,
-            request_sha256,
-            attempt_id=attempt_id,
-            operation_id=operation_id,
-            event="accepted",
-            response=None,
-            at=accepted_at or _now(),
-        )
+        with self._lock:
+            attempt_id, operation_id = _validate_request_binding(request, request_sha256)
+            if operation_id in self._records_by_operation:
+                raise RuntimeJournalError("runtime operation journal already exists")
+            return self._append(
+                request,
+                request_sha256,
+                attempt_id=attempt_id,
+                operation_id=operation_id,
+                event="accepted",
+                response=None,
+                at=accepted_at or _now(),
+            )
+
 
     def finish(
         self,
@@ -190,28 +222,30 @@ class RuntimeOperationJournal:
         event: str = "completed",
         finished_at: str | None = None,
     ) -> RuntimeJournalRecord:
-        if event not in {"completed", "recovered_interrupted"}:
-            raise RuntimeJournalError("runtime terminal event is unsupported")
-        attempt_id, operation_id = _validate_request_binding(request, request_sha256)
-        previous = self._records_by_operation.get(operation_id)
-        if previous is None or previous.event != "accepted":
-            raise RuntimeJournalError("runtime operation is not pending")
-        if (
-            previous.attempt_id != attempt_id
-            or previous.request_sha256 != request_sha256
-            or dict(previous.request) != dict(request)
-        ):
-            raise RuntimeJournalError("runtime terminal request binding drifted")
-        _validate_response_binding(response, attempt_id, operation_id, request_sha256)
-        return self._append(
-            request,
-            request_sha256,
-            attempt_id=attempt_id,
-            operation_id=operation_id,
-            event=event,
-            response=response,
-            at=finished_at or _now(),
-        )
+        with self._lock:
+            if event not in {"completed", "recovered_interrupted"}:
+                raise RuntimeJournalError("runtime terminal event is unsupported")
+            attempt_id, operation_id = _validate_request_binding(request, request_sha256)
+            previous = self._records_by_operation.get(operation_id)
+            if previous is None or previous.event != "accepted":
+                raise RuntimeJournalError("runtime operation is not pending")
+            if (
+                previous.attempt_id != attempt_id
+                or previous.request_sha256 != request_sha256
+                or dict(previous.request) != dict(request)
+            ):
+                raise RuntimeJournalError("runtime terminal request binding drifted")
+            _validate_response_binding(response, attempt_id, operation_id, request_sha256)
+            return self._append(
+                request,
+                request_sha256,
+                attempt_id=attempt_id,
+                operation_id=operation_id,
+                event=event,
+                response=response,
+                at=finished_at or _now(),
+            )
+
 
     def _append(
         self,
@@ -269,65 +303,94 @@ class RuntimeOperationJournal:
         return record
 
     def load(self) -> tuple[PersistedRuntimeOperation, ...]:
-        if not self._journal_path.exists():
-            return ()
-        if self._journal_path.is_symlink() or not self._journal_path.is_file():
-            raise RuntimeJournalError("runtime journal is not a regular file")
-        try:
-            lines = self._journal_path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError) as error:
-            raise RuntimeJournalError("runtime journal is unreadable") from error
-        if not lines:
-            raise RuntimeJournalError("runtime journal is empty")
-        records = tuple(self._parse_record(line) for line in lines)
-        grouped: dict[str, list[RuntimeJournalRecord]] = {}
-        for index, record in enumerate(records):
-            if record.sequence != index:
-                raise RuntimeJournalError("runtime journal sequence is not contiguous")
-            if index == 0:
-                if record.previous_record_sha256 is not None:
-                    raise RuntimeJournalError(
-                        "first runtime journal record has a predecessor"
-                    )
-            elif record.previous_record_sha256 != records[index - 1].record_sha256:
-                raise RuntimeJournalError("runtime journal hash chain is broken")
-            grouped.setdefault(record.operation_id, []).append(record)
-            self._last_record = record
+        with self._lock:
+            if not self._journal_path.exists():
+                return ()
+            if self._journal_path.is_symlink() or not self._journal_path.is_file():
+                raise RuntimeJournalError("runtime journal is not a regular file")
+            try:
+                content = self._journal_path.read_bytes()
+                boundary = content.rfind(b"\n") + 1
+                prefix, tail = content[:boundary], content[boundary:]
+                lines = prefix.decode("utf-8").splitlines()
+            except (OSError, UnicodeError) as error:
+                raise RuntimeJournalError("runtime journal is unreadable") from error
+            if len(tail) > _RECORD_LIMIT_BYTES:
+                raise RuntimeJournalError("interrupted runtime record exceeds size limit")
+            records = tuple(self._parse_record(line) for line in lines)
+            grouped: dict[str, list[RuntimeJournalRecord]] = {}
+            for index, record in enumerate(records):
+                if record.sequence != index:
+                    raise RuntimeJournalError("runtime journal sequence is not contiguous")
+                if index == 0:
+                    if record.previous_record_sha256 is not None:
+                        raise RuntimeJournalError(
+                            "first runtime journal record has a predecessor"
+                        )
+                elif record.previous_record_sha256 != records[index - 1].record_sha256:
+                    raise RuntimeJournalError("runtime journal hash chain is broken")
+                grouped.setdefault(record.operation_id, []).append(record)
 
-        operations: list[PersistedRuntimeOperation] = []
-        for operation_id, operation_records in grouped.items():
-            accepted = operation_records[0]
-            if accepted.event != "accepted" or len(operation_records) > 2:
-                raise RuntimeJournalError("runtime operation event order is invalid")
-            if len(operation_records) == 2 and operation_records[1].event not in {
-                "completed",
-                "recovered_interrupted",
-            }:
-                raise RuntimeJournalError("runtime terminal event is invalid")
-            for record in operation_records[1:]:
-                if (
-                    record.attempt_id != accepted.attempt_id
-                    or record.request_sha256 != accepted.request_sha256
-                    or dict(record.request) != dict(accepted.request)
-                ):
-                    raise RuntimeJournalError("runtime operation request binding drifted")
-            terminal = operation_records[-1]
-            self._records_by_operation[operation_id] = terminal
-            operations.append(
-                PersistedRuntimeOperation(
-                    request=dict(accepted.request),
-                    request_sha256=accepted.request_sha256,
-                    accepted_at=accepted.at,
-                    last_record=terminal,
-                    response=(
-                        dict(terminal.response)
-                        if terminal.response is not None
-                        else None
-                    ),
+            operations: list[PersistedRuntimeOperation] = []
+            for operation_id, operation_records in grouped.items():
+                accepted = operation_records[0]
+                if accepted.event != "accepted" or len(operation_records) > 2:
+                    raise RuntimeJournalError("runtime operation event order is invalid")
+                if len(operation_records) == 2 and operation_records[1].event not in {
+                    "completed",
+                    "recovered_interrupted",
+                }:
+                    raise RuntimeJournalError("runtime terminal event is invalid")
+                for record in operation_records[1:]:
+                    if (
+                        record.attempt_id != accepted.attempt_id
+                        or record.request_sha256 != accepted.request_sha256
+                        or dict(record.request) != dict(accepted.request)
+                    ):
+                        raise RuntimeJournalError("runtime operation request binding drifted")
+                terminal = operation_records[-1]
+                operations.append(
+                    PersistedRuntimeOperation(
+                        request=dict(accepted.request),
+                        request_sha256=accepted.request_sha256,
+                        accepted_at=accepted.at,
+                        last_record=terminal,
+                        response=(
+                            dict(terminal.response)
+                            if terminal.response is not None
+                            else None
+                        ),
+                    )
                 )
-            )
-        operations.sort(key=lambda operation: operation.last_record.sequence)
-        return tuple(operations)
+            operations.sort(key=lambda operation: operation.last_record.sequence)
+            if tail:
+                # SIGKILL can interrupt an append, including a UTF-8 code point.
+                # Validate every complete record before preserving and truncating
+                # the uncommitted suffix; a corrupt complete prefix stays intact.
+                copy = self.root / f"interrupted-tail-{hashlib.sha256(tail).hexdigest()}.bin"
+                if copy.exists():
+                    if copy.is_symlink() or not copy.is_file() or copy.read_bytes() != tail:
+                        raise RuntimeJournalError("interrupted runtime tail evidence drifted")
+                else:
+                    temporary = self.root / f".interrupted-tail-{uuid4().hex}.tmp"
+                    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                    try:
+                        _write_all(descriptor, tail)
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    os.replace(temporary, copy)
+                _fsync_directory(self.root)
+                descriptor = os.open(self._journal_path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    os.ftruncate(descriptor, boundary)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            self._last_record = records[-1] if records else None
+            self._records_by_operation = {operation.last_record.operation_id: operation.last_record for operation in operations}
+            return tuple(operations)
+
 
     @staticmethod
     def _parse_record(line: str) -> RuntimeJournalRecord:

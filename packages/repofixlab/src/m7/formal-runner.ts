@@ -433,6 +433,8 @@ export async function runM7FormalRun(
 		await store.publishTo(root);
 		return result;
 	} catch (error) {
+		// Evaluation admission can fail while this attempt still owns capacity.
+		await dependencies.controller.abort(options.attemptId, `${options.attemptId}:abort`).catch(() => undefined);
 		if (error instanceof KnownProviderUsageBatchFailure) throw error;
 		throw new KnownProviderUsageBatchFailure(errorMessage(error), usage.accounted_tokens);
 	}

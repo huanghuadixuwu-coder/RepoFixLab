@@ -147,7 +147,9 @@ describe("parseCliArgs", () => {
 	});
 
 	it("parses M6 batch creation and a bounded resume path", () => {
-		expect(parseCliArgs(["m6-batch-create", "--input", "m3/split-manifest.json", "--output", "m6/batch.json"])).toEqual({
+		expect(
+			parseCliArgs(["m6-batch-create", "--input", "m3/split-manifest.json", "--output", "m6/batch.json"]),
+		).toEqual({
 			ok: true,
 			command: { kind: "m6-batch-create", input: "m3/split-manifest.json", output: "m6/batch.json" },
 		});
@@ -331,9 +333,15 @@ describe("parseCliArgs", () => {
 
 	it.each([
 		[["m3-image-resolve", "--input", "split.json", "--output", "lock.json"], "invalid_eligibility"],
-		[["m3-image-resolve", "--input", "split.json", "--eligibility", "eligible.json", "--output", "lock.json"], "invalid_operation_id"],
+		[
+			["m3-image-resolve", "--input", "split.json", "--eligibility", "eligible.json", "--output", "lock.json"],
+			"invalid_operation_id",
+		],
 		[["m3-image-resolve", "--operation-id", "m3:lock", "--output", "lock.json"], "invalid_input"],
-		[["m3-image-resolve", "--input", "split.json", "--eligibility", "eligible.json", "--operation-id", "m3:lock"], "invalid_output"],
+		[
+			["m3-image-resolve", "--input", "split.json", "--eligibility", "eligible.json", "--operation-id", "m3:lock"],
+			"invalid_output",
+		],
 	] as const)("rejects invalid m3-image-resolve args %j", (args, errorCode) => {
 		const result = parseCliArgs(args);
 		expect(result.ok).toBe(false);

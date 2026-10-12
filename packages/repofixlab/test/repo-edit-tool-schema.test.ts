@@ -1,13 +1,14 @@
 import { Compile } from "typebox/compile";
 import { describe, expect, it } from "vitest";
 import type { RepoToolTransport } from "../src/controller/client.ts";
-import { createRepoTools } from "../src/sandbox/repo-tools.ts";
 import {
+	type RepoEditInput,
 	RepoEditInputSchema,
 	RepoEditToolWireSchema,
-	type RepoEditInput,
 	type RepoToolRequest,
 } from "../src/sandbox/protocol.ts";
+import { createRepoTools } from "../src/sandbox/repo-tools.ts";
+import { successfulToolResult } from "./runtime-tool-fixture.ts";
 
 function repoEditTool(transport: RepoToolTransport) {
 	const tool = createRepoTools("lease-test", transport).find((candidate) => candidate.name === "repo_edit");
@@ -18,15 +19,7 @@ function repoEditTool(transport: RepoToolTransport) {
 function successfulEditResponse(request: Extract<RepoToolRequest, { tool: "repo_edit" }>) {
 	return {
 		tool: "repo_edit" as const,
-		result: {
-			tool: "repo_edit" as const,
-			exit_code: 0,
-			stdout: request.input.path,
-			stderr: "",
-			truncated: false,
-			timed_out: false,
-			duration_ms: 1,
-		},
+		result: successfulToolResult(request, request.input.path),
 	};
 }
 
@@ -36,7 +29,9 @@ describe("RepoFix repo_edit provider wire schema", () => {
 		const strictValidator = Compile(RepoEditInputSchema);
 		expect(strictValidator.Check({ path: "src/new.ts", content: "export {};" })).toBe(true);
 		expect(strictValidator.Check({ path: "src/new.ts", old_text: "old", new_text: "new" })).toBe(true);
-		expect(strictValidator.Check({ path: "src/new.ts", content: "new", old_text: "old", new_text: "next" })).toBe(false);
+		expect(strictValidator.Check({ path: "src/new.ts", content: "new", old_text: "old", new_text: "next" })).toBe(
+			false,
+		);
 		expect(strictValidator.Check({ path: "src/new.ts", old_text: "old" })).toBe(false);
 	});
 
