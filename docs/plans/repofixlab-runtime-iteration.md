@@ -266,7 +266,8 @@ RepoFix PLAN skill、FSM、记忆策略、模型配置、补丁策略和 V0/V1/V
 - `open_decisions`：无。
 - `last_updated`：2026-10-12。
 - `workspace`：`E:/pi`，分支 `docker`，从冻结的 `codex/skill` 基线创建。
-- `uncommitted_files`：WF1–WF7 的改动均未提交；本次迭代 62 个文件的完整清单与哈希见 `artifacts/docker-wf7/validation.json`，此前历史快照保留在各自 validation 中。WF7 修改 13 个文件，其余 49 个前置文件哈希保持不变；没有创建提交。
+- `publication`：运行时已提交为 `9a8c32e7caf6da7481a8eb78a0aecee1cefa3d86`。README 与发布记录随文档提交交付，目标为 `origin/docker`；本次交付共 64 个文件。WF7 验收时 62 个文件的历史清单与哈希保留在 `artifacts/docker-wf7/validation.json`，发布验证见 `publication-validation.json` 与 7.12。
+- `resume_action`：核对 `E:/pi` 的 `docker` 分支与最新提交，读取 7.12；7.3–7.11 的未提交状态、文件与源码哈希对应各工作流完成时的历史快照。
 
 | 工作流 | 状态 | 验收证据 | 完成日期 |
 | --- | --- | --- | --- |
@@ -512,4 +513,7 @@ resume_action:
 - 关闭修复验收通过：新增回归在修复前复现容器残留，修复后 96 项 Python 通过。真实 M6 按需路径在 Evaluator 激活前通过 daemon 暂停 PID 1，启动后直接关闭服务；1 个评测容器、5 个所属卷、有效预约、等待和归属映射均清零，既有 Docker 容器／卷／镜像身份保持一致。证据为 `pre-push-cold-shutdown.json`／脚本与日志；发布 runtime_docker.py SHA256 为 `5c421f64601ead9971ef844e37fd2c319dfea07491750c3e809a6e8ff027aba3`，WF7 测量版本为 `340fb6153044706cbf832de66f90a642debc84b8915e9396a17f7baf6f0e2eac`。
 - 工程复验通过：96 项 Python、20 个 TS 修改文件共 188 项测试、2 项仓库检查回归，合计 286 项；完整 `npm run check` 无错误、警告、info 或格式化改动。新增规则限定冻结 `.patch` 夹具，保留统一 diff 必需的上下文空白与字节身份。
 - 分支 README 记录 WF0–WF7、三种配置及真实四模式结果：当前固定批次并发按需最快，预热和复用保留为可配置模式，现有默认值沿用。
-- 发布验证与提交：进行中。
+- 发布复核完成：62 个 WF7 文件中 59 个哈希保持不变，差异限定于关闭修复、对应测试与本规格；另更新根 README 和冻结 patch 的 `.gitattributes` 规则，共 64 个交付文件。暂存区范围与冻结补丁字节身份核对通过，`git diff --cached --check` 通过。原始 WF7 制品保留。
+- 提交：运行时 `9a8c32e7caf6da7481a8eb78a0aecee1cefa3d86`；README 与本记录随后作为文档提交交付。远端目标为 [origin/docker](https://github.com/huanghuadixuwu-coder/RepoFixLab/tree/docker)。
+- 验证证据：`artifacts/docker-wf7/publication-validation.json` 记录提交前范围、源码边界、286 项测试、完整仓库检查与真实关闭清理；对应 `pre-push-*.log` 保存原始输出。
+- `remaining_issues`：无。WF0–WF7 完成，发布修复与文档验收完成。
