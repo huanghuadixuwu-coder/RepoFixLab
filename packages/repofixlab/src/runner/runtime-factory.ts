@@ -333,7 +333,13 @@ export function runtimeIdentityFromSession(
  */
 export function installRunAdmissionGate(
 	session: AdmissionGatedSession,
-	limits: { readonly accountedTokens: number | null; readonly modelTurns: number; readonly toolCalls: number | null },
+	limits: {
+		readonly accountedTokens: number | null;
+		readonly modelTurns: number;
+		readonly toolCalls: number | null;
+		/** The same task counter survives a new session and context compaction. */
+		readonly modelTurnsUsed?: () => number;
+	},
 ): void {
 	const stream = session.agent.streamFn;
 	session.agent.streamFn = (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) => {
@@ -346,6 +352,7 @@ export function installRunAdmissionGate(
 			modelTurns += 1;
 			toolCalls += message.content.filter((content) => content.type === "toolCall").length;
 		}
+		modelTurns = limits.modelTurnsUsed?.() ?? modelTurns;
 		if (
 			(limits.accountedTokens === null || accountedTokens < limits.accountedTokens) &&
 			modelTurns < limits.modelTurns &&

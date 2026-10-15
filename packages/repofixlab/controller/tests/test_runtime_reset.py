@@ -229,9 +229,11 @@ class UsedContainerTests(unittest.TestCase):
         self.finish_worker("first", lease)
         self.service.abort_attempt(_write_request("runtime_abort_attempt", "first", "first:abort"))
         worker.volumes[0].files["node_modules/poison"] = b"changed while parked"
-        with self.assertRaisesRegex(RuntimeError, "claim"):
-            self.backend.prepare_worker("second", self.candidate.candidate_id, self.candidate.instance_id)
+        replacement = self.backend.prepare_worker("second", self.candidate.candidate_id, self.candidate.instance_id)
         self.assertTrue(worker.container.removed)
+        self.assertNotEqual(replacement.container.id, worker.container.id)
+        self.assertFalse(replacement.volumes[0].files)
+        self.assertTrue(self.backend.destroy_worker(replacement).clean)
         self.assertFalse(self.backend._active_generations)
 
     def test_return_waits_for_durable_receipt_before_next_claim(self):
@@ -249,9 +251,9 @@ class UsedContainerTests(unittest.TestCase):
         self.finish_worker("first", lease)
         self.service.abort_attempt(_write_request("runtime_abort_attempt", "first", "first:abort"))
         worker.container.attrs["Config"]["Cmd"] = ["-c", "untrusted command"]
-        with self.assertRaisesRegex(RuntimeError, "claim"):
-            self.backend.prepare_worker("second", self.candidate.candidate_id, self.candidate.instance_id)
+        replacement = self.backend.prepare_worker("second", self.candidate.candidate_id, self.candidate.instance_id)
         self.assertTrue(worker.container.removed)
+        self.assertNotEqual(replacement.container.id, worker.container.id)
         self.assertNotIn("container.start:worker", self.client.events)
 
     def test_role_environment_keys_and_incompatible_task_are_rejected(self):
@@ -262,19 +264,24 @@ class UsedContainerTests(unittest.TestCase):
             self.backend.prepare_worker("other", self.candidate.candidate_id, "other__task")
         self.assertFalse(worker.container.removed)
 
-    def test_failed_resume_cleanup_preserves_logical_charge_and_recovery_owner(self):
+    def test_failed_resume_cleanup_preserves_physical_charge_while_cold_replacement_runs(self):
         lease, worker = self.worker("first")
         self.finish_worker("first", lease)
         self.service.abort_attempt(_write_request("runtime_abort_attempt", "first", "first:abort"))
         self.client.volumes.fail_remove = True
         with patch.object(self.backend, "_volume_reset", side_effect=RuntimeDockerError("injected resume failure")):
-            with self.assertRaisesRegex(RuntimeError, "claim"):
-                self.backend.prepare_worker("second", self.candidate.candidate_id, self.candidate.instance_id)
-        self.assertEqual(self.backend._worker_owners["second"], worker.resource_owner)
+            replacement = self.backend.prepare_worker("second", self.candidate.candidate_id, self.candidate.instance_id)
+        self.assertNotEqual(self.backend._worker_owners["second"], worker.resource_owner)
+        self.assertTrue(self.backend.resource_admission.has_reservation(worker.resource_owner))
+        self.assertTrue(self.backend.resource_admission.has_reservation("second"))
         self.assertEqual(self.backend.resource_admission.snapshot["nano_cpus"],
-                         1_000_000_000 + self.candidate.definition.worker.nano_cpus)
+                         1_000_000_000 + 2 * self.candidate.definition.worker.nano_cpus)
         self.client.volumes.fail_remove = False
-        self.assertTrue(self.backend.recover_attempt("second").clean)
+        for volume in worker.volumes:
+            volume.remove(force=True)
+        self.backend.worker_pool.evict_idle("manual_cleanup")
+        self.assertFalse(replacement.container.removed)
+        self.assertTrue(self.backend.destroy_worker(replacement).clean)
         self.assertFalse(self.backend._worker_owners)
         self.assertEqual(self.backend.resource_admission.snapshot["nano_cpus"], 1_000_000_000)
 

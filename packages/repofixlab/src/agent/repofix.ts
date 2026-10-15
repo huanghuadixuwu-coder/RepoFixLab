@@ -209,7 +209,17 @@ interface RepoFixStageCompletionControl {
 	finish(stage: RepoFixStage): void;
 }
 
-/** Outer-runner callbacks for snapshots, controlled verification, and forensic evidence. */
+/** Validated stage prefix and verification state bound by the runner to sealed code. */
+export interface RepoFixWorkflowCheckpoint {
+	readonly completions: readonly StageCompletion[];
+	readonly p0_patch_sha256: string | null;
+	readonly v1_patch_sha256: string | null;
+	readonly v2_patch_sha256: string | null;
+	readonly p1_patch_sha256: string | null;
+	readonly verification_feedback: readonly ControlledVerificationFeedback[];
+}
+
+/** Preserve sealed code boundaries and resume any unfinished controlled verification. */
 export interface RepoFixWorkflowCallbacks {
 	readonly verificationCatalog: ControlledVerificationCatalog;
 	readonly capturePatch: (checkpoint: "P0" | "V1" | "V2" | "P1") => Promise<{ readonly patch_sha256: string }>;
@@ -220,6 +230,9 @@ export interface RepoFixWorkflowCallbacks {
 	readonly onStageComplete?: (completion: StageCompletion) => Promise<void>;
 	readonly onStageRecovery?: (recovery: StageRecovery) => Promise<void>;
 	readonly onTrajectoryEvent?: (event: RepoFixTrajectoryEvent) => Promise<void>;
+	readonly resumeFrom?: RepoFixWorkflowCheckpoint;
+	readonly onCheckpoint?: (checkpoint: RepoFixWorkflowCheckpoint) => Promise<void>;
+	readonly throwIfInterrupted?: () => void;
 }
 
 /** Stable identities and stage artifacts returned by one complete RepoFix workflow. */
@@ -843,13 +856,48 @@ export async function runRepoFixWorkflow(
 	callbacks: RepoFixWorkflowCallbacks,
 ): Promise<RepoFixWorkflowResult> {
 	const config = result.stageMachine.workflowConfig;
-	let p0PatchSha256: string | null = null;
-	let v1PatchSha256: string | null = null;
-	let v2PatchSha256: string | null = null;
-	let p1PatchSha256: string | null = null;
-	const verificationFeedback: ControlledVerificationFeedback[] = [];
+	let p0PatchSha256 = callbacks.resumeFrom?.p0_patch_sha256 ?? null;
+	let v1PatchSha256 = callbacks.resumeFrom?.v1_patch_sha256 ?? null;
+	let v2PatchSha256 = callbacks.resumeFrom?.v2_patch_sha256 ?? null;
+	let p1PatchSha256 = callbacks.resumeFrom?.p1_patch_sha256 ?? null;
+	const verificationFeedback = [...(callbacks.resumeFrom?.verification_feedback ?? [])];
 	let planCompletion: Extract<StageCompletion, { stage: "PLAN" }> | null = null;
+	for (const [index, completion] of (callbacks.resumeFrom?.completions ?? []).entries()) {
+		result.stageMachine.start(completion.stage);
+		result.stageMachine.complete(completion);
+		result.memory?.startStage(completion.stage, index + 1, 0);
+		await result.memory?.completeStage([], completion);
+		if (completion.stage === "PLAN") planCompletion = completion;
+	}
+	/** Bind the validated prefix to the latest sealed code and verification results. */
+	const checkpoint = async (): Promise<void> =>
+		callbacks.onCheckpoint?.({
+			completions: result.stageMachine.completedStages.map((completed) =>
+				result.stageMachine.assertComplete(completed),
+			),
+			p0_patch_sha256: p0PatchSha256,
+			v1_patch_sha256: v1PatchSha256,
+			v2_patch_sha256: v2PatchSha256,
+			p1_patch_sha256: p1PatchSha256,
+			verification_feedback: [...verificationFeedback],
+		});
+	// A sealed code checkpoint may precede its interrupted verification. Finish
+	// that verification before starting the next stage, preserving the completed patch.
+	for (const [index, [stage, verification]] of (
+		[
+			["IMPLEMENT", "V0"],
+			["REFINE_1", "V1"],
+			["REFINE_2", "V2"],
+		] as const
+	).entries()) {
+		if (result.stageMachine.isComplete(stage) && verificationFeedback.length === index) {
+			if (planCompletion === null) throw new Error("Restored implementation lacks its PLAN artifact");
+			verificationFeedback.push(await callbacks.controlledVerify(planCompletion, verification));
+			await checkpoint();
+		}
+	}
 	for (const [stageIndex, stage] of config.stages.entries()) {
+		if (result.stageMachine.isComplete(stage)) continue;
 		const stageStarted = performance.now();
 		result.stageMachine.start(stage);
 		result.repoToolOutputBudget.startStage(stage);
@@ -891,6 +939,7 @@ export async function runRepoFixWorkflow(
 				plan_skill_sha256: stage === "PLAN" ? (result.planSkill?.sha256 ?? null) : null,
 			});
 			await result.session.prompt(prompt);
+			callbacks.throwIfInterrupted?.();
 			let initialRecoveryTrigger: StageRecovery["trigger"] | null = null;
 			if (lastAssistantStopReason(result) === "length") {
 				initialRecoveryTrigger = "provider_output_length";
@@ -904,6 +953,7 @@ export async function runRepoFixWorkflow(
 				await result.stageCompletionControl.forceCompletion(stage, initialRecoveryTrigger);
 				for (let attempt = 1; attempt <= MAX_STAGE_COMPLETION_ONLY_ATTEMPTS; attempt += 1) {
 					await result.session.prompt(stageRecoveryPrompt(stage, initialRecoveryTrigger, attempt));
+					callbacks.throwIfInterrupted?.();
 					const retryableByRejectedCompletion = result.stageCompletionControl.consumeRejectedCompletion(stage);
 					if (retryableByRejectedCompletion) rejectedCompletion = true;
 					if (result.stageMachine.isComplete(stage)) break;
@@ -933,16 +983,19 @@ export async function runRepoFixWorkflow(
 		if (completion.stage === "PLAN") planCompletion = completion;
 		if (stage === "IMPLEMENT") {
 			p0PatchSha256 = (await callbacks.capturePatch("P0")).patch_sha256;
+			await checkpoint();
 			if (planCompletion === null) throw new Error("IMPLEMENT reached without a completed PLAN artifact");
 			verificationFeedback.push(await callbacks.controlledVerify(planCompletion, "V0"));
 		}
 		if (stage === "REFINE_1") {
 			v1PatchSha256 = (await callbacks.capturePatch("V1")).patch_sha256;
+			await checkpoint();
 			if (planCompletion === null) throw new Error("REFINE_1 reached without a completed PLAN artifact");
 			verificationFeedback.push(await callbacks.controlledVerify(planCompletion, "V1"));
 		}
 		if (stage === "REFINE_2") {
 			v2PatchSha256 = (await callbacks.capturePatch("V2")).patch_sha256;
+			await checkpoint();
 			if (planCompletion === null) throw new Error("REFINE_2 reached without a completed PLAN artifact");
 			verificationFeedback.push(await callbacks.controlledVerify(planCompletion, "V2"));
 		}
@@ -951,6 +1004,7 @@ export async function runRepoFixWorkflow(
 			if (v2PatchSha256 === null || p1PatchSha256 !== v2PatchSha256)
 				throw new Error("SELF_REVIEW changed the final patch after V2 verification");
 		}
+		await checkpoint();
 	}
 	if (
 		!result.stageMachine.isFinished() ||

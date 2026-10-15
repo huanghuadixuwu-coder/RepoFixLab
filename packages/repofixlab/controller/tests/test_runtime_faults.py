@@ -244,6 +244,9 @@ class DockerCancellationTests(unittest.TestCase):
         self.assertFalse(self.backend.recover_attempt("cancelled").clean)
         self.assertEqual(self.backend.resource_admission.snapshot["nano_cpus"], before)
         self.client.volumes.fail_remove = False
+        for volume in self.client.volumes.created:
+            if volume.labels.get("io.repofixlab.runtime.attempt-id") in self.backend._quarantined_owners:
+                volume.remove(force=True)
         self.assertTrue(self.backend.recover_attempt("cancelled").clean)
         self.assertEqual(self.backend.resource_admission.snapshot["nano_cpus"], 1_000_000_000)
 
@@ -307,7 +310,11 @@ class DockerCancellationTests(unittest.TestCase):
         job = self.service._attempts["oom"].job
         job.container.attrs["State"] = {"Status": "exited", "ExitCode": 137, "OOMKilled": True}
         status = self.service.get_job(response["job_id"])
-        self.assertEqual(status["error_class"], "evaluator_oom")
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["evaluation_retries"], 1)
+        recovery = next(operation for operation in self.service._journal.load()
+                        if operation.request["request_type"] == "runtime_retry_evaluation")
+        self.assertEqual(recovery.response["reason_code"], "evaluator_oom")
         aborted = self.service.abort_attempt(docker_fixture._write_request("runtime_abort_attempt", "oom", "oom:abort"))
         self.assertTrue(aborted.response["cleanup"]["clean"])
 
@@ -333,7 +340,7 @@ class DockerCancellationTests(unittest.TestCase):
             aborting = executor.submit(self.service.abort_attempt, docker_fixture._write_request(
                 "runtime_abort_attempt", "resumed", "resumed:abort"))
             self.assertTrue(aborting.result(timeout=4).response["cleanup"]["clean"])
-            with self.assertRaises(RuntimeServiceUnavailable):
+            with self.assertRaisesRegex(RuntimeInvalidState, "runtime_queue_cancelled"):
                 preparing.result(timeout=1)
         self.assertTrue(interrupted.is_set())
         self.assertTrue(worker.container.removed)

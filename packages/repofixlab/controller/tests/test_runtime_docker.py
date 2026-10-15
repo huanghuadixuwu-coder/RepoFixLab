@@ -853,7 +853,7 @@ class DockerRuntimeBackendTests(unittest.TestCase):
             self.assertEqual(backend._worker_owners, {})
             self.assertEqual(backend._evaluator_owners, {})
 
-    def test_abort_retries_residual_cleanup_and_releases_capacity(self) -> None:
+    def test_abort_audits_manual_residual_cleanup_and_releases_capacity(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             backend, client, candidate = _backend_fixture(root)
@@ -894,6 +894,9 @@ class DockerRuntimeBackendTests(unittest.TestCase):
                 self.assertGreater(blocked["cleanup"]["residual_volume_count"], 0)
 
                 client.volumes.fail_remove = False
+                for volume in client.volumes.created:
+                    if volume.labels.get("io.repofixlab.runtime.attempt-id") == attempt_id:
+                        volume.remove(force=True)
                 aborted = service.abort_attempt(
                     _write_request(
                         "runtime_abort_attempt",

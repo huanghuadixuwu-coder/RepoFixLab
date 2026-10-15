@@ -14,6 +14,7 @@
  *   verification operations and never selects the model or budget.
  */
 
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -24,6 +25,7 @@ import {
 	type ControlledVerificationFeedback,
 	type RepoFixSessionResult,
 	type RepoFixTrajectoryEvent,
+	type RepoFixWorkflowCheckpoint,
 	runRepoFixWorkflow,
 	type StageRecovery,
 } from "../agent/repofix.ts";
@@ -32,15 +34,15 @@ import {
 	getRepoFixWorkflowConfig,
 	type RepoFixConfigId,
 } from "../agent/repofix-config.ts";
-import type { StageCompletion } from "../agent/repofix-fsm.ts";
+import { RepoFixStageMachine, type StageCompletion } from "../agent/repofix-fsm.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
 import { createLayeredMemoryPolicy, type RepoFixMemoryPolicyId } from "../contracts/memory.ts";
 import { createPatchSnapshot, type PatchSnapshot } from "../contracts/run-contracts.ts";
-import type { RepoToolTransport } from "../controller/client.ts";
+import { type RepoToolTransport, RepoToolTransportError } from "../controller/client.ts";
 import { RepoFixContextAssembler, type RepoFixMemoryMetrics, RepoFixMemoryRuntime } from "../memory/assembler.ts";
 import { RepoFixMemoryStore } from "../memory/store.ts";
 import type { RepoToolOutputBudgetSnapshot } from "../sandbox/repo-tools.ts";
-import { ArtifactStore } from "../storage/artifact-store.ts";
+import { ArtifactStore, type StoredArtifact } from "../storage/artifact-store.ts";
 import {
 	HttpRuntimeController,
 	type RuntimeController,
@@ -156,6 +158,7 @@ export interface M4DevWorkflowSummary {
 	readonly plan_skill_sha256?: string | null;
 	readonly repofix_memory_metrics?: RepoFixMemoryMetrics;
 	readonly agent_wall_ms?: number;
+	readonly worker_recoveries?: number;
 }
 
 /** A failure before the first Provider reservation is safe to report without token reconciliation. */
@@ -333,6 +336,8 @@ export async function runM4DevWorkflow(
 	const runDirectory = resolve(options.artifactsRoot, "m4-dev", "runs", runId);
 	const stagingDirectory = resolve(options.artifactsRoot, "m4-dev", "runs", `.staging-${runId}`);
 	const store = await ArtifactStore.createNew(stagingDirectory);
+	let stageStore = store;
+	let workerRecoveries = 0;
 	let leaseId: string | null = null;
 	let workerReleased = false;
 	let sessionDirectory: string | null = null;
@@ -431,7 +436,24 @@ export async function runM4DevWorkflow(
 				options.instanceId,
 			)
 		).leaseId;
-		const transport = dependencies.controller.toolTransport(attemptId);
+		const controllerTransport = dependencies.controller.toolTransport(attemptId);
+		let interruption: RepoToolTransportError | null = null;
+		const transport: RepoToolTransport = {
+			async execute(request, signal) {
+				try {
+					return await controllerTransport.execute(request, signal);
+				} catch (error) {
+					if (
+						error instanceof RepoToolTransportError &&
+						(error.reasonCode === "runtime_worker_exited" || error.reasonCode === "runtime_worker_interrupted")
+					) {
+						interruption = error;
+						repoFixSession?.session.agent.abort();
+					}
+					throw error;
+				}
+			},
+		};
 		try {
 			const probe = await transport.execute({
 				leaseId,
@@ -472,6 +494,7 @@ export async function runM4DevWorkflow(
 			);
 			const estimator = createTokenAdmissionEstimator(options.tokenAdmissionEstimator ?? M4_DEV_TOKEN_ESTIMATOR);
 			let requestSequence = 0;
+			let agentRequests = 0;
 			/** Install reservation-based Provider admission on the active Pi session. */
 			const installSupervisor = (
 				session: PiGeneralSessionResult["session"] | RepoFixSessionResult["session"],
@@ -491,7 +514,12 @@ export async function runM4DevWorkflow(
 					next_request_id: () => `${attemptId}:provider:${String(requestSequence++).padStart(4, "0")}`,
 					request_kind: "agent",
 					stage_id: stageId,
-					prepare_context: prepareContext,
+					prepare_context: async (context, requestId) => {
+						if (interruption !== null) throw interruption;
+						const prepared = prepareContext === undefined ? context : await prepareContext(context, requestId);
+						agentRequests += 1;
+						return prepared;
+					},
 					on_request_id: onRequestId,
 				});
 			};
@@ -540,183 +568,338 @@ export async function runM4DevWorkflow(
 						generatedBy: "controller",
 					},
 				);
-				if (layeredMemoryPolicy !== null) {
-					const memoryStore = new RepoFixMemoryStore(store, options.instanceId, attemptId);
-					memoryRuntime = new RepoFixMemoryRuntime(
-						memoryStore,
-						new RepoFixContextAssembler(memoryStore, layeredMemoryPolicy),
+				let latestSnapshot: RuntimePatchSnapshot | null = null;
+				let codeArtifact: StoredArtifact | null = null;
+				let resumeFrom: RepoFixWorkflowCheckpoint | undefined;
+				const checkpoints: Array<{
+					workflow: RepoFixWorkflowCheckpoint;
+					snapshot: RuntimePatchSnapshot;
+					code: StoredArtifact;
+					artifact: StoredArtifact;
+					verificationHashes: string[];
+				}> = [];
+				/** Bind validated stage state to durable code evidence at each completed boundary. */
+				const saveCheckpoint = async (workflow: RepoFixWorkflowCheckpoint): Promise<void> => {
+					if (latestSnapshot === null || codeArtifact === null || latestSnapshot.policy.status !== "pass") return;
+					const artifact = await store.writeNew(
+						`checkpoints/${checkpoints.length}.json`,
+						stableStringify({
+							workflow,
+							snapshot_id: latestSnapshot.snapshotId,
+							patch_sha256: latestSnapshot.patchSha256,
+							code_path: codeArtifact.path,
+						}),
+						{ mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" },
 					);
-					await memoryRuntime.initialize(publicTask.task.problem_statement);
-				}
-				repoFixSession = await dependencies.createRepoFixSession({
-					leaseId,
-					attemptDirectory: join(sessionDirectory, "session"),
-					cwd: LOGICAL_AGENT_CWD,
-					transport,
-					configId: repoFixConfigId,
-					memory: memoryRuntime ?? undefined,
-					planSkillPolicy,
-				});
-				if (memoryRuntime !== null && layeredMemoryPolicy !== null) {
-					const activeLayeredMemoryPolicy = layeredMemoryPolicy;
-					const activeRepoFixSession = repoFixSession;
-					const model = activeRepoFixSession.session.model;
-					if (model === undefined) throw new Error("RepoFix memory condenser requires the active frozen model");
-					memoryRuntime.setCondenser(async (request) => {
-						const stream = createTokenSupervisedStream(activeRepoFixSession.providerStream, {
-							ledger,
-							run_id: runId,
-							max_output_tokens: request.summary_max_tokens,
-							estimate_input_tokens: () => activeLayeredMemoryPolicy.context_window - request.summary_max_tokens,
-							estimate_base_input_tokens: (context) => estimator.baseEstimate(context),
-							next_request_id: () => `${attemptId}:provider:${String(requestSequence++).padStart(4, "0")}`,
-							request_kind: "condenser",
-							stage_id: request.stage_id,
-						});
-						const output = await stream(model, request.context, {
-							maxTokens: request.summary_max_tokens,
-						});
-						const message = await output.result();
-						if (message.stopReason === "error" || message.stopReason === "aborted") {
-							throw new Error(message.errorMessage ?? "Condenser Provider request failed");
-						}
-						if (message.content.some((item) => item.type === "toolCall")) {
-							throw new Error("Condenser returned a tool call");
-						}
-						const summary = message.content
-							.filter((item) => item.type === "text")
-							.map((item) => item.text)
-							.join("\n")
-							.trim();
-						if (summary.length === 0) throw new Error("Condenser returned no summary text");
-						return summary;
+					checkpoints.push({
+						workflow,
+						snapshot: latestSnapshot,
+						code: codeArtifact,
+						artifact,
+						verificationHashes: [...controlledVerificationSha256s],
+					});
+				};
+				if (dependencies.controller.restoreWorker !== undefined) {
+					latestSnapshot = await dependencies.controller.snapshot(
+						attemptId,
+						`${attemptId}:initial-snapshot`,
+						leaseId,
+					);
+					if (
+						latestSnapshot.policy.status !== "pass" ||
+						latestSnapshot.patch.byteLength !== 0 ||
+						latestSnapshot.baseCommit !== publicTask.task.base_commit
+					)
+						throw new Error("Initial Worker checkpoint is not a clean task baseline");
+					codeArtifact = await store.writeNew("initial.patch", latestSnapshot.patch, {
+						mediaType: "text/x-diff",
+						sensitivity: "internal",
+						generatedBy: "controller",
+					});
+					await saveCheckpoint({
+						completions: [],
+						p0_patch_sha256: null,
+						v1_patch_sha256: null,
+						v2_patch_sha256: null,
+						p1_patch_sha256: null,
+						verification_feedback: [],
 					});
 				}
-				const identity = runtimeIdentityFromSession(repoFixSession.session, dependencies.modelSpecSha256);
-				await store.writeNew(
-					"configuration-diff.json",
-					stableStringify(
-						createRepoFixConfigurationDiffReport({
-							model_spec_sha256: identity.modelSpecSha256,
-							system_prompt_sha256: identity.systemPromptSha256,
-							tool_schema_sha256: identity.toolSchemaSha256,
-						}),
-					),
-					{
-						mediaType: "application/json",
-						sensitivity: "internal",
-						generatedBy: "orchestrator",
-					},
-				);
-				installSupervisor(
-					repoFixSession.session,
-					repoFixSession.prepareProviderContext,
-					() => repoFixSession?.stageMachine.activeStage ?? null,
-					(requestId) => repoFixSession?.stageCompletionControl.setProviderRequestId(requestId),
-				);
-				installRunAdmissionGate(repoFixSession.session, {
-					accountedTokens: null,
-					modelTurns: maxModelTurns,
-					toolCalls: null,
-				});
-				agentStarted = performance.now();
-				await runRepoFixWorkflow(repoFixSession, publicTask.task.problem_statement, {
-					verificationCatalog: {
-						catalog_id: verificationCatalog.catalogId,
-						candidates: verificationCatalog.entries.map((entry) => ({
-							candidate_id: entry.candidateId,
-							description: entry.description,
-						})),
-					},
-					onStageComplete: (completion) => {
-						if (repoFixSession === null)
-							throw new Error("RepoFix session is unavailable while recording stage evidence");
-						return writeStageEvidence(store, completion, repoFixSession.repoToolOutputBudget.snapshot);
-					},
-					onStageRecovery: (recovery) => writeStageRecoveryEvidence(store, recovery),
-					onTrajectoryEvent: async (event) => {
-						repofixTrajectoryEvents.push(event);
-					},
-					capturePatch: async (checkpoint) => {
-						const activeLeaseId = leaseId;
-						if (activeLeaseId === null) throw new Error("M4 Dev worker lease disappeared before snapshot");
-						const snapshot = await persistSnapshot(
-							store,
-							runId,
-							attemptId,
-							checkpoint,
-							await dependencies.controller.snapshot(
-								attemptId,
-								`${attemptId}:${checkpoint.toLowerCase()}-snapshot`,
-								activeLeaseId,
-							),
-						);
-						if (checkpoint === "P0") p0PatchSha256 = snapshot.patch_sha256;
-						else if (checkpoint === "V1") v1PatchSha256 = snapshot.patch_sha256;
-						else if (checkpoint === "V2") v2PatchSha256 = snapshot.patch_sha256;
-						else {
-							p1PatchSha256 = snapshot.patch_sha256;
-							finalSnapshotId = snapshot.snapshot_id;
+				for (;;) {
+					try {
+						if (layeredMemoryPolicy !== null) {
+							const memoryStore = new RepoFixMemoryStore(stageStore, options.instanceId, attemptId);
+							memoryRuntime = new RepoFixMemoryRuntime(
+								memoryStore,
+								new RepoFixContextAssembler(memoryStore, layeredMemoryPolicy),
+							);
+							await memoryRuntime.initialize(publicTask.task.problem_statement);
 						}
-						return { patch_sha256: snapshot.patch_sha256 };
-					},
-					controlledVerify: async (plan, checkpoint) => {
-						const activeLeaseId = leaseId;
-						if (activeLeaseId === null)
-							throw new Error("M4 Dev worker lease disappeared before controlled verification");
-						const response = await runCatalogVerification(
-							attemptId,
-							`${attemptId}:controlled-verify-${checkpoint.toLowerCase()}`,
-							activeLeaseId,
-							verificationCatalog.catalogId,
-							plan.verification_candidate_id,
-						);
-						const feedback = toControlledFeedback(response);
-						const evidence = {
-							schema_version: "v2" as const,
-							evidence_type: "controlled_verification",
-							checkpoint,
-							catalog_id: verificationCatalog.catalogId,
-							candidate_id: plan.verification_candidate_id,
-							result: {
-								catalog_id: response.catalogId,
-								candidate_id: response.candidateId,
-								status: response.status,
-								reason_code: response.reasonCode,
-								safe_hint: response.safeHint,
-								exit_code: response.exitCode,
-								stdout: response.stdout,
-								stderr: response.stderr,
-								truncated: response.truncated,
-								timed_out: response.timedOut,
-								duration_ms: response.durationMs,
-								baseline: {
-									status: response.baseline.status,
-									reason_code: response.baseline.reasonCode,
-									safe_hint: response.baseline.safeHint,
-									exit_code: response.baseline.exitCode,
-									stdout: response.baseline.stdout,
-									stderr: response.baseline.stderr,
-									truncated: response.baseline.truncated,
-									timed_out: response.baseline.timedOut,
-									duration_ms: response.baseline.durationMs,
-								},
-							},
-						};
-						const artifact = await store.writeNew(
-							`controlled-verify-${checkpoint.toLowerCase()}.json`,
-							stableStringify(evidence),
+						repoFixSession = await dependencies.createRepoFixSession({
+							leaseId,
+							attemptDirectory: join(sessionDirectory, `session-${workerRecoveries}`),
+							cwd: LOGICAL_AGENT_CWD,
+							transport,
+							configId: repoFixConfigId,
+							memory: memoryRuntime ?? undefined,
+							planSkillPolicy,
+						});
+						if (memoryRuntime !== null && layeredMemoryPolicy !== null) {
+							const activeLayeredMemoryPolicy = layeredMemoryPolicy;
+							const activeRepoFixSession = repoFixSession;
+							const model = activeRepoFixSession.session.model;
+							if (model === undefined)
+								throw new Error("RepoFix memory condenser requires the active frozen model");
+							memoryRuntime.setCondenser(async (request) => {
+								const stream = createTokenSupervisedStream(activeRepoFixSession.providerStream, {
+									ledger,
+									run_id: runId,
+									max_output_tokens: request.summary_max_tokens,
+									estimate_input_tokens: () =>
+										activeLayeredMemoryPolicy.context_window - request.summary_max_tokens,
+									estimate_base_input_tokens: (context) => estimator.baseEstimate(context),
+									next_request_id: () => `${attemptId}:provider:${String(requestSequence++).padStart(4, "0")}`,
+									request_kind: "condenser",
+									stage_id: request.stage_id,
+								});
+								const output = await stream(model, request.context, {
+									maxTokens: request.summary_max_tokens,
+								});
+								const message = await output.result();
+								if (message.stopReason === "error" || message.stopReason === "aborted") {
+									throw new Error(message.errorMessage ?? "Condenser Provider request failed");
+								}
+								if (message.content.some((item) => item.type === "toolCall")) {
+									throw new Error("Condenser returned a tool call");
+								}
+								const summary = message.content
+									.filter((item) => item.type === "text")
+									.map((item) => item.text)
+									.join("\n")
+									.trim();
+								if (summary.length === 0) throw new Error("Condenser returned no summary text");
+								return summary;
+							});
+						}
+						const identity = runtimeIdentityFromSession(repoFixSession.session, dependencies.modelSpecSha256);
+						await stageStore.writeNew(
+							"configuration-diff.json",
+							stableStringify(
+								createRepoFixConfigurationDiffReport({
+									model_spec_sha256: identity.modelSpecSha256,
+									system_prompt_sha256: identity.systemPromptSha256,
+									tool_schema_sha256: identity.toolSchemaSha256,
+								}),
+							),
 							{
 								mediaType: "application/json",
 								sensitivity: "internal",
-								generatedBy: "controller",
+								generatedBy: "orchestrator",
 							},
 						);
-						if (checkpoint === "V0") controlledVerificationSha256 = artifact.sha256;
-						controlledVerificationSha256s.push(artifact.sha256);
-						return feedback;
-					},
-				});
+						installSupervisor(
+							repoFixSession.session,
+							repoFixSession.prepareProviderContext,
+							() => repoFixSession?.stageMachine.activeStage ?? null,
+							(requestId) => repoFixSession?.stageCompletionControl.setProviderRequestId(requestId),
+						);
+						installRunAdmissionGate(repoFixSession.session, {
+							accountedTokens: null,
+							modelTurns: maxModelTurns,
+							modelTurnsUsed: () => agentRequests,
+							toolCalls: null,
+						});
+						agentStarted ??= performance.now();
+						await runRepoFixWorkflow(repoFixSession, publicTask.task.problem_statement, {
+							resumeFrom,
+							onCheckpoint: saveCheckpoint,
+							throwIfInterrupted: () => {
+								if (interruption !== null) throw interruption;
+							},
+							verificationCatalog: {
+								catalog_id: verificationCatalog.catalogId,
+								candidates: verificationCatalog.entries.map((entry) => ({
+									candidate_id: entry.candidateId,
+									description: entry.description,
+								})),
+							},
+							onStageComplete: (completion) => {
+								if (repoFixSession === null)
+									throw new Error("RepoFix session is unavailable while recording stage evidence");
+								return writeStageEvidence(stageStore, completion, repoFixSession.repoToolOutputBudget.snapshot);
+							},
+							onStageRecovery: (recovery) => writeStageRecoveryEvidence(stageStore, recovery),
+							onTrajectoryEvent: async (event) => {
+								repofixTrajectoryEvents.push(event);
+							},
+							capturePatch: async (checkpoint) => {
+								const activeLeaseId = leaseId;
+								if (activeLeaseId === null) throw new Error("M4 Dev worker lease disappeared before snapshot");
+								latestSnapshot = await dependencies.controller.snapshot(
+									attemptId,
+									`${attemptId}:r${workerRecoveries}:${checkpoint.toLowerCase()}-snapshot`,
+									activeLeaseId,
+								);
+								const snapshot = await persistSnapshot(
+									stageStore,
+									runId,
+									attemptId,
+									checkpoint,
+									latestSnapshot,
+								);
+								const recordedCode = stageStore
+									.listArtifacts()
+									.find((artifact) => artifact.path === snapshotArtifactPath(checkpoint));
+								if (recordedCode === undefined) throw new Error("Checkpoint code artifact is missing");
+								codeArtifact = {
+									...recordedCode,
+									path: workerRecoveries === 0 ? recordedCode.path : `recovery-1/${recordedCode.path}`,
+								};
+								if (checkpoint === "P0") p0PatchSha256 = snapshot.patch_sha256;
+								else if (checkpoint === "V1") v1PatchSha256 = snapshot.patch_sha256;
+								else if (checkpoint === "V2") v2PatchSha256 = snapshot.patch_sha256;
+								else {
+									p1PatchSha256 = snapshot.patch_sha256;
+									finalSnapshotId = snapshot.snapshot_id;
+								}
+								return { patch_sha256: snapshot.patch_sha256 };
+							},
+							controlledVerify: async (plan, checkpoint) => {
+								const activeLeaseId = leaseId;
+								if (activeLeaseId === null)
+									throw new Error("M4 Dev worker lease disappeared before controlled verification");
+								const response = await runCatalogVerification(
+									attemptId,
+									`${attemptId}:r${workerRecoveries}:controlled-verify-${checkpoint.toLowerCase()}`,
+									activeLeaseId,
+									verificationCatalog.catalogId,
+									plan.verification_candidate_id,
+								);
+								const feedback = toControlledFeedback(response);
+								const evidence = {
+									schema_version: "v2" as const,
+									evidence_type: "controlled_verification",
+									checkpoint,
+									catalog_id: verificationCatalog.catalogId,
+									candidate_id: plan.verification_candidate_id,
+									result: {
+										catalog_id: response.catalogId,
+										candidate_id: response.candidateId,
+										status: response.status,
+										reason_code: response.reasonCode,
+										safe_hint: response.safeHint,
+										exit_code: response.exitCode,
+										stdout: response.stdout,
+										stderr: response.stderr,
+										truncated: response.truncated,
+										timed_out: response.timedOut,
+										duration_ms: response.durationMs,
+										baseline: {
+											status: response.baseline.status,
+											reason_code: response.baseline.reasonCode,
+											safe_hint: response.baseline.safeHint,
+											exit_code: response.baseline.exitCode,
+											stdout: response.baseline.stdout,
+											stderr: response.baseline.stderr,
+											truncated: response.baseline.truncated,
+											timed_out: response.baseline.timedOut,
+											duration_ms: response.baseline.durationMs,
+										},
+									},
+								};
+								const artifact = await stageStore.writeNew(
+									`controlled-verify-${checkpoint.toLowerCase()}.json`,
+									stableStringify(evidence),
+									{
+										mediaType: "application/json",
+										sensitivity: "internal",
+										generatedBy: "controller",
+									},
+								);
+								if (checkpoint === "V0") controlledVerificationSha256 = artifact.sha256;
+								controlledVerificationSha256s.push(artifact.sha256);
+								return feedback;
+							},
+						});
+						break;
+					} catch (error) {
+						if (
+							!(error instanceof RepoToolTransportError) ||
+							(error.reasonCode !== "runtime_worker_exited" &&
+								error.reasonCode !== "runtime_worker_interrupted") ||
+							workerRecoveries !== 0 ||
+							dependencies.controller.restoreWorker === undefined
+						)
+							throw error;
+						let selected: (typeof checkpoints)[number] | undefined;
+						for (const checkpoint of [...checkpoints].reverse()) {
+							try {
+								for (const artifact of [checkpoint.artifact, checkpoint.code]) {
+									const bytes = await store.read(artifact.path);
+									if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256)
+										throw new Error("Checkpoint artifact drifted");
+								}
+								const machine = new RepoFixStageMachine(getRepoFixWorkflowConfig(repoFixConfigId));
+								for (const completion of checkpoint.workflow.completions) {
+									machine.start(completion.stage);
+									machine.complete(completion);
+								}
+								selected = checkpoint;
+								break;
+							} catch {
+								/* Try the preceding completed boundary. */
+							}
+						}
+						if (selected === undefined) throw new Error("runtime_checkpoint_missing: no valid Worker checkpoint");
+						if (repoFixSession !== null) {
+							await store.writeNew(
+								"interrupted-trajectory.json",
+								stableStringify(jsonSerializable(repoFixSession.session.messages)),
+								{ mediaType: "application/json", sensitivity: "internal", generatedBy: "agent" },
+							);
+							repoFixSession.session.dispose();
+						}
+						workerRecoveries += 1;
+						const oldLeaseId: string = leaseId;
+						leaseId = (
+							await dependencies.controller.restoreWorker(
+								attemptId,
+								`${attemptId}:restore-worker`,
+								oldLeaseId,
+								selected.snapshot.snapshotId,
+							)
+						).leaseId;
+						resumeFrom = selected.workflow;
+						latestSnapshot = selected.snapshot;
+						codeArtifact = selected.code;
+						p0PatchSha256 = resumeFrom.p0_patch_sha256;
+						v1PatchSha256 = resumeFrom.v1_patch_sha256;
+						v2PatchSha256 = resumeFrom.v2_patch_sha256;
+						p1PatchSha256 = resumeFrom.p1_patch_sha256;
+						controlledVerificationSha256s.splice(
+							0,
+							controlledVerificationSha256s.length,
+							...selected.verificationHashes,
+						);
+						controlledVerificationSha256 = controlledVerificationSha256s[0] ?? null;
+						finalSnapshotId = p1PatchSha256 === null ? null : selected.snapshot.snapshotId;
+						await store.writeNew(
+							"worker-recovery.json",
+							stableStringify({
+								reason_code: error.reasonCode,
+								old_lease_id: oldLeaseId,
+								lease_id: leaseId,
+								snapshot_id: latestSnapshot.snapshotId,
+								checkpoint_path: selected.artifact.path,
+								completed_stages: resumeFrom.completions.map((completion) => completion.stage),
+								worker_recoveries: workerRecoveries,
+							}),
+							{ mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" },
+						);
+						stageStore = await ArtifactStore.createNew(store.resolvePath("recovery-1"));
+						interruption = null;
+					}
+				}
 				await persistRepoFixTrajectory();
 			}
 			if (options.retainWorkerForFormalEvaluation && finalSnapshotId === null) {
@@ -801,6 +984,10 @@ export async function runM4DevWorkflow(
 		if (retainForFormalEvaluation) workerReleased = true;
 	}
 	if (!workerReleased) terminalStatus = "failed";
+	if (stageStore !== store) {
+		for (const artifact of stageStore.listArtifacts())
+			await store.registerClosedFile(`recovery-1/${artifact.path}`, artifact);
+	}
 	const summary: M4DevWorkflowSummary = {
 		schema_version: "v1",
 		summary_type: "m4_dev_workflow",
@@ -809,6 +996,7 @@ export async function runM4DevWorkflow(
 		instance_id: options.instanceId,
 		config_id: options.configId,
 		terminal_status: terminalStatus,
+		worker_recoveries: workerRecoveries,
 		run_directory: runDirectory,
 		p0_patch_sha256: p0PatchSha256,
 		v1_patch_sha256: v1PatchSha256,

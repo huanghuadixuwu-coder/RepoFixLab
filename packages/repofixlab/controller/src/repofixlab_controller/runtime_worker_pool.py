@@ -56,6 +56,7 @@ class WorkerPool(Generic[T]):
         self._entries: dict[str, _Entry[T]] = {}
         self._offered: dict[str, str] = {}
         self._cancelled: set[str] = set()
+        self.failed_attempts: set[str] = set()
         self._demand_waiters = 0
         self.records: list[dict[str, object]] = []
         self._executor = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix=f"{role}-warm")
@@ -98,9 +99,6 @@ class WorkerPool(Generic[T]):
                             entry.interests.add(attempt_id)
                         self._record("merged", entry, attempt_id=attempt_id)
                         return
-                if any(item.state == "blocked" for item in self._entries.values()):
-                    self._record("skipped", attempt_id=attempt_id, reason="pool_capacity")
-                    return
                 if len(self._entries) >= self._capacity:
                     additional_demand = any(item.key == key and item.state == "ready" and item.interests
                         and getattr(item.worker, "parked", False) for item in self._entries.values())
@@ -145,6 +143,7 @@ class WorkerPool(Generic[T]):
                 entry.state = "retiring"
         except Exception as error:
             with self._condition:
+                self.failed_attempts.update(entry.interests)
                 entry.state = "retiring"
                 entry.retire_reason = "prepare_failed"
                 self._record("prepare_failed", entry, error_class=type(error).__name__, error_message=str(error),
@@ -173,10 +172,20 @@ class WorkerPool(Generic[T]):
                     while True:
                         if attempt_id in self._cancelled:
                             raise RuntimeAdmissionCancelled("runtime_queue_cancelled")
-                        if self._stop.is_set() or any(item.state == "blocked" for item in self._entries.values()):
-                            raise RuntimeError("Worker pool is closed or cleanup is blocked")
+                        if self._stop.is_set():
+                            raise RuntimeError("Worker pool is closed")
+                        if any(item.key == key and item.state == "retiring" and attempt_id in item.interests
+                               for item in self._entries.values()):
+                            remaining = deadline - monotonic()
+                            if remaining <= 0:
+                                raise RuntimeAdmissionTimeout("runtime_queue_timeout")
+                            self._condition.wait(remaining)
+                            continue
+                        if attempt_id in self.failed_attempts:
+                            self._record("fallback", attempt_id=attempt_id, environment_sha256=key)
+                            return None
                         entry = next((item for item in self._entries.values()
-                            if item.key == key and item.retire_reason is None and item.state != "claiming"
+                            if item.key == key and item.retire_reason is None and item.state not in {"claiming", "blocked"}
                             and item.waiting_attempt in {None, attempt_id}), None)
                         if entry is None:
                             self._record("miss", attempt_id=attempt_id, environment_sha256=key)
@@ -214,14 +223,17 @@ class WorkerPool(Generic[T]):
         self._retire(entry)
         if isinstance(claim_error, (RuntimeAdmissionCancelled, RuntimeAdmissionBusy)):
             raise claim_error
-        raise RuntimeError("Worker pool claim readiness or identity failed") from claim_error
+        with self._condition:
+            self.failed_attempts.add(attempt_id)
+            self._record("fallback", entry, attempt_id=attempt_id,
+                         error_class=type(claim_error).__name__, error_message=str(claim_error))
+        return None
 
     def recycle(self, worker: T, key: str, reset: Callable[[T], T]) -> bool:
         """Reset a returned lease once; publish only after its journal receipt."""
         owner = getattr(worker, "resource_owner", None) or getattr(worker, "attempt_id")
         with self._condition:
-            if (self._stop.is_set() or len(self._entries) >= self._capacity
-                    or any(item.state == "blocked" for item in self._entries.values())):
+            if self._stop.is_set() or len(self._entries) >= self._capacity:
                 self._record("return_skipped", attempt_id=getattr(worker, "attempt_id"), reason="pool_capacity")
                 return False
             entry = _Entry[T](owner, key, {getattr(worker, "attempt_id")}, state="resetting", worker=worker)
@@ -302,7 +314,7 @@ class WorkerPool(Generic[T]):
         with self._condition:
             entries = [entry for entry in self._entries.values()
                        if not (reason == "resource_pressure" and
-                               (getattr(entry.worker, "parked", False) or entry.state in {"resetting", "claiming"}
+                               (getattr(entry.worker, "parked", False) or entry.state in {"resetting", "claiming", "blocked"}
                                 or entry.waiting_attempt is not None))]
             retiring = []
             for entry in entries:

@@ -165,6 +165,13 @@ Attribution:
 - When the user asks to continue, first resume an in-progress or blocked active workflow; start the recorded next workflow only when no active workflow remains. Verify prior acceptance and actual workspace state first.
 - Changes to the final goal or removal of a required workflow need explicit user confirmation and a spec update.
 
+## RepoFix Failure Recovery Iteration
+
+- For runtime failure fallback or Agent stage rollback work, first read `docs/plans/repofixlab-failure-recovery.md` in full.
+- Use its Docker baseline, user-confirmed rules, and current progress. Discuss each failure class, limit, and stopping condition with the user before recording it as confirmed; implementation follows the confirmed scope.
+- Preserve the existing Agent stage responsibilities. Checkpoint recovery resumes interrupted work; implementation corrections remain in REFINE_1 and REFINE_2.
+- Execute one workflow per user request, record acceptance and remaining issues, and update the next workflow.
+
 ## User Override
 
 If the user's instructions conflict with any rule in this document, ask for explicit confirmation before overriding. Only then execute their instructions.

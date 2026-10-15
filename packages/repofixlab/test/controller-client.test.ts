@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { HttpRepoToolTransport, RepoToolTransportError } from "../src/controller/client.ts";
 import { HttpRuntimeController } from "../src/runner/controller-runtime.ts";
+import { successfulToolResult } from "./runtime-tool-fixture.ts";
 
 function parseRequest(init: RequestInit | undefined): Record<string, unknown> {
 	return JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -20,15 +21,17 @@ function successBody(
 		lease_id: "lease-1",
 		tool: request.tool,
 		input: request.input,
-		result: {
-			tool: request.tool,
-			exit_code: 0,
-			stdout: "export const a = 1;",
-			stderr: "",
-			truncated: false,
-			timed_out: false,
-			duration_ms: 7,
-		},
+		result: successfulToolResult(
+			{
+				leaseId: "lease-1",
+				operationId: String(request.operation_id),
+				tool: "repo_read",
+				input: { path: "src/a.ts" },
+			},
+			"export const a = 1;",
+			0,
+			7,
+		),
 		...overrides,
 	};
 }
@@ -67,12 +70,12 @@ describe("HTTP Repo tool transport", () => {
 			schema_version: "v1",
 			request_type: "runtime_execute_tool",
 			attempt_id: "attempt-1",
-			operation_id: "tool:call-1",
+			operation_id: expect.stringMatching(/^tool-[a-f0-9]{64}$/),
 			tool: "repo_read",
 			input: { path: "src/a.ts" },
 			request_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
 		});
-		expect(result).toEqual({
+		expect(result).toMatchObject({
 			tool: "repo_read",
 			result: {
 				tool: "repo_read",
@@ -107,9 +110,11 @@ describe("HTTP Repo tool transport", () => {
 
 	it("binds the canonical request hash to the path lease without duplicating lease_id in the body", async () => {
 		const hashes: string[] = [];
+		const operations: string[] = [];
 		const fetchFn: typeof fetch = async (input, init) => {
 			const request = parseRequest(init);
 			hashes.push(String(request.request_sha256));
+			operations.push(String(request.operation_id));
 			const leaseId = String(input).includes("/lease-2/") ? "lease-2" : "lease-1";
 			return jsonResponse(successBody(request, { lease_id: leaseId }));
 		};
@@ -129,6 +134,7 @@ describe("HTTP Repo tool transport", () => {
 
 		expect(hashes).toHaveLength(2);
 		expect(hashes[0]).not.toBe(hashes[1]);
+		expect(operations[0]).not.toBe(operations[1]);
 	});
 
 	it("rejects drift in every echoed request identity", async () => {
@@ -247,6 +253,17 @@ describe("HTTP Repo tool transport", () => {
 			expect(error.status).toBe(409);
 			expect(error.message).toContain("worker lease expired");
 		}
+	});
+
+	it("preserves the Controller's Worker failure reason for checkpoint recovery", async () => {
+		const transport = new HttpRepoToolTransport({
+			controllerUrl: "http://controller:8080",
+			attemptId: "attempt-1",
+			fetchFn: async () => jsonResponse({ detail: "runtime_worker_exited" }, 503),
+		});
+		await expect(
+			transport.execute({ leaseId: "lease-1", operationId: "tool:call-1", tool: "repo_diff", input: {} }),
+		).rejects.toMatchObject({ status: 503, reasonCode: "runtime_worker_exited" });
 	});
 
 	it("accepts the Controller's patch_bytes snapshot contract", async () => {

@@ -53,6 +53,11 @@ class RuntimeAdmission:
                     "nano_cpus": self._baseline[0] + sum(item[0] for item in self._active.values()),
                     "memory_bytes": self._baseline[1] + sum(item[1] for item in self._active.values())}
 
+    def has_reservation(self, owner_id: str) -> bool:
+        """Locate the current charge while a role changes lease or reset stage."""
+        with self._condition:
+            return owner_id in self._active
+
     def acquire(self, attempt_id: str, nano_cpus: int = 0, memory_bytes: int = 0) -> None:
         """Reserve once, waiting fairly within a fixed queue and deadline."""
         if (min(nano_cpus, memory_bytes) < 0

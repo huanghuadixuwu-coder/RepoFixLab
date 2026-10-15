@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -8,7 +8,8 @@ import { createHarness, type Harness } from "../../coding-agent/test/suite/harne
 import { createPiGeneralSession, type PiGeneralSessionResult } from "../src/agent/pi-general.ts";
 import { createRepoFixSession, type RepoFixSessionResult } from "../src/agent/repofix.ts";
 import { getRepoFixWorkflowConfig, type RepoFixConfigId } from "../src/agent/repofix-config.ts";
-import type { RepoToolTransport } from "../src/controller/client.ts";
+import { canonicalContractSha256 } from "../src/contracts/run-contracts.ts";
+import { type RepoToolTransport, RepoToolTransportError } from "../src/controller/client.ts";
 import { runM7FormalRun } from "../src/m7/formal-runner.ts";
 import type { RuntimeController, RuntimePatchSnapshot } from "../src/runner/controller-runtime.ts";
 import { type M4DevWorkflowDependencies, runM4DevWorkflow } from "../src/runner/m4-dev-workflow.ts";
@@ -179,6 +180,35 @@ class FakeController implements RuntimeController {
 	}
 }
 
+/** Supply a clean initial snapshot and record the single task-level restoration. */
+function recoverableController(environment: TaskEnvironmentBinding) {
+	const controller = new FakeController(environment);
+	const snapshot = controller.snapshot.bind(controller);
+	let initial = true;
+	controller.snapshot = async () => {
+		if (!initial) return snapshot();
+		initial = false;
+		const patch = new Uint8Array();
+		const digest = createHash("sha256").update(patch).digest("hex");
+		return {
+			snapshotId: `snapshot-${digest}`,
+			patch,
+			patchSha256: digest,
+			baseCommit: BASE_COMMIT,
+			baseTree: { algorithm: "git-sha1", value: "b".repeat(40) },
+			candidateTree: { algorithm: "git-sha1", value: "b".repeat(40) },
+			files: [],
+			policy: { status: "pass", violations: [] },
+			createdAt: "2026-07-20T00:00:01.000Z",
+		};
+	};
+	return Object.assign(controller, {
+		restoreWorker: vi.fn(async (_attempt: string, _operation: string, _lease: string, _snapshot: string) => ({
+			leaseId: "lease-restored",
+		})),
+	});
+}
+
 function completion(stage: string) {
 	switch (stage) {
 		case "UNDERSTAND":
@@ -314,6 +344,274 @@ afterEach(() => {
 });
 
 describe("M4 Dev workflow runner", () => {
+	it.each([
+		...["UNDERSTAND", "LOCALIZE", "PLAN", "IMPLEMENT", "REFINE_1", "REFINE_2", "SELF_REVIEW"].map(
+			(stage) => ({ stage, config: "repofix-full", memory: "legacy-context-v1" }) as const,
+		),
+		{ stage: "IMPLEMENT", config: "repofix-no-localize", memory: "legacy-context-v1" },
+		{ stage: "REFINE_1", config: "repofix-no-verify-feedback", memory: "legacy-context-v1" },
+		{ stage: "REFINE_2", config: "repofix-full", memory: "layered-memory-v1" },
+	] as const)("resumes interrupted $stage with $config and $memory", async ({ stage, config, memory }) => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const stages = getRepoFixWorkflowConfig(config).stages;
+		const index = stages.indexOf(stage as (typeof stages)[number]);
+		const completed = stages.slice(0, index);
+		const message = (stage: string) =>
+			withVerifiedUsage(
+				fauxAssistantMessage(fauxToolCall("stage_complete", completion(stage)), { stopReason: "toolUse" }),
+			);
+		harness.setResponses([
+			...completed.map(message),
+			withVerifiedUsage(
+				fauxAssistantMessage(fauxToolCall("repo_read", { path: "src/a.js" }), { stopReason: "toolUse" }),
+			),
+			...stages.slice(index).map(message),
+		]);
+		const environment = await new FileTaskEnvironmentLockSource().load("axios__axios-5892");
+		const controller = recoverableController(environment);
+		controller.transport.execute = async (request) => {
+			if (request.tool === "repo_read")
+				throw new RepoToolTransportError("Worker exited", 503, "runtime_worker_exited");
+			return { tool: request.tool, result: successfulToolResult(request, "ok", 0, 1) };
+		};
+		const result = await runM4DevWorkflow(
+			{
+				artifactsRoot: join(harness.tempDir, "artifacts"),
+				instanceId: "axios__axios-5892",
+				configId: config,
+				memoryPolicy: memory,
+				planSkillPolicy: memory === "layered-memory-v1" ? "plan-robustness-v1" : "disabled",
+				accountedAdmissionCapTokens: 2_000_000,
+				tokenAdmissionEstimator: { version: "faux-recovery-v1", multiplier: 3, framing_margin_tokens: 4096 },
+			},
+			dependencies(harness, environment, controller),
+		);
+		expect(
+			result.terminal_status,
+			result.terminal_status === "failed" ? await readFile(join(result.run_directory, "error.json"), "utf8") : "",
+		).toBe("completed");
+		expect(result.worker_recoveries).toBe(1);
+		expect(controller.restoreWorker).toHaveBeenCalledTimes(1);
+		const recovery = JSON.parse(await readFile(join(result.run_directory, "worker-recovery.json"), "utf8"));
+		expect(recovery.completed_stages).toEqual(completed);
+		const trajectory = JSON.parse(
+			await readFile(join(result.run_directory, "repofix-control-trajectory.json"), "utf8"),
+		);
+		expect(
+			trajectory.events
+				.filter((event: { event_type: string }) => event.event_type === "stage_started")
+				.map((event: { stage: string }) => event.stage),
+		).toEqual([...completed, stage, ...stages.slice(index)]);
+		const ledger = (await readFile(join(result.run_directory, "token-ledger.jsonl"), "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { event_type: string; request_id: string });
+		const settled = ledger.filter((event) => event.event_type === "reservation_settled");
+		expect(settled).toHaveLength(stages.length + 1);
+		expect(new Set(settled.map((event) => event.request_id)).size).toBe(settled.length);
+		expect(result.controlled_verification_sha256s).toHaveLength(3);
+		if (memory === "layered-memory-v1")
+			expect(result.plan_skill_sha256).toBe("5aa32fdc161c657084f75313e32eea3024a77879503144d0e2264f0139ec2f85");
+	});
+
+	it("finishes interrupted controlled verification from its current sealed patch", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const stages = getRepoFixWorkflowConfig("repofix-full").stages;
+		harness.setResponses(
+			stages.map((stage) =>
+				withVerifiedUsage(
+					fauxAssistantMessage(fauxToolCall("stage_complete", completion(stage)), { stopReason: "toolUse" }),
+				),
+			),
+		);
+		const environment = await new FileTaskEnvironmentLockSource().load("axios__axios-5892");
+		const controller = recoverableController(environment);
+		const verify = controller.verifyCatalogEntry.bind(controller);
+		let verificationCount = 0;
+		controller.verifyCatalogEntry = async () => {
+			if (verificationCount++ === 0) throw new RepoToolTransportError("Worker exited", 503, "runtime_worker_exited");
+			return verify();
+		};
+		const result = await runM4DevWorkflow(
+			{
+				artifactsRoot: join(harness.tempDir, "artifacts"),
+				instanceId: "axios__axios-5892",
+				configId: "repofix-full",
+			},
+			dependencies(harness, environment, controller),
+		);
+		expect(result.terminal_status).toBe("completed");
+		const recovery = JSON.parse(await readFile(join(result.run_directory, "worker-recovery.json"), "utf8"));
+		expect(recovery.completed_stages).toEqual(stages.slice(0, 4));
+		expect(verificationCount).toBe(4);
+		expect(harness.faux.state.callCount).toBe(7);
+		expect(result.controlled_verification_sha256s).toHaveLength(3);
+	});
+
+	it.each(["second-exit", "turn-budget", "previous-checkpoint", "no-checkpoint"] as const)(
+		"stops or falls back according to the confirmed rule: %s",
+		async (scenario) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const environment = await new FileTaskEnvironmentLockSource().load("axios__axios-5892");
+			const controller = recoverableController(environment);
+			const stages = getRepoFixWorkflowConfig("repofix-full").stages;
+			const message = (stage: string) =>
+				withVerifiedUsage(
+					fauxAssistantMessage(fauxToolCall("stage_complete", completion(stage)), { stopReason: "toolUse" }),
+				);
+			const interruption = withVerifiedUsage(
+				fauxAssistantMessage(fauxToolCall("repo_read", { path: "src/a.js" }), { stopReason: "toolUse" }),
+			);
+			harness.setResponses([
+				...stages.slice(0, 3).map(message),
+				interruption,
+				...(scenario === "second-exit"
+					? [interruption]
+					: stages.slice(scenario === "previous-checkpoint" ? 2 : 3).map(message)),
+			]);
+			controller.transport.execute = async (request) => {
+				if (request.tool === "repo_read") {
+					const checkpointRoot = join(harness.tempDir, "artifacts/m4-dev/runs/.staging-run-recovery/checkpoints");
+					if (scenario === "previous-checkpoint") await writeFile(join(checkpointRoot, "3.json"), "corrupted");
+					if (scenario === "no-checkpoint")
+						for (let index = 0; index <= 3; index++)
+							await writeFile(join(checkpointRoot, `${index}.json`), "corrupted");
+					throw new RepoToolTransportError("Worker exited", 503, "runtime_worker_exited");
+				}
+				return { tool: request.tool, result: successfulToolResult(request, "ok", 0, 1) };
+			};
+			const result = await runM4DevWorkflow(
+				{
+					artifactsRoot: join(harness.tempDir, "artifacts"),
+					instanceId: "axios__axios-5892",
+					configId: "repofix-full",
+					runId: "run-recovery",
+					attemptId: "attempt-recovery",
+					maxModelTurns: scenario === "turn-budget" ? 4 : 64,
+					accountedAdmissionCapTokens: 2_000_000,
+					tokenAdmissionEstimator: { version: "faux-recovery-v1", multiplier: 3, framing_margin_tokens: 4096 },
+				},
+				dependencies(harness, environment, controller),
+			);
+			expect(result.terminal_status).toBe(scenario === "previous-checkpoint" ? "completed" : "failed");
+			expect(controller.restoreWorker).toHaveBeenCalledTimes(scenario === "no-checkpoint" ? 0 : 1);
+			if (scenario === "previous-checkpoint") {
+				const recovery = JSON.parse(await readFile(join(result.run_directory, "worker-recovery.json"), "utf8"));
+				expect(recovery.completed_stages).toEqual(stages.slice(0, 2));
+			}
+			if (scenario === "no-checkpoint")
+				expect(await readFile(join(result.run_directory, "error.json"), "utf8")).toContain(
+					"runtime_checkpoint_missing",
+				);
+			if (scenario === "turn-budget") {
+				const ledger = await readFile(join(result.run_directory, "token-ledger.jsonl"), "utf8");
+				expect(ledger.match(/reservation_settled/g)).toHaveLength(4);
+			}
+		},
+	);
+
+	it("publishes the official result when Evaluator cleanup leaves quarantined resources", async () => {
+		vi.stubEnv("DEEPSEEK_API_KEY", "faux-key");
+		vi.stubEnv("DEEPSEEK_API_KEY_FILE", undefined);
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([withVerifiedUsage(fauxAssistantMessage("done"))]);
+		const environment = await new FileTaskEnvironmentLockSource().load("axios__axios-5892");
+		const controller = new FakeController(environment);
+		let patchSha256 = "";
+		const snapshot = controller.snapshot.bind(controller);
+		controller.snapshot = async () => {
+			const result = await snapshot();
+			patchSha256 = result.patchSha256;
+			return result;
+		};
+		const runtime: RuntimeController = {
+			preflight: controller.preflight.bind(controller),
+			prepare: controller.prepare.bind(controller),
+			toolTransport: controller.toolTransport.bind(controller),
+			snapshot: controller.snapshot.bind(controller),
+			destroy: controller.destroy.bind(controller),
+			abort: controller.abort.bind(controller),
+			startEvaluation: async () => ({ jobId: "job-test" }),
+			getJob: async () => ({ status: "completed", resolved: false, errorClass: null }),
+			getArtifacts: async () => {
+				const evaluation = {
+					schema_version: "v1",
+					result_type: "m6_official_evaluation",
+					evaluation_id: "evaluation-test",
+					job_id: "job-test",
+					run_id: "run-test",
+					attempt_id: "attempt-test",
+					instance_id: "axios__axios-5892",
+					base_commit: BASE_COMMIT,
+					harness_mode: "adapted",
+					status: "completed",
+					resolved: false,
+					candidate_patch_sha256: patchSha256,
+					candidate_patch_apply_status: "applied",
+					test_patch_apply_status: "applied",
+					test_executed: true,
+					exit_code: 1,
+					timed_out: false,
+					duration_ms: 1,
+					error_class: null,
+					official_grading: {
+						schema_version: "v1",
+						record_type: "m3_official_log_grade",
+						found: true,
+						instance_id: "axios__axios-5892",
+						resolved: false,
+						fail_to_pass: { passed: 0, failed: 1, total: 1 },
+						pass_to_pass: { passed: 1, failed: 0, total: 1 },
+						status_map_sha256: "c".repeat(64),
+						test_log_sha256: "d".repeat(64),
+					},
+				};
+				const content = new TextEncoder().encode(
+					JSON.stringify({
+						...evaluation,
+						evaluation_sha256: canonicalContractSha256(evaluation),
+					}),
+				);
+				return {
+					artifactSetSha256: "e".repeat(64),
+					artifacts: [
+						{
+							name: "evaluation.json",
+							content,
+							sha256: createHash("sha256").update(content).digest("hex"),
+						},
+					],
+				};
+			},
+			acknowledge: async () => ({ clean: false }),
+		};
+		const result = await runM7FormalRun(
+			{
+				artifactsRoot: join(harness.tempDir, "artifacts"),
+				formalRunsRoot: join(harness.tempDir, "formal"),
+				experimentId: "experiment-test",
+				runId: "run-test",
+				attemptId: "attempt-test",
+				instanceId: "axios__axios-5892",
+				configId: "pi-general",
+				replicate: 1,
+				maxModelTurns: 2,
+			},
+			{ ...dependencies(harness, environment, runtime), sleep: async () => undefined },
+		);
+		expect(result.terminal_status).toBe("completed");
+		expect(result.termination_reason).toBe("official_unresolved");
+		expect(result.patch_snapshot_sha256).toBe(patchSha256);
+		expect(JSON.parse(await readFile(join(harness.tempDir, "formal/run-test/cleanup.json"), "utf8"))).toEqual({
+			worker_clean: true,
+			evaluator_clean: false,
+		});
+		expect(controller.calls).not.toContain("abort");
+	});
 	it.each(["runtime_queue_timeout", "runtime_backend_error"])(
 		"cleans preparation failure %s before a lease is returned",
 		async (failure) => {

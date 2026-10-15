@@ -223,7 +223,7 @@ class EvaluatorPoolTests(unittest.TestCase):
             wait_for(lambda: any(event["event"] == "retired" for event in self.pool.records))
         self.assertEqual(self.backend.resource_admission.snapshot["active"], 0)
         self.assertEqual(self.start("a", snapshot).response["status"], "started")
-        self.assertEqual(sum(event["event"] == "miss" for event in self.pool.records), 1)
+        self.assertEqual(sum(event["event"] == "fallback" for event in self.pool.records), 1)
         self.assertTrue(self.abort("a").response["cleanup"]["clean"])
 
     def test_activation_failure_cleans_physical_owner_and_logical_charge(self):
@@ -243,6 +243,9 @@ class EvaluatorPoolTests(unittest.TestCase):
         self.assertEqual(self.pool.snapshot["blocked"], 1)
         self.assertEqual(self.backend.resource_admission.snapshot["active"], 1)
         self.client.volumes.fail_remove = False
+        for volume in self.client.volumes.created:
+            if volume.labels.get("io.repofixlab.runtime.attempt-id") in self.backend._quarantined_owners:
+                volume.remove(force=True)
         self.pool.evict_idle("retry")
         self.assertEqual(self.backend.resource_admission.snapshot["active"], 0)
         self.abort("a")

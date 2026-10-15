@@ -22,7 +22,7 @@ import {
 } from "../sandbox/protocol.ts";
 
 const repoToolHttpResponseValidator = Compile(RepoToolHttpResponseSchema);
-const DEFAULT_REQUEST_TIMEOUT_MS = 310_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 650_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2_500_000;
 const ERROR_BODY_LIMIT = 4_096;
 
@@ -43,12 +43,14 @@ export interface HttpRepoToolTransportOptions {
 /** Error raised when the Controller transport or response contract fails. */
 export class RepoToolTransportError extends Error {
 	readonly status: number | undefined;
+	readonly reasonCode: string | undefined;
 
 	/** Preserve the optional HTTP status alongside a stable transport error. */
-	constructor(message: string, status?: number) {
+	constructor(message: string, status?: number, reasonCode?: string) {
 		super(message);
 		this.name = "RepoToolTransportError";
 		this.status = status;
+		this.reasonCode = reasonCode;
 	}
 }
 
@@ -70,11 +72,14 @@ function toRepoToolResponse(response: RepoToolHttpResponse): RepoToolResponse {
  * ID is only unique inside an Agent attempt, so bind it to that attempt before
  * it crosses the Controller boundary while preserving retry determinism.
  */
-export function controllerToolOperationId(attemptId: string, toolCallOperationId: string): string {
+export function controllerToolOperationId(attemptId: string, leaseId: string, toolCallOperationId: string): string {
 	const scopedAttemptId = requireIdentifier(attemptId, "attemptId");
+	const scopedLeaseId = requireIdentifier(leaseId, "leaseId");
 	const scopedToolCallOperationId = requireIdentifier(toolCallOperationId, "operationId");
 	return `tool-${createHash("sha256")
 		.update(scopedAttemptId, "utf8")
+		.update("\0", "utf8")
+		.update(scopedLeaseId, "utf8")
 		.update("\0", "utf8")
 		.update(scopedToolCallOperationId, "utf8")
 		.digest("hex")}`;
@@ -106,7 +111,7 @@ export class HttpRepoToolTransport implements RepoToolTransport {
 	/** Send one identity-bound tool request and validate the complete response. */
 	async execute(request: RepoToolRequest, signal?: AbortSignal): Promise<RepoToolResponse> {
 		const leaseId = requireIdentifier(request.leaseId, "leaseId");
-		const operationId = controllerToolOperationId(this.attemptId, request.operationId);
+		const operationId = controllerToolOperationId(this.attemptId, leaseId, request.operationId);
 		const unsignedRequest = {
 			schema_version: "v1" as const,
 			request_type: "runtime_execute_tool" as const,
@@ -140,9 +145,24 @@ export class HttpRepoToolTransport implements RepoToolTransport {
 
 		if (!response.ok) {
 			const responseText = (await response.text()).slice(0, ERROR_BODY_LIMIT);
+			let reasonCode: string | undefined;
+			try {
+				const parsed: unknown = JSON.parse(responseText);
+				if (
+					typeof parsed === "object" &&
+					parsed !== null &&
+					"detail" in parsed &&
+					typeof parsed.detail === "string"
+				) {
+					reasonCode = parsed.detail;
+				}
+			} catch {
+				// Unstructured errors remain diagnostics, never recovery decisions.
+			}
 			throw new RepoToolTransportError(
 				`Repo tool Controller returned HTTP ${response.status}${responseText ? `: ${responseText}` : ""}`,
 				response.status,
+				reasonCode,
 			);
 		}
 

@@ -13,11 +13,12 @@ from pathlib import Path, PurePosixPath
 import re
 import socket
 import tarfile
-from threading import Lock
+from threading import Condition, Lock
 from time import monotonic, sleep
 from types import MappingProxyType
 from uuid import uuid4
 
+from docker.errors import NotFound
 from jsonschema import Draft202012Validator
 
 from .runtime_timing import runtime_phase, timed
@@ -28,6 +29,7 @@ from .container_factory import DockerClientProtocol, RoleLaunchPolicy
 from .factory_service import (
     TrustedCandidate,
     TrustedCandidateCatalog,
+    CandidateCatalogError,
     validate_candidate_images,
 )
 from .runtime_service import (
@@ -95,6 +97,8 @@ _M6_PREPARED_ROOT = "/run/repofixlab/private"
 _M6_EVIDENCE_ROOT = "/run/repofixlab/evidence"
 _M6_DATASET_ROOT = "/data/private"
 _M6_PRISTINE_IMAGE = "repofixlab/pristine-harness:m0-726c5461-final"
+_DOCKER_POLL_SECONDS = 5
+_DOCKER_WAIT_SECONDS = 300
 
 _KEEPALIVE_SCRIPT = "import signal; signal.pause()"
 _WORKER_READY_SCRIPT = """
@@ -352,8 +356,8 @@ print(json.dumps({'kernel_sha256': hashlib.sha256(canonical).hexdigest(),
 """.strip()
 
 
-class RuntimeDockerError(RuntimeError):
-    """The production Docker runtime violated a trusted server-side policy."""
+class RuntimeDockerError(RuntimeServiceUnavailable):
+    """A Docker execution or trusted policy check failed."""
 
 
 @dataclass(frozen=True)
@@ -922,6 +926,10 @@ class DockerRuntimeBackend:
         self._evaluator_owners: dict[str, str] = {}
         self._worker_owner_lock = Lock()
         self._active_generations: dict[tuple[str, str], tuple[str, int]] = {}
+        self._docker_condition = Condition()
+        self._docker_probe_at = float("-inf")
+        self._docker_deadline: float | None = None
+        self._quarantined_owners: set[str] = set()
         self._reset_script = (Path(__file__).with_name("runtime_reset.py")).read_text(encoding="utf-8")
         if configuration.reuse_containers and not (configuration.worker_pool_capacity and configuration.evaluator_pool_capacity):
             raise RuntimeDockerError("container reuse requires both bounded role pools")
@@ -956,14 +964,14 @@ class DockerRuntimeBackend:
             self.worker_pool = WorkerPool(
                 self._configuration.worker_pool_capacity, self._configuration.worker_pool_idle_seconds,
                 reserve=self._reserve_warm_worker, prepare=self._prepare_warm_worker,
-                bind=self._bind_warm_worker, cleanup=lambda owner: self._recover_resources(owner).clean,
+                bind=self._bind_warm_worker, cleanup=self._cleanup_pool_owner,
                 interrupt=self._interrupt_owner,
             )
         if self._configuration.evaluator_pool_capacity:
             self.evaluator_pool = WorkerPool(
                 1, self._configuration.evaluator_pool_idle_seconds, role="evaluator",
                 reserve=self._reserve_warm_evaluator, prepare=self._prepare_warm_evaluator,
-                bind=self._bind_warm_evaluator, cleanup=lambda owner: self._recover_resources(owner).clean,
+                bind=self._bind_warm_evaluator, cleanup=self._cleanup_pool_owner,
                 interrupt=self._interrupt_owner,
             )
 
@@ -987,6 +995,52 @@ class DockerRuntimeBackend:
         if failures:
             raise RuntimeDockerError("runtime shutdown cleanup failed") from failures[0]
 
+    def wait_available(self, attempt_id: str, *, force: bool = False) -> None:
+        """Share one five-second Docker probe; block after five minutes offline."""
+        with self._docker_condition:
+            while True:
+                self.resource_admission.check_cancelled(attempt_id)
+                now = monotonic()
+                if self._docker_deadline is not None and now >= self._docker_deadline:
+                    raise RuntimeDockerError("Docker remained unavailable", reason_code="runtime_docker_blocked")
+                remaining = _DOCKER_POLL_SECONDS - (now - self._docker_probe_at)
+                if remaining > 0 and not (force and self._docker_deadline is None):
+                    if self._docker_deadline is None:
+                        return
+                    self._docker_condition.wait(min(remaining, self._docker_deadline - now))
+                    continue
+                self._docker_probe_at = now
+                try:
+                    ping = getattr(self._client, "ping", None)
+                    if callable(ping):
+                        if ping() is not True:
+                            raise RuntimeError("Docker ping failed")
+                    else:
+                        self._client.containers.list(all=True, filters=_filters(attempt_id))
+                except Exception:
+                    if self._docker_deadline is None:
+                        self._docker_deadline = now + _DOCKER_WAIT_SECONDS
+                else:
+                    if self._docker_deadline is not None and monotonic() >= self._docker_deadline:
+                        raise RuntimeDockerError("Docker remained unavailable", reason_code="runtime_docker_blocked")
+                    self._docker_deadline = None
+                    self._docker_condition.notify_all()
+                    return
+
+    def _cleanup_pool_owner(self, owner: str) -> bool:
+        """Keep a failed claim's residual resources charged to its physical owner."""
+        with self._worker_owner_lock:
+            attempt = next((key for mapping in (self._worker_owners, self._evaluator_owners)
+                            for key, value in mapping.items() if value == owner), owner)
+        reservation = owner if self.resource_admission.has_reservation(owner) else attempt
+        cleanup = self._recover_resources(owner, reservation_id=reservation)
+        if not cleanup.clean and reservation != owner:
+            self.resource_admission.transfer(reservation, owner)
+        with self._worker_owner_lock:
+            self._worker_owners.pop(attempt, None)
+            self._evaluator_owners.pop(attempt, None)
+        return cleanup.clean
+
     def prewarm_worker(self, attempt_id: str, candidate_id: str, instance_id: str) -> None:
         """Accept known tasks through their sealed server-side candidate binding."""
         candidate = self._candidate(candidate_id, instance_id)
@@ -1009,7 +1063,7 @@ class DockerRuntimeBackend:
 
     def _prepare_warm_worker(self, owner_id: str, key: str) -> DockerRuntimeWorker:
         candidate = self._pool_candidates[key]
-        self._validate_local_images()
+        self._validate_local_images(candidate)
         labels = {**_labels(owner_id, candidate.candidate_id, "worker"),
                   _POOL_LABEL: self._pool_namespace, _ENVIRONMENT_LABEL: key}
         return self._create_worker(owner_id, candidate, labels)
@@ -1158,7 +1212,7 @@ class DockerRuntimeBackend:
     def _resume_role(self, handle: DockerRuntimeWorker | DockerRuntimeEvaluator, *,
                      verify_volumes: bool = True, input_empty: bool = True) -> None:
         """Recheck parked volumes, start the same container, restore trusted tmpfs tools."""
-        self._validate_local_images()
+        self._validate_local_images(handle.candidate)
         role = "worker" if isinstance(handle, DockerRuntimeWorker) else "evaluator"
         policy = getattr(handle.candidate.definition, role)
         mounts = (handle.mounts if role == "evaluator" else
@@ -1278,7 +1332,7 @@ class DockerRuntimeBackend:
     def _create_prepared_evaluator(self, owner_id: str, candidate: TrustedCandidate,
                                    labels: Mapping[str, str], *, patch: bytes | None = None) -> DockerRuntimeEvaluator:
         """Create standby mounts; a cold claim seals its patch before first start."""
-        self._validate_local_images()
+        self._validate_local_images(candidate)
         private_task = self._private_task_bindings[candidate.candidate_id]
         self._require_private_volume(private_task.volume_name)
         try:
@@ -1428,7 +1482,7 @@ class DockerRuntimeBackend:
                                     prepared_m6_task=prepared, resource_owner=evaluator.resource_owner,
                                     generation=evaluator.generation, evaluator=evaluator)
         except Exception:
-            self._remove_resources(evaluator.container, evaluator.volumes, owner_id, reservation_id=attempt_id)
+            self._remove_resources(owner_id, reservation_id=attempt_id)
             raise
 
     @timed("runtime.preflight", role="controller")
@@ -1438,7 +1492,7 @@ class DockerRuntimeBackend:
         candidate = self._candidate(candidate_id, instance_id)
         task_lock = self._task_locks[candidate.candidate_id]
         private_task = self._private_task_bindings[candidate.candidate_id]
-        self._validate_local_images()
+        self._validate_local_images(candidate)
         policy = {
             "schema_version": "v1",
             "candidate_sha256": candidate.candidate_sha256,
@@ -1466,11 +1520,12 @@ class DockerRuntimeBackend:
 
     @timed("worker.prepare", role="worker")
     def prepare_worker(
-        self, attempt_id: str, candidate_id: str, instance_id: str
+        self, attempt_id: str, candidate_id: str, instance_id: str, *, from_pool: bool = True
     ) -> object:
         candidate = self._candidate(candidate_id, instance_id)
-        self._validate_local_images()
-        if self.worker_pool is not None:
+        self.wait_available(attempt_id)
+        self._validate_local_images(candidate)
+        if from_pool and self.worker_pool is not None:
             worker = self.worker_pool.take(attempt_id, self._worker_environment_key(candidate))
             if worker is not None:
                 return worker
@@ -1545,7 +1600,7 @@ class DockerRuntimeBackend:
             self._check_worker_ready(worker)
             return worker
         except Exception:
-            self._remove_resources(container, tuple(volumes), attempt_id)
+            self._remove_resources(attempt_id)
             raise
 
     @timed("worker.ready", role="worker")
@@ -1603,10 +1658,9 @@ class DockerRuntimeBackend:
         encoded = base64.b64encode(
             _canonical_bytes({"tool": tool, "input": dict(arguments)})
         ).decode("ascii")
-        output = self._exec_json(
-            handle.container,
+        output = self._exec_worker_json(
+            handle,
             ["python3", _WORKER_ENTRY, "tool", encoded],
-            user=handle.candidate.definition.worker.user,
             tool_error=True,
         )
         if (
@@ -1624,10 +1678,9 @@ class DockerRuntimeBackend:
     def verification_catalog(self, worker: object) -> RuntimeVerificationCatalog:
         handle = _worker_handle(worker)
         self._assert_lease(handle, "worker")
-        output = self._exec_json(
-            handle.container,
+        output = self._exec_worker_json(
+            handle,
             ["python3", _WORKER_ENTRY, "verification-catalog"],
-            user=handle.candidate.definition.worker.user,
         )
         if (
             set(output) != {"schema_version", "response_type", "catalog"}
@@ -1698,10 +1751,9 @@ class DockerRuntimeBackend:
                 }
             )
         ).decode("ascii")
-        output = self._exec_json(
-            handle.container,
+        output = self._exec_worker_json(
+            handle,
             ["python3", _WORKER_ENTRY, "verify", encoded],
-            user=handle.candidate.definition.worker.user,
             tool_error=True,
         )
         if (
@@ -1719,12 +1771,49 @@ class DockerRuntimeBackend:
     def snapshot_patch(self, worker: object) -> RuntimeSnapshotEvidence:
         handle = _worker_handle(worker)
         self._assert_lease(handle, "worker")
-        output = self._exec_json(
-            handle.container,
-            ["python3", _WORKER_ENTRY, "snapshot"],
-            user=handle.candidate.definition.worker.user,
-        )
+        output = self._exec_worker_json(handle, ["python3", _WORKER_ENTRY, "snapshot"],
+                                        failure_code="runtime_snapshot_failed")
         return _snapshot_evidence(output)
+
+    def _exec_worker_json(self, handle: DockerRuntimeWorker, command: list[str], *,
+                          tool_error: bool = False, failure_code: str = "runtime_backend_error") -> Mapping[str, object]:
+        """Distinguish an exited Worker from a failed tool or snapshot operation."""
+        self.wait_available(handle.attempt_id)
+        try:
+            _reload(handle.container)
+            if _container_state(handle.container).get("Status") in {"exited", "dead"}:
+                raise RuntimeDockerError("Worker exited", reason_code="runtime_worker_exited")
+            return self._exec_json(handle.container, command, user=handle.candidate.definition.worker.user,
+                                   tool_error=tool_error, failure_code=failure_code)
+        except Exception as error:
+            self.wait_available(handle.attempt_id, force=True)
+            try:
+                _reload(handle.container)
+            except NotFound:
+                raise RuntimeDockerError("Worker disappeared", reason_code="runtime_worker_exited") from error
+            if _container_state(handle.container).get("Status") in {"exited", "dead"}:
+                raise RuntimeDockerError("Worker exited", reason_code="runtime_worker_exited") from error
+            raise
+
+    def restore_worker(self, worker: object, patch: bytes) -> tuple[object, RuntimeVerificationCatalog]:
+        """Destroy the interrupted Worker and apply its sealed patch in a fresh one."""
+        handle = _worker_handle(worker)
+        self._assert_lease(handle, "worker")
+        cleanup = self._remove_resources(handle.resource_owner or handle.attempt_id,
+                                         reservation_id=handle.attempt_id)
+        if not cleanup.clean:
+            raise RuntimeDockerError("Worker cleanup left residual resources", reason_code="runtime_cleanup_blocked")
+        replacement = _worker_handle(self.prepare_worker(handle.attempt_id, handle.candidate.candidate_id,
+                                                         handle.candidate.instance_id, from_pool=False))
+        # Read baseline choices before restoring code so the sealed PLAN stays valid.
+        catalog = self.verification_catalog(replacement)
+        if patch:
+            target = "/tmp/repofixlab-checkpoint.patch"
+            user = replacement.candidate.definition.worker.user
+            _inject_file(replacement.container, target, patch, user=user, writable_roots=("/tmp",))
+            self._exec_text(replacement.container, ["git", "-C", _WORKSPACE_ROOT, "apply", "--check", target], user=user)
+            self._exec_text(replacement.container, ["git", "-C", _WORKSPACE_ROOT, "apply", target], user=user)
+        return replacement, catalog
 
     @timed("worker.cleanup", role="worker")
     def destroy_worker(self, worker: object) -> RuntimeCleanupResult:
@@ -1733,8 +1822,6 @@ class DockerRuntimeBackend:
         if self._configuration.reuse_containers:
             return self._return_role(handle, "worker")
         return self._remove_resources(
-            handle.container,
-            handle.volumes,
             handle.resource_owner or handle.attempt_id,
             reservation_id=handle.attempt_id,
         )
@@ -1751,6 +1838,7 @@ class DockerRuntimeBackend:
         patch: bytes,
     ) -> object:
         candidate = self._candidate(candidate_id, instance_id)
+        self.wait_available(attempt_id)
         if self.evaluator_pool is not None:
             return self._start_pooled_evaluation(attempt_id, run_id, job_id, evaluation_id, candidate, patch)
         # Helpers finish before the role starts; grading begins after role exit.
@@ -1775,7 +1863,7 @@ class DockerRuntimeBackend:
         for identifier in (run_id, job_id, evaluation_id):
             if _IDENTIFIER.fullmatch(identifier) is None:
                 raise RuntimeDockerError("evaluation identity is malformed")
-        self._validate_local_images()
+        self._validate_local_images(candidate)
         self._require_private_volume(private_task.volume_name)
         labels = _labels(attempt_id, candidate_id, "evaluator")
         created: list[object] = []
@@ -1910,7 +1998,7 @@ class DockerRuntimeBackend:
                     _remove_container(seed)
                 except Exception:
                     pass
-            self._remove_resources(evaluator, tuple(created), attempt_id)
+            self._remove_resources(attempt_id)
             raise
 
     def _reserve_evaluator(self, attempt_id: str, candidate: TrustedCandidate, *, wait: bool = True) -> bool:
@@ -2128,7 +2216,7 @@ class DockerRuntimeBackend:
             if _IDENTIFIER.fullmatch(identifier) is None:
                 raise RuntimeDockerError("evaluation identity is malformed")
         private_task = self._private_task_bindings[candidate.candidate_id]
-        self._validate_local_images()
+        self._validate_local_images(candidate)
         labels = _labels(attempt_id, candidate.candidate_id, "evaluator")
         created: list[object] = []
         seed: object | None = None
@@ -2231,7 +2319,7 @@ class DockerRuntimeBackend:
                     _remove_container(seed)
                 except Exception:
                     pass
-            self._remove_resources(evaluator, tuple(created), attempt_id)
+            self._remove_resources(attempt_id)
             raise
 
     @timed("evaluator.official_grade", role="evaluator")
@@ -2276,7 +2364,12 @@ class DockerRuntimeBackend:
     def get_job(self, job: object) -> RuntimeJobStatus:
         handle = _job_handle(job)
         self._assert_lease(handle, "evaluator")
-        _reload(handle.container)
+        self.wait_available(handle.attempt_id)
+        try:
+            _reload(handle.container)
+        except Exception:
+            self.wait_available(handle.attempt_id, force=True)
+            _reload(handle.container)
         state = _container_state(handle.container)
         status = state.get("Status")
         if status in {"created", "restarting"}:
@@ -2310,6 +2403,7 @@ class DockerRuntimeBackend:
     def get_artifacts(self, job: object) -> Mapping[str, bytes]:
         handle = _job_handle(job)
         self._assert_lease(handle, "evaluator")
+        self.wait_available(handle.attempt_id)
         if handle.artifacts is None:
             artifacts = {
                 name: _read_container_file(
@@ -2322,6 +2416,13 @@ class DockerRuntimeBackend:
             handle.artifacts = artifacts
         return MappingProxyType(dict(handle.artifacts))
 
+    def discard_evaluation(self, job: object) -> RuntimeCleanupResult:
+        """Destroy a failed Evaluator before the single allowed re-evaluation."""
+        handle = _job_handle(job)
+        self._assert_lease(handle, "evaluator")
+        return self._remove_resources(handle.resource_owner or handle.attempt_id,
+                                      reservation_id=handle.attempt_id)
+
     @timed("evaluator.cleanup", role="evaluator")
     def acknowledge_artifacts(self, job: object) -> RuntimeCleanupResult:
         handle = _job_handle(job)
@@ -2331,8 +2432,6 @@ class DockerRuntimeBackend:
         if self._configuration.reuse_containers and handle.evaluator is not None:
             return self._return_role(handle.evaluator, "evaluator")
         return self._remove_resources(
-            handle.container,
-            handle.volumes,
             handle.resource_owner or handle.attempt_id,
             reservation_id=handle.attempt_id,
         )
@@ -2357,36 +2456,46 @@ class DockerRuntimeBackend:
         return replace(cleanup, errors=cleanup.errors + tuple(errors))
 
     def _recover_resources(self, attempt_id: str, *, reservation_id: str | None = None) -> RuntimeCleanupResult:
-        errors: list[str] = []
-        try:
-            containers = list(
-                self._client.containers.list(all=True, filters=_filters(attempt_id))
-            )
-        except Exception as error:
-            containers = []
-            errors.append(f"container_list:{type(error).__name__}")
-        for container in containers:
-            try:
-                _remove_container(container)
-            except Exception as error:
-                errors.append(f"container_remove:{type(error).__name__}")
-        try:
-            volumes = list(self._client.volumes.list(filters=_filters(attempt_id)))
-        except Exception as error:
-            volumes = []
-            errors.append(f"volume_list:{type(error).__name__}")
-        for volume in volumes:
-            try:
-                volume.remove(force=True)
-            except Exception as error:
-                errors.append(f"volume_remove:{type(error).__name__}")
-        residual_containers, residual_volumes, audit_errors = self._audit(attempt_id)
-        errors.extend(audit_errors)
-        cleanup = RuntimeCleanupResult(
-            residual_container_count=residual_containers,
-            residual_volume_count=residual_volumes,
-            errors=tuple(errors),
-        )
+        """Remove owned resources once plus one retry; quarantine remaining charge."""
+        with self._worker_owner_lock:
+            quarantined = attempt_id in self._quarantined_owners
+        for retry in range(1 if quarantined else 2):
+            errors: list[str] = []
+            if quarantined:
+                containers, volumes = [], []
+            else:
+                try:
+                    containers = list(self._client.containers.list(all=True, filters=_filters(attempt_id)))
+                except Exception as error:
+                    containers = []
+                    errors.append(f"container_list:{type(error).__name__}")
+                try:
+                    volumes = list(self._client.volumes.list(filters=_filters(attempt_id)))
+                except Exception as error:
+                    volumes = []
+                    errors.append(f"volume_list:{type(error).__name__}")
+            for container in containers:
+                try:
+                    _remove_container(container)
+                except Exception as error:
+                    errors.append(f"container_remove:{type(error).__name__}")
+            for volume in volumes:
+                try:
+                    volume.remove(force=True)
+                except Exception as error:
+                    errors.append(f"volume_remove:{type(error).__name__}")
+            residual_containers, residual_volumes, audit_errors = self._audit(attempt_id)
+            errors.extend(audit_errors)
+            if quarantined and (residual_containers or residual_volumes):
+                errors.append("cleanup_retry_exhausted")
+            cleanup = RuntimeCleanupResult(residual_containers, residual_volumes, tuple(errors))
+            if cleanup.clean:
+                break
+        with self._worker_owner_lock:
+            if cleanup.clean:
+                self._quarantined_owners.discard(attempt_id)
+            else:
+                self._quarantined_owners.add(attempt_id)
         if cleanup.clean:
             self.resource_admission.release(reservation_id or attempt_id)
             with self._worker_owner_lock:
@@ -2398,6 +2507,8 @@ class DockerRuntimeBackend:
     def cancel_pending(self, attempt_id: str) -> None:
         """Interrupt owned execution; ordered cleanup retains the reservation."""
         self.resource_admission.cancel(attempt_id)
+        with self._docker_condition:
+            self._docker_condition.notify_all()
         with self._worker_owner_lock:
             owners = {self._worker_owners.get(attempt_id, attempt_id),
                       self._evaluator_owners.get(attempt_id, attempt_id)}
@@ -2430,15 +2541,23 @@ class DockerRuntimeBackend:
     def _candidate(self, candidate_id: str, instance_id: str) -> TrustedCandidate:
         task_lock = self._task_locks.get(candidate_id)
         if task_lock is None:
-            raise RuntimeDockerError("runtime candidate is not TaskEnvironmentLock bound")
+            raise RuntimeDockerError("runtime candidate is not TaskEnvironmentLock bound", reason_code="runtime_configuration_blocked")
         candidate = self._catalog.candidate(candidate_id)
         if instance_id != candidate.instance_id or instance_id != task_lock.instance_id:
-            raise RuntimeDockerError("runtime instance is not TaskEnvironmentLock bound")
+            raise RuntimeDockerError("runtime instance is not TaskEnvironmentLock bound", reason_code="runtime_configuration_blocked")
         return candidate
 
     @timed("image.validate")
-    def _validate_local_images(self) -> None:
-        validate_candidate_images(self._client, self._catalog)
+    def _validate_local_images(self, candidate: TrustedCandidate) -> None:
+        catalog = TrustedCandidateCatalog({candidate.candidate_id: candidate})
+        try:
+            validate_candidate_images(self._client, catalog)
+        except CandidateCatalogError as error:
+            self.wait_available(candidate.candidate_id, force=True)
+            try:
+                validate_candidate_images(self._client, catalog)
+            except CandidateCatalogError:
+                raise RuntimeDockerError("Candidate image validation failed", reason_code="runtime_image_blocked") from error
 
     def _require_private_volume(self, volume_name: str) -> object:
         get = getattr(self._client.volumes, "get", None)
@@ -2521,12 +2640,13 @@ class DockerRuntimeBackend:
         *,
         user: str,
         tool_error: bool = False,
+        failure_code: str = "runtime_backend_error",
     ) -> Mapping[str, object]:
         exit_code, stdout, _stderr = _exec(container, command, user=user)
         if exit_code != 0:
             if tool_error and exit_code == 2:
                 raise RuntimeToolError("worker tool request was rejected")
-            raise RuntimeDockerError("runtime container command failed")
+            raise RuntimeDockerError("runtime container command failed", reason_code=failure_code)
         try:
             value = json.loads(stdout.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as error:
@@ -2542,37 +2662,15 @@ class DockerRuntimeBackend:
 
     def _remove_resources(
         self,
-        container: object | None,
-        volumes: tuple[object, ...],
         attempt_id: str,
         *, reservation_id: str | None = None,
     ) -> RuntimeCleanupResult:
-        errors: list[str] = []
-        if container is not None:
-            try:
-                _remove_container(container)
-            except Exception as error:
-                errors.append(f"container_remove:{type(error).__name__}")
-        for volume in reversed(volumes):
-            try:
-                volume.remove(force=True)
-            except Exception as error:
-                errors.append(f"volume_remove:{type(error).__name__}")
-        residual_containers, residual_volumes, audit_errors = self._audit(attempt_id)
-        errors.extend(audit_errors)
-        cleanup = RuntimeCleanupResult(
-            residual_container_count=residual_containers,
-            residual_volume_count=residual_volumes,
-            errors=tuple(errors),
-        )
+        """Audit cleanup by trusted owner, including partially created resources."""
+        cleanup = self._recover_resources(attempt_id, reservation_id=reservation_id)
         if cleanup.clean:
-            self.resource_admission.release(reservation_id or attempt_id)
             with self._worker_owner_lock:
                 self._worker_owners.pop(reservation_id or attempt_id, None)
                 self._evaluator_owners.pop(reservation_id or attempt_id, None)
-                for key, value in list(self._active_generations.items()):
-                    if value[0] == (reservation_id or attempt_id):
-                        self._active_generations.pop(key)
         return cleanup
 
     def _audit(self, attempt_id: str) -> tuple[int, int, list[str]]:

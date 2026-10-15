@@ -517,3 +517,7 @@ resume_action:
 - 提交：运行时 `9a8c32e7caf6da7481a8eb78a0aecee1cefa3d86`；README 与本记录随后作为文档提交交付。远端目标为 [origin/docker](https://github.com/huanghuadixuwu-coder/RepoFixLab/tree/docker)。
 - 验证证据：`artifacts/docker-wf7/publication-validation.json` 记录提交前范围、源码边界、286 项测试、完整仓库检查与真实关闭清理；对应 `pre-push-*.log` 保存原始输出。
 - `remaining_issues`：无。WF0–WF7 完成，发布修复与文档验收完成。
+
+### 7.13 后续迭代：失败恢复与阶段回退
+
+2026-10-14 用户启动下一轮迭代，确认同时覆盖 Docker 运行时与 Agent 阶段回退，分别制定工作流。新规格为 [失败恢复与阶段回退](repofixlab-failure-recovery.md)，开发基线为已发布的 `docker` 提交 `777e1828`。后续失败恢复工作按新规格的进度执行。

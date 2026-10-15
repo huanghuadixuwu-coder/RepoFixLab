@@ -89,8 +89,8 @@ class PoolReplacementTests(unittest.TestCase):
         self.assertFalse(self.reserved)
         self.assertEqual(self.pool.snapshot["blocked"], 1)
         self.assertEqual(sum(self.pool.snapshot.values()), 2)
-        with self.assertRaisesRegex(RuntimeError, "blocked"):
-            self.pool.take("next-B", "B")
+        self.assertIsNone(self.pool.take("next-B", "B"))
+        self.assertEqual(self.pool.snapshot["blocked"], 1)
 
     def test_cancel_during_duplicate_cleanup_prevents_new_preparation(self):
         self.returned("first", "A")
@@ -238,9 +238,12 @@ class WorkerPoolTests(unittest.TestCase):
                     container.attrs["Image"] = "sha256:" + "0" * 64
                 else:
                     container.files["/tmp/repofixlab-runtime-worker/runtime_tools.py"] = b"changed"
-                with self.assertRaisesRegex(RuntimeError, "claim"):
-                    self.backend.prepare_worker(attempt, self.candidate.candidate_id, self.candidate.instance_id)
+                replacement = self.backend.prepare_worker(attempt, self.candidate.candidate_id, self.candidate.instance_id)
                 self.assertTrue(container.removed)
+                self.assertNotEqual(replacement.container.id, container.id)
+                self.assertIn(attempt, self.pool.failed_attempts)
+                self.backend._check_worker_ready(replacement)
+                self.assertTrue(self.backend.destroy_worker(replacement).clean)
                 self.assertEqual(self.backend.resource_admission.snapshot["active"], 0)
 
     def test_idle_expiry_reclaims_resources_without_a_new_request(self):
@@ -357,7 +360,7 @@ class WorkerPoolTests(unittest.TestCase):
             self.assertTrue(self.client.containers.created[-1].removed)
             self.assertEqual(self.backend.resource_admission.snapshot["active"], 0)
 
-    def test_cleanup_failure_keeps_reservation_and_blocks_claims_until_retry(self):
+    def test_cleanup_failure_keeps_reservation_and_allows_cold_creation_when_budget_fits(self):
         self.preflight("a")
         self.pool.wait_prepared()
         self.client.volumes.fail_remove = True
@@ -365,10 +368,17 @@ class WorkerPoolTests(unittest.TestCase):
             self.pool.evict_idle()
         self.assertEqual(self.pool.snapshot["blocked"], 1)
         self.assertEqual(self.backend.resource_admission.snapshot["active"], 1)
-        with self.assertRaisesRegex(RuntimeError, "blocked"):
-            self.backend.prepare_worker("b", self.candidate.candidate_id, self.candidate.instance_id)
+        replacement = self.backend.prepare_worker("b", self.candidate.candidate_id, self.candidate.instance_id)
+        self.assertEqual(self.backend.resource_admission.snapshot["active"], 2)
+        self.assertEqual(self.pool.snapshot["blocked"], 1)
         self.client.volumes.fail_remove = False
+        # Manual removal resolves quarantine; automatic cleanup remains exhausted.
+        for volume in self.client.volumes.created:
+            if volume.labels.get("io.repofixlab.runtime.attempt-id") in self.backend._quarantined_owners:
+                volume.remove(force=True)
         self.pool.evict_idle("retry")
+        self.assertFalse(replacement.container.removed)
+        self.assertTrue(self.backend.destroy_worker(replacement).clean)
         self.assertEqual(self.backend.resource_admission.snapshot["active"], 0)
 
     def test_speculation_yields_to_demand_and_budget(self):
