@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added bounded runtime recovery with task-scoped pool fallback, shared Docker availability polling, one snapshot retry, one Evaluator re-evaluation, and resource quarantine after cleanup retries are exhausted.
+- Added one Worker restoration per task from the nearest valid code and stage checkpoint, preserving PLAN, verification progress, token accounting, and model-turn limits.
 - Added the initial v1 cross-language contracts and deterministic JSON Schema generator.
 - Added the Docker Compose bootstrap doctor, strict Controller health boundary, machine-readable evidence report,
   and fail-closed CLI.

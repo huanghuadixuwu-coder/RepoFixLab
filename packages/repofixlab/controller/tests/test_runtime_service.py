@@ -121,6 +121,21 @@ class _Job:
 
 
 class FakeDockerRuntimeBackend:
+    def start_runtime(self, journal_identity: str) -> None:
+        """This fixture owns no speculative Docker resources."""
+
+    def close(self) -> None:
+        """The test repository lifetime is managed by TemporaryDirectory."""
+
+    def prewarm_worker(self, attempt_id: str, candidate_id: str, instance_id: str) -> None:
+        """Repository fixtures prepare synchronously when a lease is requested."""
+
+    def prewarm_evaluator(self, attempt_id: str, candidate_id: str, instance_id: str) -> None:
+        """This fixture grades synchronously after Worker cleanup."""
+
+    def cancel_pending(self, attempt_id: str) -> None:
+        """The repository fixture has no asynchronous stage admission."""
+
     def __init__(
         self,
         repository: Path,
@@ -282,6 +297,8 @@ def _service(
     return RuntimeOperationService(
         backend,
         RuntimeOperationJournal(journal_root.resolve()),
+        capacity=1,
+        max_waiting=0,
         id_factory=_IdFactory(),
     )
 

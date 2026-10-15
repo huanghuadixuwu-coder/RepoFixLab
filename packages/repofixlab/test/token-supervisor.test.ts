@@ -1,8 +1,8 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Api, createAssistantMessageEventStream, fauxAssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createAssistantMessageEventStream, fauxAssistantMessage, type Api, type Model } from "@earendil-works/pi-ai";
 import {
 	createTokenAdmissionEstimator,
 	FsyncTokenLedgerSink,
@@ -47,9 +47,9 @@ describe("TokenReservationLedger", () => {
 			max_output_tokens: 40,
 		});
 		if (!admission.admitted) throw new Error("Expected admission");
-		expect(() => ledger.settle(admission.reservation, { input_tokens: 31, output_tokens: 30, total_tokens: 61 })).toThrow(
-			/exceeded/,
-		);
+		expect(() =>
+			ledger.settle(admission.reservation, { input_tokens: 31, output_tokens: 30, total_tokens: 61 }),
+		).toThrow(/exceeded/);
 		expect(ledger.requiresReconciliation).toBe(true);
 		expect(
 			ledger.reserve({ request_id: "request-2", run_id: "run-2", estimated_input_tokens: 1, max_output_tokens: 1 }),
@@ -78,7 +78,10 @@ describe("TokenReservationLedger", () => {
 			});
 			expect(admission.admitted).toBe(true);
 			sink.close();
-			const events = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+			const events = (await readFile(path, "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
 			expect(events).toHaveLength(1);
 			expect(events[0]?.event_type).toBe("reservation_open");
 			const estimator = createTokenAdmissionEstimator({ version: "v1", multiplier: 1.25, framing_margin_tokens: 8 });
@@ -127,8 +130,8 @@ describe("TokenReservationLedger", () => {
 			next_request_id: () => `request-${++requestNumber}`,
 		});
 		const model = { api: "faux", provider: "faux", id: "faux-model" } as Model<Api>;
-		await session.agent.streamFn(model, { messages: [] }).result();
-		const blocked = await session.agent.streamFn(model, { messages: [] }).result();
+		await (await session.agent.streamFn(model, { messages: [] })).result();
+		const blocked = await (await session.agent.streamFn(model, { messages: [] })).result();
 		expect(providerCalls).toBe(1);
 		expect(blocked.stopReason).toBe("error");
 		expect(blocked.errorMessage).toContain("budget_exhausted");

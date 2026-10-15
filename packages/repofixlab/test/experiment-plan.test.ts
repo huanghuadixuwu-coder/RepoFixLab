@@ -64,6 +64,7 @@ describe("experiment plans", () => {
 			},
 		]);
 		expect(plan.task_selection.status).toBe("frozen");
+		if (plan.task_selection.status !== "frozen") throw new Error("Expected frozen task selection");
 		expect(plan.task_selection.declared_task_count).toBe(26);
 		expect(plan.task_selection.instance_ids).toHaveLength(26);
 		expect(summary.runtime_status).toBe("lifecycle_unavailable");

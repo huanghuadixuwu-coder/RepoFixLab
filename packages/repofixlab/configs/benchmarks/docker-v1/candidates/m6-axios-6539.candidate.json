@@ -1,0 +1,136 @@
+{
+	"adapter_sha256": "fd09946d8995076ba05945492d6118d68a895927d7c68f1b60c4dcb58c227263",
+	"base_commit": "c6cce43cd94489f655f4488c5a50ecaf781c94f2",
+	"candidate_id": "task-environment-candidate-v1-axios-6539-8ea08218618ae4c86b9d81092a98cdf77d5dd5e808099be5b4dd9a5b281841be",
+	"candidate_sha256": "65d4888d23bd769b761d5835b8c0dfbcb281182b77ba0494068d434179c9881e",
+	"candidate_type": "task_environment_candidate",
+	"created_at": "2026-07-20T00:15:24.0316885Z",
+	"dataset_lock": {
+		"lock_id": "dataset-v1-g-20260718-135934-066a8f5b6f6b-e451237925674fc6",
+		"lock_sha256": "003c0a34cd85c9254e651ab639a29171677f98e1bb06a8393b14d5893fdef95f"
+	},
+	"instance_id": "axios__axios-6539",
+	"official_image_source_lock": {
+		"lock_id": "official-images-v1-set-26-140ebe01ca57c662",
+		"lock_sha256": "e5d03e8cad574d1e707c0e8380a7f7cc3a7bb77fca046361f12d7f53617d0bb3"
+	},
+	"probe_sha256": "ad2a233a557616aa5bb9195f66bb63ba1e1b89157154ad318bde2155b3c70c85",
+	"roles": {
+		"evaluator": {
+			"filesystem_profile": {
+				"profile_id": "task-environment-profile-v1-axios-6539-evaluator-filesystem-73383f273eaeadf1efbebf9eeb44f32354203ab0ec3ebf41796a9fb2a173e711",
+				"profile_sha256": "ec20d2e8b79f4f72a241b77f150095d7d19117a7174ce358251a1b40a6aafafb",
+				"writable_mounts": [
+					{
+						"destination": "/testbed",
+						"read_write": true,
+						"type": "volume"
+					},
+					{
+						"destination": "/tmp",
+						"read_write": true,
+						"type": "tmpfs"
+					}
+				]
+			},
+			"image": {
+				"local_image_id": "sha256:d7e8fcb0f8ecbf98e80cfac3d03caba2caede419fe4d57d234cfac5578aab6fb",
+				"platform": "linux/amd64",
+				"provenance_sha256": "2c4b5b5fdc3483b46ffeb6dd2a2808b64e4f9f0528f6479602626df865fe042c"
+			},
+			"resource_profile": {
+				"memory_bytes": 8589934592,
+				"memory_swap_bytes": 8589934592,
+				"nano_cpus": 4000000000,
+				"pids_limit": 512,
+				"profile_id": "task-environment-profile-v1-axios-6539-evaluator-resource-d93e7a146ee8666f781285f2ee14a544622f21df4997369a8f2aa8592465066b",
+				"profile_sha256": "59cf6b37ee88dddd15a0dee349ecbc0305e9f44785f7612d50e8a94422a29117",
+				"timeout_seconds": 300
+			},
+			"role": "evaluator",
+			"runtime_user": {
+				"gid": 0,
+				"uid": 0
+			},
+			"security_profile": {
+				"auto_remove": false,
+				"cap_add": [],
+				"cap_drop": [
+					"ALL"
+				],
+				"devices": [],
+				"docker_socket_allowed": false,
+				"host_bind_mounts_allowed": false,
+				"network_mode": "none",
+				"no_new_privileges": true,
+				"privileged": false,
+				"profile_id": "task-environment-profile-v1-axios-6539-evaluator-security-36ca5c0b1e3267914717d9cdbefaa0db46b26c0debe29e0fb484f5a557c0508f",
+				"profile_sha256": "bd6c83064ebd252a13cae229ba2b142f4c1a1c58851cc514962e75c5206f0c88",
+				"published_ports_allowed": false,
+				"read_only_root_filesystem": true,
+				"sensitive_environment_allowed": false,
+				"stdin_open": false,
+				"tty": false
+			}
+		},
+		"worker": {
+			"filesystem_profile": {
+				"profile_id": "task-environment-profile-v1-axios-6539-worker-filesystem-73383f273eaeadf1efbebf9eeb44f32354203ab0ec3ebf41796a9fb2a173e711",
+				"profile_sha256": "2f72dfbe6721d64e2f9adb440f642ec20c0ed43271fe18c4d1d2511b90c47a6e",
+				"writable_mounts": [
+					{
+						"destination": "/testbed",
+						"read_write": true,
+						"type": "volume"
+					},
+					{
+						"destination": "/tmp",
+						"read_write": true,
+						"type": "tmpfs"
+					}
+				]
+			},
+			"image": {
+				"local_image_id": "sha256:d647fa20e10cd9a2ab040e0a157a883158dad02a90354910e6d81331bdb3d40f",
+				"platform": "linux/amd64",
+				"provenance_sha256": "22999835876c05ff26d2a0513201d300a0fb19c026903b9c8b5cf0e620df0ffb"
+			},
+			"resource_profile": {
+				"memory_bytes": 8589934592,
+				"memory_swap_bytes": 8589934592,
+				"nano_cpus": 4000000000,
+				"pids_limit": 512,
+				"profile_id": "task-environment-profile-v1-axios-6539-worker-resource-1566926a1f183a8e401a5e08e0321cbbe427152a611f1722dda7438daf53614f",
+				"profile_sha256": "b665488849f49f106c69bdb64ea4de1b6e307ea56479d4076f98a408a0874515",
+				"timeout_seconds": 1800
+			},
+			"role": "worker",
+			"runtime_user": {
+				"gid": 65532,
+				"uid": 65532
+			},
+			"security_profile": {
+				"auto_remove": false,
+				"cap_add": [],
+				"cap_drop": [
+					"ALL"
+				],
+				"devices": [],
+				"docker_socket_allowed": false,
+				"host_bind_mounts_allowed": false,
+				"network_mode": "none",
+				"no_new_privileges": true,
+				"privileged": false,
+				"profile_id": "task-environment-profile-v1-axios-6539-worker-security-36ca5c0b1e3267914717d9cdbefaa0db46b26c0debe29e0fb484f5a557c0508f",
+				"profile_sha256": "f095975c816211d9f56a0cd96653bb862e9b54a97f3152c6c756a7ed6f1b6296",
+				"published_ports_allowed": false,
+				"read_only_root_filesystem": true,
+				"sensitive_environment_allowed": false,
+				"stdin_open": false,
+				"tty": false
+			}
+		}
+	},
+	"sanitizer_sha256": "3d1cbbea005c97f65b0abdedfc5d1fbb1fcd5386eff8270c5036626f56466695",
+	"schema_version": "v1"
+}

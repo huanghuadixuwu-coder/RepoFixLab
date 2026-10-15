@@ -7,9 +7,14 @@ import base64
 import hashlib
 from pathlib import PurePosixPath
 import re
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from typing import Literal, Protocol
 from uuid import uuid4
+
+from requests.exceptions import ConnectionError as DockerConnectionError, Timeout as DockerTimeout
+
+from .runtime_timing import runtime_phase, timed_lock
+from .runtime_admission import RuntimeAdmission, RuntimeAdmissionBusy, RuntimeAdmissionCancelled, RuntimeAdmissionTimeout
 
 from .runtime_journal import (
     PersistedRuntimeOperation,
@@ -52,7 +57,7 @@ class RuntimeOperationConflict(RuntimeError):
 
 
 class RuntimeCapacityBusy(RuntimeError):
-    """The single runtime attempt capacity slot is occupied."""
+    """The bounded runtime attempt queue cannot admit another request."""
 
 
 class RuntimeInvalidState(RuntimeError):
@@ -65,6 +70,10 @@ class RuntimeResourceNotFound(RuntimeError):
 
 class RuntimeServiceUnavailable(RuntimeError):
     """The runtime cannot safely execute or recover an operation."""
+
+    def __init__(self, message: str, *, reason_code: str = "runtime_backend_error") -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True)
@@ -82,9 +91,15 @@ class RuntimePreflightManifest:
 
 @dataclass(frozen=True)
 class RuntimeCleanupResult:
+    """No resources remain owned by the ended task lease.
+
+    A retained pool allocation carries a verified release receipt, persisted
+    with the terminal operation response before another lease can use it.
+    """
     residual_container_count: int
     residual_volume_count: int
     errors: tuple[str, ...] = ()
+    release_evidence: Mapping[str, object] | None = None
 
     @property
     def clean(self) -> bool:
@@ -111,6 +126,18 @@ class RuntimeJobStatus:
 
 
 class RuntimeBackendProtocol(Protocol):
+    def start_runtime(self, journal_identity: str) -> None: ...
+
+    def close(self) -> None: ...
+
+    def publish_release(self, evidence: Mapping[str, object] | None) -> None: ...
+
+    def prewarm_worker(self, attempt_id: str, candidate_id: str, instance_id: str) -> None: ...
+
+    def prewarm_evaluator(self, attempt_id: str, candidate_id: str, instance_id: str) -> None: ...
+
+    def cancel_pending(self, attempt_id: str) -> None: ...
+
     def preflight(
         self, candidate_id: str, instance_id: str
     ) -> RuntimePreflightManifest: ...
@@ -138,6 +165,8 @@ class RuntimeBackendProtocol(Protocol):
 
     def snapshot_patch(self, worker: object) -> RuntimeSnapshotEvidence: ...
 
+    def restore_worker(self, worker: object, patch: bytes) -> tuple[object, RuntimeVerificationCatalog]: ...
+
     def destroy_worker(self, worker: object) -> RuntimeCleanupResult: ...
 
     def start_evaluation(
@@ -154,6 +183,8 @@ class RuntimeBackendProtocol(Protocol):
     def get_job(self, job: object) -> RuntimeJobStatus: ...
 
     def get_artifacts(self, job: object) -> Mapping[str, bytes]: ...
+
+    def discard_evaluation(self, job: object) -> RuntimeCleanupResult: ...
 
     def acknowledge_artifacts(self, job: object) -> RuntimeCleanupResult: ...
 
@@ -178,6 +209,8 @@ class _OperationState:
 @dataclass
 class _AttemptState:
     attempt_id: str
+    execution_lock: RLock = field(default_factory=RLock)
+    operation_event: Event | None = None
     candidate_id: str | None = None
     instance_id: str | None = None
     phase: str = "new"
@@ -196,6 +229,9 @@ class _AttemptState:
     run_id: str | None = None
     evaluation_id: str | None = None
     verification_catalog: RuntimeVerificationCatalog | None = None
+    evaluation_retries: int = 0
+    worker_recoveries: int = 0
+    worker_interrupted: bool = False
 
 
 class RuntimeOperationService:
@@ -204,6 +240,9 @@ class RuntimeOperationService:
         backend: RuntimeBackendProtocol,
         journal: RuntimeOperationJournal,
         *,
+        capacity: int = 2,
+        max_waiting: int = 2,
+        queue_timeout_seconds: float = 300,
         id_factory: Callable[[], str] = lambda: uuid4().hex,
         clock: Callable[[], str] = lambda: datetime.now(UTC).isoformat().replace(
             "+00:00", "Z"
@@ -214,16 +253,30 @@ class RuntimeOperationService:
         self._id_factory = id_factory
         self._clock = clock
         self._lock = Lock()
-        self._execution_lock = Lock()
+        self._capacity = RuntimeAdmission(
+            0, 0, max_active=capacity, max_waiting=max_waiting,
+            timeout_seconds=queue_timeout_seconds,
+        )
+        self._capacity_limit = capacity
         self._operations: dict[str, _OperationState] = {}
         self._attempts: dict[str, _AttemptState] = {}
         self._jobs: dict[str, str] = {}
-        self._capacity_attempt_id: str | None = None
         self._recovery_blocked = False
-        self._recover()
+        try:
+            self._backend.start_runtime(journal.pool_namespace())
+            self._recover()
+        except Exception:
+            try:
+                self._backend.close()
+            finally:
+                self._journal.close()
+            raise
 
     def close(self) -> None:
-        self._journal.close()
+        try:
+            self._backend.close()
+        finally:
+            self._journal.close()
 
     def preflight(self, request: Mapping[str, object]) -> RuntimeOperationResult:
         canonical = _validate_write_request(
@@ -244,6 +297,7 @@ class RuntimeOperationService:
             instance_id = _request_string(canonical, "instance_id")
             manifest = self._backend.preflight(candidate_id, instance_id)
             _validate_manifest(manifest, candidate_id, instance_id)
+            self._backend.prewarm_worker(attempt.attempt_id, candidate_id, instance_id)
             attempt.phase = "preflighted"
             attempt.base_commit = manifest.base_commit
             return _write_response(
@@ -264,7 +318,7 @@ class RuntimeOperationService:
                     "candidate_sha256": manifest.candidate_sha256,
                     "base_commit": manifest.base_commit,
                     "tools": list(manifest.tools),
-                    "capacity": 1,
+                    "capacity": self._capacity_limit,
                 },
             )
 
@@ -286,11 +340,19 @@ class RuntimeOperationService:
             self._bind_candidate(attempt, canonical)
             if attempt.phase != "preflighted":
                 raise RuntimeInvalidState("worker preparation requires preflight")
-            if (
-                self._capacity_attempt_id is not None
-                and self._capacity_attempt_id != attempt.attempt_id
-            ):
-                raise RuntimeCapacityBusy("runtime attempt capacity is busy")
+            try:
+                self._capacity.acquire(attempt.attempt_id)
+            except RuntimeAdmissionTimeout as error:
+                attempt.phase = "blocked"
+                raise RuntimeCapacityBusy(str(error)) from None
+            except RuntimeAdmissionBusy as error:
+                raise RuntimeCapacityBusy(str(error)) from None
+            except RuntimeAdmissionCancelled as error:
+                raise RuntimeInvalidState(str(error)) from None
+            if self._recovery_blocked:
+                self._capacity.release(attempt.attempt_id)
+                raise RuntimeServiceUnavailable("runtime recovery left residual resources")
+            attempt.capacity_owned = True
 
         def perform() -> dict[str, object]:
             attempt = self._attempt(canonical)
@@ -304,13 +366,65 @@ class RuntimeOperationService:
             attempt.lease_id = lease_id
             attempt.phase = "worker_active"
             attempt.capacity_owned = True
-            self._capacity_attempt_id = attempt.attempt_id
             return _write_response(
                 canonical,
                 "runtime_worker_prepared",
                 "prepared",
                 lease_id=lease_id,
             )
+
+        return self._execute_write(canonical, precheck, perform)
+
+    def restore_worker(self, request: Mapping[str, object]) -> RuntimeOperationResult:
+        """Replace an interrupted Worker once using this attempt's sealed snapshot."""
+        canonical = _validate_write_request(request, "runtime_restore_worker",
+                                            frozenset({"lease_id", "snapshot_id"}))
+        checkpoint: dict[str, object] | None = None
+
+        def precheck() -> None:
+            nonlocal checkpoint
+            attempt = self._require_worker_attempt(canonical)
+            if (attempt.phase not in {"worker_active", "snapshotted"}
+                    or not attempt.worker_interrupted or attempt.worker_recoveries != 0):
+                raise RuntimeInvalidState("Worker restoration is unavailable")
+            with self._lock:
+                checkpoint = next((state.response for state in self._operations.values()
+                    if state.response is not None
+                    and state.response.get("response_type") == "runtime_patch_snapshot"
+                    and state.response.get("attempt_id") == attempt.attempt_id
+                    and state.response.get("snapshot_id") == canonical["snapshot_id"]
+                    and state.response.get("policy") == {"status": "pass", "violations": []}), None)
+            if checkpoint is None:
+                raise RuntimeRequestRejected("No valid sealed checkpoint belongs to this attempt")
+
+        def perform() -> dict[str, object]:
+            attempt = self._require_worker_attempt(canonical)
+            assert checkpoint is not None
+            patch = base64.b64decode(str(checkpoint["patch_base64"]), validate=True)
+            attempt.worker_recoveries += 1
+            worker, catalog = self._backend.restore_worker(_required_handle(attempt.worker, "worker"), patch)
+            attempt.worker = worker
+            attempt.lease_id = f"lease-{self._validated_id_token()}"
+            _validate_verification_catalog(catalog)
+            if (attempt.verification_catalog is not None
+                    and catalog.public_dict() != attempt.verification_catalog.public_dict()):
+                raise RuntimeServiceUnavailable("Restored verification catalog drifted",
+                                                reason_code="runtime_configuration_blocked")
+            snapshot = self._snapshot_worker(attempt)
+            if (snapshot.patch != patch or snapshot.policy_status != "pass"
+                    or checkpoint["base_tree"] != {"algorithm": "git-sha1", "value": snapshot.base_tree}
+                    or checkpoint["candidate_tree"] != {"algorithm": "git-sha1", "value": snapshot.candidate_tree}):
+                raise RuntimeServiceUnavailable("Restored checkpoint drifted",
+                                                reason_code="runtime_checkpoint_invalid")
+            attempt.verification_catalog = catalog
+            attempt.patch = patch
+            attempt.snapshot_id = str(checkpoint["snapshot_id"])
+            attempt.snapshot_policy_passed = True
+            attempt.worker_interrupted = False
+            attempt.phase = "snapshotted"
+            return _write_response(canonical, "runtime_worker_restored", "restored",
+                lease_id=attempt.lease_id, snapshot_id=attempt.snapshot_id,
+                patch_sha256=hashlib.sha256(patch).hexdigest(), worker_recoveries=attempt.worker_recoveries)
 
         return self._execute_write(canonical, precheck, perform)
 
@@ -368,7 +482,7 @@ class RuntimeOperationService:
 
         def perform() -> dict[str, object]:
             attempt = self._require_worker_attempt(canonical)
-            catalog = self._backend.verification_catalog(
+            catalog = attempt.verification_catalog or self._backend.verification_catalog(
                 _required_handle(attempt.worker, "worker")
             )
             _validate_verification_catalog(catalog)
@@ -443,13 +557,7 @@ class RuntimeOperationService:
 
         def perform() -> dict[str, object]:
             attempt = self._require_worker_attempt(canonical)
-            snapshot = self._backend.snapshot_patch(
-                _required_handle(attempt.worker, "worker")
-            )
-            _validate_snapshot(
-                snapshot,
-                _required_attempt_value(attempt.base_commit, "base commit"),
-            )
+            snapshot = self._snapshot_worker(attempt)
             patch = snapshot.patch
             patch_sha256 = hashlib.sha256(patch).hexdigest()
             snapshot_id = f"snapshot-{patch_sha256}"
@@ -485,6 +593,18 @@ class RuntimeOperationService:
 
         return self._execute_write(canonical, precheck, perform)
 
+    def _snapshot_worker(self, attempt: _AttemptState) -> RuntimeSnapshotEvidence:
+        """Use the same one-extra-attempt snapshot rule during capture and restoration."""
+        worker = _required_handle(attempt.worker, "worker")
+        try:
+            snapshot = self._backend.snapshot_patch(worker)
+        except RuntimeServiceUnavailable as error:
+            if error.reason_code != "runtime_snapshot_failed":
+                raise
+            snapshot = self._backend.snapshot_patch(worker)
+        _validate_snapshot(snapshot, _required_attempt_value(attempt.base_commit, "base commit"))
+        return snapshot
+
     def destroy_worker(self, request: Mapping[str, object]) -> RuntimeOperationResult:
         canonical = _validate_write_request(
             request,
@@ -511,20 +631,23 @@ class RuntimeOperationService:
             attempt.worker_cleanup = cleanup
             if cleanup.clean and attempt.snapshot_policy_passed:
                 attempt.phase = "worker_destroyed"
+                self._backend.prewarm_evaluator(
+                    attempt.attempt_id, _required_attempt_value(attempt.candidate_id, "candidate"),
+                    _required_attempt_value(attempt.instance_id, "instance"),
+                )
             elif cleanup.clean:
                 attempt.phase = "policy_rejected"
                 attempt.capacity_owned = False
-                if self._capacity_attempt_id == attempt.attempt_id:
-                    self._capacity_attempt_id = None
+                self._capacity.release(attempt.attempt_id)
             else:
                 attempt.phase = "blocked"
-                self._recovery_blocked = True
             return _write_response(
                 canonical,
                 "runtime_worker_destroyed",
                 "destroyed" if cleanup.clean else "blocked",
                 lease_id=attempt.lease_id,
                 cleanup=cleanup.public_dict(),
+                **({"release_evidence": dict(cleanup.release_evidence)} if cleanup.release_evidence else {}),
             )
 
         return self._execute_write(canonical, precheck, perform)
@@ -547,7 +670,7 @@ class RuntimeOperationService:
                 or canonical.get("snapshot_id") != attempt.snapshot_id
             ):
                 raise RuntimeInvalidState(
-                    "fresh evaluation requires destroyed worker, zero residuals, and exact snapshot"
+                    "evaluation requires ended Worker lease, verified cleanup, and exact snapshot"
                 )
 
         def perform() -> dict[str, object]:
@@ -616,17 +739,16 @@ class RuntimeOperationService:
                 attempt.artifact_set_sha256 = None
                 attempt.capacity_owned = False
                 attempt.phase = "aborted"
-                if self._capacity_attempt_id == attempt_id:
-                    self._capacity_attempt_id = None
-                self._recovery_blocked = any(
-                    item.phase == "blocked"
-                    for other_id, item in self._attempts.items()
-                    if other_id != attempt_id
-                )
+                self._capacity.release(attempt_id)
+                with self._lock:
+                    self._recovery_blocked = any(
+                        item.phase == "blocked"
+                        for other_id, item in self._attempts.items()
+                        if other_id != attempt_id
+                    )
             else:
                 attempt.phase = "blocked"
                 attempt.capacity_owned = True
-                self._recovery_blocked = True
             return _write_response(
                 canonical,
                 "runtime_attempt_aborted",
@@ -638,34 +760,83 @@ class RuntimeOperationService:
 
     def get_job(self, job_id: str) -> dict[str, object]:
         attempt = self._job_attempt(job_id)
-        status = self._backend.get_job(_required_handle(attempt.job, "evaluation job"))
-        if status.status not in {"queued", "running", "completed", "failed"}:
-            raise RuntimeServiceUnavailable("runtime backend job status drifted")
-        return {
-            "schema_version": "v1",
-            "response_type": "runtime_job_status",
-            "attempt_id": attempt.attempt_id,
-            "run_id": attempt.run_id,
-            "job_id": job_id,
-            "evaluation_id": attempt.evaluation_id,
-            "status": status.status,
-            "resolved": status.resolved,
-            "error_class": status.error_class,
-        }
+        with attempt.execution_lock:
+            self._job_attempt(job_id)
+            status = self._backend.get_job(_required_handle(attempt.job, "evaluation job"))
+            if (status.status == "failed" and status.error_class in {"evaluator_process_failed", "evaluator_oom", "official_grading_failed"}
+                    and attempt.evaluation_retries == 0):
+                # A new physical Evaluator receives the original sealed patch.
+                # Keep the logical job identity so callers can finish polling it.
+                recovery_request = {
+                    "schema_version": "v1", "request_type": "runtime_retry_evaluation",
+                    "attempt_id": attempt.attempt_id, "operation_id": f"evaluation-retry-{self._validated_id_token()}",
+                    "job_id": job_id, "reason_code": status.error_class,
+                }
+                recovery_hash = runtime_request_sha256(recovery_request)
+                self._journal.begin(recovery_request, recovery_hash)
+                attempt.evaluation_retries = 1
+                cleanup = self._backend.discard_evaluation(_required_handle(attempt.job, "evaluation job"))
+                _validate_cleanup(cleanup)
+                recovery_response = _write_response(
+                    {**recovery_request, "request_sha256": recovery_hash},
+                    "runtime_evaluation_retry", "ready" if cleanup.clean else "blocked",
+                    job_id=job_id, reason_code=status.error_class, cleanup=cleanup.public_dict(),
+                )
+                if not cleanup.clean:
+                    attempt.phase = "blocked"
+                    self._journal.finish(recovery_request, recovery_hash, recovery_response)
+                    raise RuntimeServiceUnavailable("Evaluator cleanup left residual resources", reason_code="runtime_cleanup_blocked")
+                attempt.artifact_response = None
+                attempt.artifact_set_sha256 = None
+                try:
+                    attempt.job = self._backend.start_evaluation(
+                        attempt.attempt_id,
+                        _required_attempt_value(attempt.run_id, "run"),
+                        job_id,
+                        _required_attempt_value(attempt.evaluation_id, "evaluation"),
+                        _required_attempt_value(attempt.candidate_id, "candidate"),
+                        _required_attempt_value(attempt.instance_id, "instance"),
+                        _required_patch(attempt.patch),
+                    )
+                except Exception:
+                    recovery_response["status"] = "failed"
+                    self._journal.finish(recovery_request, recovery_hash, recovery_response)
+                    raise
+                recovery_response["status"] = "started"
+                self._journal.finish(recovery_request, recovery_hash, recovery_response)
+                status = self._backend.get_job(attempt.job)
+            if status.status not in {"queued", "running", "completed", "failed"}:
+                raise RuntimeServiceUnavailable("runtime backend job status drifted")
+            return {
+                "schema_version": "v1",
+                "response_type": "runtime_job_status",
+                "attempt_id": attempt.attempt_id,
+                "run_id": attempt.run_id,
+                "job_id": job_id,
+                "evaluation_id": attempt.evaluation_id,
+                "status": status.status,
+                "resolved": status.resolved,
+                "error_class": status.error_class,
+                "evaluation_retries": attempt.evaluation_retries,
+            }
+
 
     def get_artifacts(self, job_id: str) -> dict[str, object]:
         attempt = self._job_attempt(job_id)
-        status = self._backend.get_job(_required_handle(attempt.job, "evaluation job"))
-        if status.status not in {"completed", "failed"}:
-            raise RuntimeInvalidState("job artifacts are not terminal")
-        if attempt.artifact_response is None:
-            artifacts = self._backend.get_artifacts(
-                _required_handle(attempt.job, "evaluation job")
-            )
-            response = _artifact_response(attempt.attempt_id, job_id, artifacts)
-            attempt.artifact_response = response
-            attempt.artifact_set_sha256 = str(response["artifact_set_sha256"])
-        return dict(attempt.artifact_response)
+        with attempt.execution_lock:
+            self._job_attempt(job_id)
+            status = self._backend.get_job(_required_handle(attempt.job, "evaluation job"))
+            if status.status not in {"completed", "failed"}:
+                raise RuntimeInvalidState("job artifacts are not terminal")
+            if attempt.artifact_response is None:
+                artifacts = self._backend.get_artifacts(
+                    _required_handle(attempt.job, "evaluation job")
+                )
+                response = _artifact_response(attempt.attempt_id, job_id, artifacts)
+                attempt.artifact_response = response
+                attempt.artifact_set_sha256 = str(response["artifact_set_sha256"])
+            return dict(attempt.artifact_response)
+
 
     def acknowledge_artifacts(
         self, request: Mapping[str, object]
@@ -696,11 +867,9 @@ class RuntimeOperationService:
             _validate_cleanup(cleanup)
             attempt.job = None
             attempt.phase = "acked" if cleanup.clean else "blocked"
-            attempt.capacity_owned = False
+            attempt.capacity_owned = not cleanup.clean
             if cleanup.clean:
-                self._capacity_attempt_id = None
-            else:
-                self._recovery_blocked = True
+                self._capacity.release(attempt.attempt_id)
             return _write_response(
                 canonical,
                 "runtime_artifacts_acknowledged",
@@ -708,6 +877,7 @@ class RuntimeOperationService:
                 job_id=attempt.job_id,
                 artifact_set_sha256=attempt.artifact_set_sha256,
                 cleanup=cleanup.public_dict(),
+                **({"release_evidence": dict(cleanup.release_evidence)} if cleanup.release_evidence else {}),
             )
 
         return self._execute_write(canonical, precheck, perform)
@@ -722,6 +892,7 @@ class RuntimeOperationService:
         request_hash = _request_string(request, "request_sha256")
         wait_for: Event | None = None
         state: _OperationState | None = None
+        previous_operation: Event | None = None
         with self._lock:
             existing = self._operations.get(operation_id)
             if existing is not None:
@@ -740,12 +911,20 @@ class RuntimeOperationService:
                     )
                 wait_for = existing.event
             else:
+                attempt_id = _request_string(request, "attempt_id")
+                if request["request_type"] == "runtime_abort_attempt":
+                    if attempt_id not in self._attempts:
+                        raise RuntimeResourceNotFound("runtime attempt was not found")
+                    self._capacity.cancel(attempt_id)
+                attempt = self._attempt(request)
                 state = _OperationState(dict(request), request_hash)
+                previous_operation = attempt.operation_event
+                attempt.operation_event = state.event
                 self._operations[operation_id] = state
         if wait_for is not None:
-            wait_for.wait()
+            with runtime_phase("queue.replay_wait"):
+                wait_for.wait()
             with self._lock:
-                existing = self._operations[operation_id]
                 if existing.response is not None:
                     return self._replayed_result(existing.response)
                 raise RuntimeServiceUnavailable(
@@ -753,7 +932,14 @@ class RuntimeOperationService:
                 )
 
         assert state is not None
-        with self._execution_lock:
+        if request["request_type"] == "runtime_abort_attempt":
+            # Docker interruption may block; unrelated attempts need the global
+            # registration lock while this attempt waits for its ordered cleanup.
+            self._backend.cancel_pending(_request_string(request, "attempt_id"))
+        if previous_operation is not None:
+            with runtime_phase("queue.attempt_wait"):
+                previous_operation.wait()
+        with timed_lock(attempt.execution_lock):
             try:
                 precheck()
             except Exception:
@@ -766,7 +952,25 @@ class RuntimeOperationService:
             try:
                 self._journal.begin(body, request_hash)
                 try:
+                    wait_available = getattr(self._backend, "wait_available", None)
+                    if callable(wait_available) and request["request_type"] != "runtime_abort_attempt":
+                        wait_available(attempt.attempt_id)
                     response = perform()
+                except (RuntimeAdmissionCancelled, RuntimeAdmissionBusy) as error:
+                    if isinstance(error, RuntimeAdmissionTimeout):
+                        attempt.phase = "blocked"
+                    if attempt.worker is None and attempt.job is None:
+                        attempt.capacity_owned = False
+                        self._capacity.release(attempt.attempt_id)
+                    response = _write_response(
+                        request, "runtime_operation_failed", "failed", error_class=str(error),
+                    )
+                    self._journal.finish(body, request_hash, response)
+                    with self._lock:
+                        state.response = response
+                    if isinstance(error, RuntimeAdmissionCancelled):
+                        raise RuntimeInvalidState(str(error)) from None
+                    raise RuntimeCapacityBusy(str(error)) from None
                 except RuntimeToolError as error:
                     response = _write_response(
                         request,
@@ -779,12 +983,34 @@ class RuntimeOperationService:
                     with self._lock:
                         state.response = response
                     raise RuntimeRequestRejected("runtime tool request was rejected")
-                except Exception:
+                except Exception as error:
+                    reason_code = error.reason_code if isinstance(error, RuntimeServiceUnavailable) else "runtime_backend_error"
+                    if isinstance(error, ValueError):
+                        reason_code = "runtime_configuration_blocked"
+                    if isinstance(error, (DockerConnectionError, DockerTimeout)):
+                        wait_available = getattr(self._backend, "wait_available", None)
+                        if callable(wait_available):
+                            try:
+                                wait_available(attempt.attempt_id, force=True)
+                            except RuntimeServiceUnavailable as unavailable:
+                                reason_code = unavailable.reason_code
+                            except RuntimeAdmissionCancelled:
+                                reason_code = "runtime_queue_cancelled"
+                            else:
+                                if attempt.worker is not None:
+                                    reason_code = "runtime_worker_interrupted"
+                    if reason_code in {"runtime_image_blocked", "runtime_configuration_blocked", "runtime_docker_blocked", "runtime_cleanup_blocked"}:
+                        attempt.phase = "blocked"
+                    if reason_code in {"runtime_worker_exited", "runtime_worker_interrupted"}:
+                        attempt.worker_interrupted = True
+                    if attempt.worker is None and attempt.job is None:
+                        attempt.capacity_owned = False
+                        self._capacity.release(attempt.attempt_id)
                     response = _write_response(
                         request,
                         "runtime_operation_failed",
                         "failed",
-                        error_class="runtime_backend_error",
+                        error_class=reason_code,
                     )
                     self._journal.finish(
                         body,
@@ -794,14 +1020,18 @@ class RuntimeOperationService:
                     )
                     with self._lock:
                         state.response = response
+                    if reason_code == "runtime_queue_cancelled":
+                        raise RuntimeInvalidState(reason_code) from None
                     raise RuntimeServiceUnavailable(
-                        "runtime backend operation failed"
+                        "runtime backend operation failed", reason_code=reason_code,
                     ) from None
                 self._journal.finish(body, request_hash, response)
+                if isinstance(response.get("release_evidence"), Mapping):
+                    self._backend.publish_release(response["release_evidence"])
                 with self._lock:
                     state.response = response
                 return RuntimeOperationResult(dict(response), False)
-            except (RuntimeRequestRejected, RuntimeServiceUnavailable):
+            except (RuntimeRequestRejected, RuntimeServiceUnavailable, RuntimeInvalidState, RuntimeCapacityBusy):
                 raise
             except Exception:
                 with self._lock:
@@ -813,10 +1043,15 @@ class RuntimeOperationService:
                 state.event.set()
 
     def _replayed_result(self, response: Mapping[str, object]) -> RuntimeOperationResult:
+        if response.get("error_class") == "runtime_queue_cancelled":
+            raise RuntimeInvalidState("runtime_queue_cancelled")
+        if response.get("error_class") in {"runtime_queue_full", "runtime_queue_timeout"}:
+            raise RuntimeCapacityBusy(str(response["error_class"]))
         if response.get("status") == "rejected":
             raise RuntimeRequestRejected("runtime tool request was rejected")
         if response.get("status") == "failed":
-            raise RuntimeServiceUnavailable("runtime backend operation failed")
+            raise RuntimeServiceUnavailable("runtime backend operation failed",
+                                            reason_code=str(response.get("error_class", "runtime_backend_error")))
         return RuntimeOperationResult(dict(response), True)
 
     def _attempt(self, request: Mapping[str, object]) -> _AttemptState:
@@ -860,7 +1095,8 @@ class RuntimeOperationService:
         return attempt
 
     def _validated_id_token(self) -> str:
-        value = self._id_factory()
+        with self._lock:
+            value = self._id_factory()
         if not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{32}", value) is None:
             raise RuntimeServiceUnavailable("runtime ID factory returned an invalid token")
         return value
@@ -895,6 +1131,7 @@ class RuntimeOperationService:
                     "snapshotted",
                     "worker_destroyed",
                     "evaluating",
+                    "blocked",
                 }
             }
             active_attempts.update(
@@ -925,13 +1162,17 @@ class RuntimeOperationService:
                     state.response = response
                     state.event.set()
                 if not recovered_pending:
+                    latest_sequence = max(operation.last_record.sequence for operation in persisted
+                                          if operation.last_record.attempt_id == attempt_id)
                     recovery_body: dict[str, object] = {
                         "schema_version": "v1",
                         "request_type": "runtime_recovery",
                         "attempt_id": attempt_id,
                         "operation_id": (
                             "recovery:"
-                            + hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()[:32]
+                            + hashlib.sha256(
+                                f"{attempt_id}:{latest_sequence}".encode("utf-8")
+                            ).hexdigest()[:32]
                         ),
                         "reason": "controller_restart",
                     }
@@ -967,7 +1208,7 @@ class RuntimeOperationService:
                 attempt.capacity_owned = False
                 if not cleanup.clean:
                     self._recovery_blocked = True
-            self._capacity_attempt_id = None
+            self._recovery_blocked = any(attempt.phase == "blocked" for attempt in self._attempts.values())
         except Exception as error:
             raise RuntimeServiceUnavailable("runtime recovery failed") from error
 
@@ -1024,8 +1265,12 @@ class RuntimeOperationService:
             attempt.capacity_owned = attempt.phase == "blocked"
             if attempt.phase == "blocked":
                 self._recovery_blocked = True
-        elif response_type in {"runtime_operation_failed", "runtime_operation_rejected"}:
-            pass
+        elif response_type == "runtime_operation_failed" and response.get("error_class") == "controller_restarted":
+            cleanup = response.get("cleanup")
+            if not isinstance(cleanup, Mapping) or not isinstance(cleanup.get("clean"), bool):
+                raise RuntimeJournalError("persisted interrupted cleanup is malformed")
+            attempt.phase = "recovered" if cleanup["clean"] else "blocked"
+            attempt.capacity_owned = False
         elif response_type == "runtime_recovery":
             attempt.phase = (
                 "recovered" if response.get("status") == "recovered" else "blocked"

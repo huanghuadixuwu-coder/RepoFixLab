@@ -16,17 +16,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { type ExperimentPlan } from "../contracts/experiment-plan.ts";
-import { canonicalContractSha256, verifyRunResult, type RunResult } from "../contracts/run-contracts.ts";
 import { stableStringify } from "../contracts/canonical-json.ts";
+import type { ExperimentPlan } from "../contracts/experiment-plan.ts";
+import { canonicalContractSha256, type RunResult, verifyRunResult } from "../contracts/run-contracts.ts";
 import type { RunMetricEvidence } from "../metrics/experiment-metrics.ts";
 import { publishExperimentReport } from "../report/experiment-report.ts";
-import {
-	BatchStateStore,
-	ExperimentOwnerLease,
-	type BatchRunSpec,
-	type BatchRunState,
-} from "./batch-state.ts";
+import { type BatchRunSpec, type BatchRunState, BatchStateStore, ExperimentOwnerLease } from "./batch-state.ts";
 import { GlobalBudgetLedger, GlobalBudgetWriterLease } from "./global-budget-ledger.ts";
 import { KnownProviderUsageBatchFailure, PreProviderBatchFailure } from "./pre-provider-failure.ts";
 
@@ -48,6 +43,10 @@ export interface BatchBudgetAdmission {
 }
 
 export interface BatchExecutionOptions {
+	/** Bound active runs; queued specifications remain in the durable batch store. */
+	readonly concurrency?: number;
+	/** Cancel unstarted runs while admitted runs finish and settle their usage. */
+	readonly signal?: AbortSignal;
 	readonly budget_admission?: BatchBudgetAdmission;
 	/**
 	 * Stable identity for one physical execution. It is persisted in the batch
@@ -100,11 +99,7 @@ export function executionNamespaceForRoot(root: string, requested?: string): str
  * Derive a deterministic physical attempt ID from one logical run, its retry
  * sequence, and the execution namespace used by Controller operations.
  */
-export function attemptIdFor(
-	spec: BatchRunSpec,
-	sequence: number,
-	executionNamespace: string,
-): string {
+export function attemptIdFor(spec: BatchRunSpec, sequence: number, executionNamespace: string): string {
 	if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error("attempt sequence must be positive");
 	if (!EXECUTION_NAMESPACE.test(executionNamespace)) throw new Error("execution_namespace is invalid");
 	const logicalRunToken = createHash("sha256").update(spec.run_id, "utf8").digest("hex").slice(0, 32);
@@ -250,8 +245,10 @@ export function createBatchRunSpecs(
 ): readonly BatchRunSpec[] {
 	if (plan.task_selection.status !== "frozen") throw new Error("Batch run specs require frozen task selection");
 	const assignmentByGroup = new Map(assignments.map((assignment) => [assignment.group_id, assignment]));
-	if (assignmentByGroup.size !== assignments.length) throw new Error("Batch group assignments contain duplicate group IDs");
-	if (assignmentByGroup.size !== plan.matrix.length) throw new Error("Batch group assignments do not match the frozen experiment matrix");
+	if (assignmentByGroup.size !== assignments.length)
+		throw new Error("Batch group assignments contain duplicate group IDs");
+	if (assignmentByGroup.size !== plan.matrix.length)
+		throw new Error("Batch group assignments do not match the frozen experiment matrix");
 	const allowedInstances = new Set(plan.task_selection.instance_ids);
 	const specs: BatchRunSpec[] = [];
 	for (const group of plan.matrix) {
@@ -264,7 +261,8 @@ export function createBatchRunSpecs(
 			throw new Error(`Batch assignment ${group.group_id} contains duplicate task IDs`);
 		}
 		for (const instanceId of assignment.instance_ids) {
-			if (!allowedInstances.has(instanceId)) throw new Error(`Batch assignment uses an unfrozen task: ${instanceId}`);
+			if (!allowedInstances.has(instanceId))
+				throw new Error(`Batch assignment uses an unfrozen task: ${instanceId}`);
 			// Formal main, ablation, and stability cohorts intentionally overlap.
 			// group_id remains part of the immutable logical-run identity, so a task
 			// may occur in more than one group without collapsing observations.
@@ -308,7 +306,7 @@ async function reconcileSpecs(store: BatchStateStore, specs: readonly BatchRunSp
 /**
  * Execute and resume a batch under exclusive ownership.
  *
- * The Orchestrator serializes runs, reserves global budget before invoking the
+ * The Orchestrator bounds concurrent runs, reserves global budget before invoking the
  * executor, settles known usage, conservatively charges uncertain failures,
  * persists immutable results, and publishes the aggregate report. The
  * executor is injected so container and repository work can remain behind the
@@ -321,6 +319,11 @@ export async function executeBatch(
 	options: BatchExecutionOptions = {},
 ): Promise<BatchExecutionSummary> {
 	assertBatchSpecs(specs);
+	const concurrency = options.concurrency ?? 2;
+	if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 2) {
+		throw new Error("Batch concurrency must be 1 or 2");
+	}
+	const active = new Set<Promise<void>>();
 	const lease = await ExperimentOwnerLease.acquire(root);
 	let budgetLease: GlobalBudgetWriterLease | null = null;
 	try {
@@ -332,11 +335,72 @@ export async function executeBatch(
 		const budget = options.budget_admission;
 		if (budget !== undefined) budgetLease = await GlobalBudgetWriterLease.acquire(budget.ledger_path);
 		const ledger = budget === undefined ? null : await GlobalBudgetLedger.open(budget.ledger_path, budget.cap_tokens);
+		// The exclusive writer lease proves no live executor owns old reservations.
+		// Charge interrupted usage once before admitting any queued provider work.
+		if (ledger !== null && ledger.snapshot.reserved_tokens > 0) {
+			await ledger.chargeUnverified(ledger.snapshot.reserved_tokens);
+		}
 		const completed: string[] = [];
 		const failed: string[] = [];
 		const resultByRun: Record<string, RunResult> = {};
+		let stopDispatch = false;
+		let fatal: unknown;
+		const executeRun = async (state: BatchRunState, reservation: number | null): Promise<void> => {
+			const attemptId = attemptIdFor(state, 1, executionNamespace);
+			try {
+				await store.transition(state.run_id, "preparing", attemptId);
+				await store.transition(state.run_id, "running", attemptId);
+				const result = await executor.execute(state, attemptId, {
+					agentFinished: () => store.transition(state.run_id, "agent_finished", attemptId),
+					evaluating: () => store.transition(state.run_id, "evaluating", attemptId),
+				});
+				if (result.run_id !== state.run_id || result.attempt_id !== attemptId) {
+					throw new Error("Executor result identity drifted from the registered logical run and attempt");
+				}
+				if (result.terminal_status !== "completed")
+					throw new Error(`Executor returned non-completed ${result.termination_reason}`);
+				await results.write(result);
+				if (ledger !== null && reservation !== null) {
+					await ledger.settle(reservation, result.usage.accounted_tokens);
+					reservation = null;
+				}
+				await store.transition(
+					state.run_id,
+					"completed",
+					attemptId,
+					result.termination_reason,
+					result.result_sha256,
+				);
+				resultByRun[state.run_id] = result;
+				completed.push(state.run_id);
+			} catch (error) {
+				if (ledger !== null && reservation !== null) {
+					if (error instanceof PreProviderBatchFailure) await ledger.settle(reservation, 0);
+					else if (error instanceof KnownProviderUsageBatchFailure)
+						await ledger.settle(reservation, error.accountedTokens);
+					else await ledger.chargeUnverified(reservation);
+					reservation = null;
+				}
+				const live = store.values.find((value) => value.run_id === state.run_id);
+				if (live !== undefined && live.status !== "completed" && live.status !== "failed") {
+					await store.transition(
+						state.run_id,
+						"failed",
+						attemptId,
+						error instanceof Error ? error.message.slice(0, 200) : "batch_executor_failure",
+					);
+				}
+				failed.push(state.run_id);
+				if (options.stop_on_pre_provider_failure === true && error instanceof PreProviderBatchFailure) {
+					stopDispatch = true;
+				}
+			}
+		};
 		for (const state of store.values) {
+			while (active.size >= concurrency) await Promise.race(active);
+			if (fatal !== undefined || stopDispatch) break;
 			await lease.heartbeat();
+			if (fatal !== undefined || stopDispatch) break;
 			if (state.status === "completed") {
 				resultByRun[state.run_id] = await results.read(state);
 				completed.push(state.run_id);
@@ -351,55 +415,64 @@ export async function executeBatch(
 				failed.push(state.run_id);
 				continue;
 			}
-			let reservation = budget?.per_run_reservation_tokens ?? null;
-			if (ledger !== null && reservation !== null && !(await ledger.reserve(reservation))) {
-				await store.transition(state.run_id, "failed", null, "budget_exhausted");
+			if (options.signal?.aborted) {
+				await store.transition(state.run_id, "failed", null, "batch_queue_cancelled");
 				failed.push(state.run_id);
 				continue;
 			}
-			const attemptId = attemptIdFor(state, 1, executionNamespace);
-			try {
-				await store.transition(state.run_id, "preparing", attemptId);
-				await store.transition(state.run_id, "running", attemptId);
-				const result = await executor.execute(state, attemptId, {
-					agentFinished: () => store.transition(state.run_id, "agent_finished", attemptId),
-					evaluating: () => store.transition(state.run_id, "evaluating", attemptId),
-				});
-				if (result.run_id !== state.run_id || result.attempt_id !== attemptId) {
-					throw new Error("Executor result identity drifted from the registered logical run and attempt");
+			const reservation = budget?.per_run_reservation_tokens ?? null;
+			if (ledger !== null && reservation !== null) {
+				let admitted = await ledger.reserve(reservation);
+				while (
+					!admitted &&
+					active.size > 0 &&
+					ledger.snapshot.reserved_tokens > 0 &&
+					!ledger.snapshot.reconciliation_required &&
+					!stopDispatch &&
+					fatal === undefined &&
+					!options.signal?.aborted
+				) {
+					await Promise.race(active);
+					if (!stopDispatch && fatal === undefined && !options.signal?.aborted) {
+						admitted = await ledger.reserve(reservation);
+					}
 				}
-				if (result.terminal_status !== "completed") throw new Error(`Executor returned non-completed ${result.termination_reason}`);
-				await results.write(result);
-				if (ledger !== null && reservation !== null) {
-					await ledger.settle(reservation, result.usage.accounted_tokens);
-					reservation = null;
+				if (stopDispatch || fatal !== undefined) {
+					if (admitted) await ledger.settle(reservation, 0);
+					break;
 				}
-				await store.transition(state.run_id, "completed", attemptId, result.termination_reason, result.result_sha256);
-				resultByRun[state.run_id] = result;
-				completed.push(state.run_id);
-			} catch (error) {
-				if (ledger !== null && reservation !== null) {
-					if (error instanceof PreProviderBatchFailure) await ledger.settle(reservation, 0);
-					else if (error instanceof KnownProviderUsageBatchFailure) await ledger.settle(reservation, error.accountedTokens);
-					else await ledger.chargeUnverified(reservation);
-					reservation = null;
-				}
-				const live = store.values.find((value) => value.run_id === state.run_id);
-				if (live !== undefined && live.status !== "completed" && live.status !== "failed") {
+				if (!admitted) {
 					await store.transition(
 						state.run_id,
 						"failed",
-						attemptId,
-						error instanceof Error ? error.message.slice(0, 200) : "batch_executor_failure",
+						null,
+						options.signal?.aborted ? "batch_queue_cancelled" : "budget_exhausted",
 					);
+					failed.push(state.run_id);
+					continue;
 				}
-				failed.push(state.run_id);
-				if (options.stop_on_pre_provider_failure === true && error instanceof PreProviderBatchFailure) break;
 			}
+			if (options.signal?.aborted) {
+				if (ledger !== null && reservation !== null) await ledger.settle(reservation, 0);
+				await store.transition(state.run_id, "failed", null, "batch_queue_cancelled");
+				failed.push(state.run_id);
+				continue;
+			}
+			// Only admitted runs have promises. Drain every started run before
+			// publishing a report or releasing either process-wide writer lease.
+			const task = executeRun(state, reservation)
+				.catch((error: unknown) => {
+					fatal ??= error;
+				})
+				.finally(() => active.delete(task));
+			active.add(task);
 		}
-		const reportEvidence: Readonly<Record<string, RunMetricEvidence>> = options.report_evidence_loader === undefined
-			? {}
-			: await options.report_evidence_loader(root, specs, resultByRun);
+		await Promise.all(active);
+		if (fatal !== undefined) throw fatal;
+		const reportEvidence: Readonly<Record<string, RunMetricEvidence>> =
+			options.report_evidence_loader === undefined
+				? {}
+				: await options.report_evidence_loader(root, specs, resultByRun);
 		const report = await publishExperimentReport(root, specs, resultByRun, reportEvidence);
 		return {
 			schema_version: "v1",
@@ -414,6 +487,7 @@ export async function executeBatch(
 			},
 		};
 	} finally {
+		await Promise.all(active);
 		await budgetLease?.release();
 		await lease.release();
 	}

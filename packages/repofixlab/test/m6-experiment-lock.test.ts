@@ -9,8 +9,8 @@ import {
 import { createM6EvaluationCohorts } from "../src/m6/cohorts.ts";
 import {
 	createM6ExperimentLock,
-	verifyM6ExperimentLock,
 	type M6TaskEnvironmentLockReference,
+	verifyM6ExperimentLock,
 } from "../src/m6/experiment-lock.ts";
 
 const REVISION = "2b7aced941b4873e9cad3e76abbae93f481d1beb";
@@ -33,13 +33,13 @@ function recordId(repo: string, index: number): string {
 }
 
 function buildCohorts() {
-	const content = [
+	const content = `${[
 		...Array.from({ length: 4 }, (_, index) => record("axios/axios", index)),
 		...Array.from({ length: 2 }, (_, index) => record("immutable-js/immutable-js", index)),
 		...Array.from({ length: 3 }, (_, index) => record("mrdoob/three.js", index)),
 		...Array.from({ length: 17 }, (_, index) => record("preactjs/preact", index)),
 		...Array.from({ length: 17 }, (_, index) => record("vuejs/core", index)),
-	].join("\n") + "\n";
+	].join("\n")}\n`;
 	const records = parseM3SamplingMetadataJsonl(content, REVISION);
 	const allInstanceIds = [
 		...Array.from({ length: 4 }, (_, index) => recordId("axios/axios", index)),

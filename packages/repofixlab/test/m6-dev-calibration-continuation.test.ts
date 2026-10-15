@@ -1,16 +1,20 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { stableStringify } from "../src/contracts/canonical-json.ts";
+import type { M3SplitManifest } from "../src/m3/split.ts";
 import { createM6DevCalibrationBatch, type M6CalibrationRun } from "../src/m6/calibration-cohort.ts";
 import {
-	runM6DevCalibrationContinuation,
 	type M6DevCalibrationContinuationSummary,
+	runM6DevCalibrationContinuation,
 } from "../src/m6/dev-calibration-continuation.ts";
-import type { M6CalibrationRunReceipt, M6DevCalibrationDependencies, M6DevCalibrationReport } from "../src/m6/dev-calibration-runner.ts";
-import type { M3SplitManifest } from "../src/m3/split.ts";
+import type {
+	M6CalibrationRunReceipt,
+	M6DevCalibrationDependencies,
+	M6DevCalibrationReport,
+} from "../src/m6/dev-calibration-runner.ts";
 
 const BATCH = createM6DevCalibrationBatch({
 	schema_version: "v1",
@@ -19,8 +23,8 @@ const BATCH = createM6DevCalibrationBatch({
 	dataset_lock_seal_sha256: "a".repeat(64),
 	eligibility_manifest_sha256: "b".repeat(64),
 	sampling_metadata_sha256: "c".repeat(64),
-	split_seed: "test-seed",
-	target_counts: { dev: 3, validation: 0, test: 0 },
+	split_seed: "repofixlab-m3-repo-stratified-v1",
+	target_counts: { dev: 5, validation: 4, test: 17 },
 	assignments: [
 		{ instance_id: "axios__axios-5892", split: "dev" },
 		{ instance_id: "mrdoob__three.js-26589", split: "dev" },
@@ -31,7 +35,9 @@ const BATCH = createM6DevCalibrationBatch({
 
 function canonicalHash(value: unknown): string {
 	const normalized = JSON.parse(stableStringify(value));
-	return createHash("sha256").update(`${JSON.stringify(normalized)}\n`).digest("hex");
+	return createHash("sha256")
+		.update(`${JSON.stringify(normalized)}\n`)
+		.digest("hex");
 }
 
 function receipt(logicalRun: M6CalibrationRun, clean: boolean): M6CalibrationRunReceipt {
@@ -62,7 +68,9 @@ function receipt(logicalRun: M6CalibrationRun, clean: boolean): M6CalibrationRun
 }
 
 function sealedSourceReport(): M6DevCalibrationReport {
-	const inherited = BATCH.logical_runs.filter((run) => run.instance_id !== "preactjs__preact-4182").map((run) => receipt(run, true));
+	const inherited = BATCH.logical_runs
+		.filter((run) => run.instance_id !== "preactjs__preact-4182")
+		.map((run) => receipt(run, true));
 	const piPreact = BATCH.logical_runs.find(
 		(run) => run.instance_id === "preactjs__preact-4182" && run.config_id === "pi-general",
 	);
@@ -78,11 +86,16 @@ function sealedSourceReport(): M6DevCalibrationReport {
 		status: "fail" as const,
 		cost_admission: "enforced" as const,
 		budget_caps: { per_logical_run_tokens: 3_500_000, project_tokens: 22_000_000, provider_smoke_tokens: 10_000 },
-		provider_smoke: { run_id: "m6-smoke-source", status: "pass" as const, accounted_tokens: 100, token_ledger_sha256: "f".repeat(64) },
+		provider_smoke: {
+			run_id: "m6-smoke-source",
+			status: "pass" as const,
+			accounted_tokens: 100,
+			token_ledger_sha256: "f".repeat(64),
+		},
 		provisional_estimator: {
 			version: "m6-deepseek-v4-flash-calibration-provisional-v1" as const,
-			multiplier: 1.25,
-			framing_margin_tokens: 512,
+			multiplier: 1.25 as const,
+			framing_margin_tokens: 512 as const,
 		},
 		calibrated_estimator: null,
 		batch_failure_reasons: ["budget_exhausted"],
@@ -161,13 +174,23 @@ describe("M6 continuation calibration", () => {
 						terminal_status: "completed",
 						run_directory: runDirectory,
 						p0_patch_sha256: null,
+						v1_patch_sha256: null,
+						v2_patch_sha256: null,
 						p1_patch_sha256: null,
+						final_snapshot_id: null,
+						worker_lease_id: null,
 						controlled_verification_sha256: null,
+						controlled_verification_sha256s: [],
 					};
 				},
 				runProviderSmoke: async ({ project_cap_tokens }) => {
 					expect(project_cap_tokens).toBe(10_000);
-					return { run_id: "m6-smoke-continuation", status: "pass", accounted_tokens: 100, token_ledger_sha256: "h".repeat(64) };
+					return {
+						run_id: "m6-smoke-continuation",
+						status: "pass",
+						accounted_tokens: 100,
+						token_ledger_sha256: "h".repeat(64),
+					};
 				},
 				readFile,
 				now: () => new Date("2026-07-21T06:00:00.000Z"),
@@ -179,7 +202,8 @@ describe("M6 continuation calibration", () => {
 					calibration_batch: BATCH,
 					source_report: source,
 					source_report_bytes: sourceBytes,
-					source_report_relative_path: "m6-deepseek-flash-calibration/runs/m6-calibration-run-source/calibration-report.json",
+					source_report_relative_path:
+						"m6-deepseek-flash-calibration/runs/m6-calibration-run-source/calibration-report.json",
 				},
 				dependencies,
 			);
@@ -190,10 +214,17 @@ describe("M6 continuation calibration", () => {
 				budget_policy: { project_tokens: null; per_logical_run_tokens: number };
 				inherited_run_receipts: readonly unknown[];
 				continuation_run_receipts: readonly unknown[];
-				aggregate: { continuation_spend_tokens: number; continuation_usage_ledger: { reconciliation_required: boolean } };
+				aggregate: {
+					continuation_spend_tokens: number;
+					continuation_usage_ledger: { reconciliation_required: boolean };
+				};
 			};
 			expect(report.status).toBe("pass");
-			expect(report.budget_policy).toEqual({ per_logical_run_tokens: 5_000_000, project_tokens: null, provider_smoke_tokens: 10_000 });
+			expect(report.budget_policy).toEqual({
+				per_logical_run_tokens: 5_000_000,
+				project_tokens: null,
+				provider_smoke_tokens: 10_000,
+			});
 			expect(report.inherited_run_receipts).toHaveLength(4);
 			expect(report.continuation_run_receipts).toHaveLength(2);
 			expect(report.aggregate.continuation_spend_tokens).toBe(400);

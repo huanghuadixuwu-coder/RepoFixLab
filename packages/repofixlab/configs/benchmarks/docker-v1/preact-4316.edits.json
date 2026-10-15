@@ -1,0 +1,7 @@
+[
+  {
+    "path": "src/diff/props.js",
+    "old_text": "\t\tif (!dom._listeners) dom._listeners = {};",
+    "new_text": "\t\t// Some DOM events (focusin, focusout) may not expose\n\t\t// their on* handler property on all DOM elements, so\n\t\t// normalize the casing for those that slip through.\n\t\tif (name === 'FocusIn' || name === 'FocusOut') name = name.toLowerCase();\n\n\t\tif (!dom._listeners) dom._listeners = {};"
+  }
+]

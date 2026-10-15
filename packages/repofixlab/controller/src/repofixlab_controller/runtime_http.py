@@ -108,6 +108,13 @@ class RuntimeDestroyWorkerRequest(_RuntimeWriteRequest):
     request_type: Literal["runtime_destroy_worker"]
 
 
+class RuntimeRestoreWorkerRequest(_RuntimeWriteRequest):
+    """Select a sealed checkpoint from the interrupted attempt's journal."""
+
+    request_type: Literal["runtime_restore_worker"]
+    snapshot_id: str = Field(pattern=r"^snapshot-[a-f0-9]{64}$")
+
+
 class RuntimeStartEvaluationRequest(_RuntimeWriteRequest):
     """Start fresh evaluation for one exact run and policy-passing snapshot."""
 
@@ -225,6 +232,15 @@ def install_runtime_routes(application: FastAPI) -> None:
             ),
         )
 
+    @application.post("/internal/v1/runtime/workers/{lease_id}/restore")
+    def runtime_restore_worker(
+        request: RuntimeRestoreWorkerRequest,
+        lease_id: str = Path(pattern=_IDENTIFIER_PATTERN),
+    ) -> JSONResponse:
+        """Restore code in a new Worker, retaining the original task recovery count."""
+        return _write_call(application, lambda service: service.restore_worker(
+            {**_body(request), "lease_id": lease_id}))
+
     @application.post("/internal/v1/runtime/evaluations")
     def runtime_start_evaluation(
         request: RuntimeStartEvaluationRequest,
@@ -317,10 +333,10 @@ def _write_call(
         raise HTTPException(
             status_code=409, detail="runtime operation conflicts with state"
         ) from None
-    except RuntimeCapacityBusy:
-        raise HTTPException(status_code=429, detail="runtime capacity is busy") from None
-    except RuntimeServiceUnavailable:
-        raise HTTPException(status_code=503, detail="runtime service is unavailable") from None
+    except RuntimeCapacityBusy as error:
+        raise HTTPException(status_code=429, detail=str(error)) from None
+    except RuntimeServiceUnavailable as error:
+        raise HTTPException(status_code=503, detail=error.reason_code) from None
     except HTTPException:
         raise
     except Exception:
@@ -351,8 +367,8 @@ def _read_call(
         raise HTTPException(
             status_code=409, detail="runtime operation conflicts with state"
         ) from None
-    except RuntimeServiceUnavailable:
-        raise HTTPException(status_code=503, detail="runtime service is unavailable") from None
+    except RuntimeServiceUnavailable as error:
+        raise HTTPException(status_code=503, detail=error.reason_code) from None
     except HTTPException:
         raise
     except Exception:

@@ -1,0 +1,135 @@
+{
+  "schema_version": "v1",
+  "benchmark_id": "repofixlab-docker-wf1-v1",
+  "baseline_commit": "be8cb251b170801cfc5ceec431193d6ac5bb56be",
+  "mode": "sequential_on_demand",
+  "controller_image_id": "sha256:25a2af725976fcef1360225f4ae4a6fe4a2d40ff7d93de2c74d6566bf468e986",
+  "evaluator_kernel_sha256": "2383940496a01fbf7dcd36de1d7774e3a6e9a8a753f3ffa4b18260e4d8bc8517",
+  "candidate_directory": "configs/benchmarks/docker-v1/candidates",
+  "tasks": [
+    {
+      "instance_id": "preactjs__preact-4316",
+      "candidate_id": "task-environment-candidate-v1-preactjs-preact-4316-d734b68b635f797e8643f268994149658ba194ed5438e435c6b782d5d192ce9e",
+      "base_commit": "b820d8b73eade8bc5b3fbf7e5fe0dd5150de80e2",
+      "candidate_sha256": "2ed0da078e8fe912b35e27ade80c49a95e1ea5cf01a84ce20e318899d7191603",
+      "task_environment_lock_id": "task-environment-v1-preactjs-preact-4316-61d112e363605486",
+      "task_environment_lock_sha256": "61d112e3636054864c36a21d772e0b58235f2d3b378a79c372de099450f4afc8",
+      "worker_image_id": "sha256:9d05c7c8d95b38bb745b72d28302a5d851ac173b96b425cc6e67ca41fa3d493e",
+      "evaluator_image_id": "sha256:5bdf97bafee1aa4f930d481898392226367b74895c4bb95d10e02f9291eb3051",
+      "edits_path": "configs/benchmarks/docker-v1/preact-4316.edits.json",
+      "patch_path": "configs/benchmarks/docker-v1/preact-4316.patch",
+      "patch_sha256": "196fc2898109d1adb599e0e2cad57c444812ddbbd9337eeabdf41a3c31f2270c",
+      "expected_resolved": true,
+      "verification_entry_index": 0
+    },
+    {
+      "instance_id": "axios__axios-6539",
+      "candidate_id": "task-environment-candidate-v1-axios-6539-8ea08218618ae4c86b9d81092a98cdf77d5dd5e808099be5b4dd9a5b281841be",
+      "base_commit": "c6cce43cd94489f655f4488c5a50ecaf781c94f2",
+      "candidate_sha256": "65d4888d23bd769b761d5835b8c0dfbcb281182b77ba0494068d434179c9881e",
+      "task_environment_lock_id": "task-environment-v1-axios-6539-0757d1c0b98d5dd5",
+      "task_environment_lock_sha256": "0757d1c0b98d5dd5287f845791463233ec8b414f2b848d32ae58f78178bc032b",
+      "worker_image_id": "sha256:d647fa20e10cd9a2ab040e0a157a883158dad02a90354910e6d81331bdb3d40f",
+      "evaluator_image_id": "sha256:d7e8fcb0f8ecbf98e80cfac3d03caba2caede419fe4d57d234cfac5578aab6fb",
+      "edits_path": "configs/benchmarks/docker-v1/axios-6539.edits.json",
+      "patch_path": "configs/benchmarks/docker-v1/axios-6539.patch",
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_resolved": false,
+      "verification_entry_index": 0
+    }
+  ],
+  "repetitions": 3,
+  "target_concurrency": 2,
+  "cohorts": [
+    {
+      "id": "same",
+      "instance_ids": [
+        "preactjs__preact-4316",
+        "preactjs__preact-4316"
+      ]
+    },
+    {
+      "id": "mixed",
+      "instance_ids": [
+        "preactjs__preact-4316",
+        "axios__axios-6539"
+      ]
+    }
+  ],
+  "order": "repetition, then cohort (same/mixed), then declared task order; no retries; fresh containers per sample",
+  "conditions": {
+    "first_pass": "repetition 0; frozen images already local; new containers; host page cache uncontrolled",
+    "repeated": "repetitions 1 and 2; same tasks and patches; new containers; natural OS/image cache"
+  },
+  "host": {
+    "engine_id": "380d8f76-b103-4b17-a9f0-c3ce41e95df6",
+    "engine_version": "29.3.1",
+    "platform": "linux/amd64",
+    "docker_cpus": 12,
+    "docker_memory_bytes": 21474836480
+  },
+  "resources": {
+    "total_cpu_limit": 10,
+    "total_memory_limit_bytes": 19327352832,
+    "controller_cpu": 1,
+    "controller_memory_bytes": 536870912,
+    "worker_cpu": 4,
+    "worker_memory_bytes": 8589934592,
+    "evaluator_cpu": 4,
+    "evaluator_memory_bytes": 8589934592,
+    "pids_limit": 512
+  },
+  "sampling": {
+    "interval_seconds": 0.5,
+    "reservations": "create to remove, includes helpers and controller",
+    "actual": "Docker cgroup CPU and memory; sampling can miss short actual peaks",
+    "throughput": "completed runtime samples per batch wall minute, including negative quality controls",
+    "consistency": "official resolved/F2P/P2P/test identities and artifact attribution per frozen patch; zero infrastructure failures; zero residual managed resources"
+  },
+  "files": [
+    {
+      "path": "configs/benchmarks/docker-v1/preact-4316.edits.json",
+      "sha256": "409e518f206e39711f34ab501205715ca57b0263540dab657ad01cd06ac94382"
+    },
+    {
+      "path": "configs/benchmarks/docker-v1/axios-6539.edits.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "path": "configs/benchmarks/docker-v1/preact-4316.patch",
+      "sha256": "196fc2898109d1adb599e0e2cad57c444812ddbbd9337eeabdf41a3c31f2270c"
+    },
+    {
+      "path": "configs/benchmarks/docker-v1/axios-6539.patch",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "configs/benchmarks/docker-v1/candidates/m6-preactjs-preact-4316.candidate.json",
+      "sha256": "885f90286c2bb29df0585348babe6e73e63e81e5049f5c5243c91d76d89cf031"
+    },
+    {
+      "path": "configs/runtime/m6-26-task-v1/preactjs-preact-4316/task-environment-lock.json",
+      "sha256": "22c6c866dd8577c5cae1c2db574f22180faa7bd9df71d95ecce89dda1973d6bb"
+    },
+    {
+      "path": "configs/benchmarks/docker-v1/candidates/m6-axios-6539.candidate.json",
+      "sha256": "3a55d2b96510ce532697d36911ce92688234687154f17beaa395bf3997e2ab22"
+    },
+    {
+      "path": "configs/runtime/m6-26-task-v1/axios-6539/task-environment-lock.json",
+      "sha256": "1b5504104a109b8e9070da8198c73c41952be35e5b9b5fbf6cf6e0d9475089ba"
+    },
+    {
+      "path": "configs/runtime/axios-5892/dataset-lock.json",
+      "sha256": "003c0a34cd85c9254e651ab639a29171677f98e1bb06a8393b14d5893fdef95f"
+    },
+    {
+      "path": "controller/src/repofixlab_controller/runtime_tools.py",
+      "sha256": "dee89dc3dce03d6ac5c4c5e5c9aa2f8f4e6a6e2e1875487291f1c91ae7ab4892"
+    },
+    {
+      "path": "controller/src/repofixlab_controller/runtime_worker_entry.py",
+      "sha256": "ee14de215defb6f512c865614d62cec5cb80f8c124e8427e7832e3e7a8aea443"
+    }
+  ]
+}

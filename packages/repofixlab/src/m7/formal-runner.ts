@@ -362,7 +362,11 @@ export async function runM7FormalRun(
 			job.jobId,
 			artifacts.artifactSetSha256,
 		);
-		if (!acknowledged.clean) throw new Error("M7 Evaluator cleanup reported residual resources");
+		await store.writeNew(
+			"cleanup.json",
+			stableStringify({ worker_clean: destroyed.clean, evaluator_clean: acknowledged.clean }),
+			{ mediaType: "application/json", sensitivity: "internal", generatedBy: "orchestrator" },
+		);
 		if (evaluation.status !== "completed") throw new Error(evaluation.error_class ?? "Official evaluation failed");
 		const attempt = createAttempt({
 			schema_version: "v1",
@@ -433,6 +437,8 @@ export async function runM7FormalRun(
 		await store.publishTo(root);
 		return result;
 	} catch (error) {
+		// Evaluation admission can fail while this attempt still owns capacity.
+		await dependencies.controller.abort(options.attemptId, `${options.attemptId}:abort`).catch(() => undefined);
 		if (error instanceof KnownProviderUsageBatchFailure) throw error;
 		throw new KnownProviderUsageBatchFailure(errorMessage(error), usage.accounted_tokens);
 	}

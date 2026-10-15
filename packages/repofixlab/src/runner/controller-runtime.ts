@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { stableStringify } from "../contracts/canonical-json.ts";
-import { HttpRepoToolTransport, type RepoToolTransport } from "../controller/client.ts";
+import { HttpRepoToolTransport, type RepoToolTransport, RepoToolTransportError } from "../controller/client.ts";
 
-const DEFAULT_TIMEOUT_MS = 310_000;
+// Cover a 300-second admission wait plus one bounded runtime operation.
+const DEFAULT_TIMEOUT_MS = 650_000;
 const DEFAULT_RESPONSE_LIMIT = 12_000_000;
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA1 = /^[a-f0-9]{40}$/;
@@ -130,6 +131,12 @@ export interface RuntimeController {
 		candidateId: string,
 	): Promise<RuntimeVerificationResult>;
 	snapshot(attemptId: string, operationId: string, leaseId: string): Promise<RuntimePatchSnapshot>;
+	restoreWorker?(
+		attemptId: string,
+		operationId: string,
+		leaseId: string,
+		snapshotId: string,
+	): Promise<RuntimePreparedWorker>;
 	destroy(attemptId: string, operationId: string, leaseId: string): Promise<RuntimeCleanup>;
 	startEvaluation(
 		attemptId: string,
@@ -156,6 +163,9 @@ interface HttpRuntimeControllerOptions {
 }
 
 type JsonRecord = Record<string, unknown>;
+
+/** A response was lost before its JSON could be inspected. */
+class RuntimeTransportError extends Error {}
 
 function canonicalSha256(value: unknown): string {
 	const normalized: unknown = JSON.parse(stableStringify(value));
@@ -477,6 +487,32 @@ export class HttpRuntimeController implements RuntimeController {
 		};
 	}
 
+	/** Select this task's committed checkpoint; the Controller owns code restoration. */
+	async restoreWorker(
+		attemptId: string,
+		operationId: string,
+		leaseId: string,
+		snapshotId: string,
+	): Promise<RuntimePreparedWorker> {
+		const body = await this.write(
+			`/internal/v1/runtime/workers/${encodeURIComponent(leaseId)}/restore`,
+			attemptId,
+			operationId,
+			{ request_type: "runtime_restore_worker", snapshot_id: snapshotId },
+			{ lease_id: leaseId, snapshot_id: snapshotId },
+		);
+		this.verifyWriteResponse(body, "runtime_worker_restored", "restored");
+		if (
+			body.snapshot_id !== snapshotId ||
+			body.worker_recoveries !== 1 ||
+			stringField(body, "patch_sha256", SHA256) !== snapshotId.slice("snapshot-".length)
+		)
+			throw new Error("Controller Worker restoration identity drifted");
+		const replacementLeaseId = stringField(body, "lease_id", IDENTIFIER);
+		if (replacementLeaseId === leaseId) throw new Error("Controller reused the interrupted Worker lease");
+		return { leaseId: replacementLeaseId };
+	}
+
 	async destroy(attemptId: string, operationId: string, leaseId: string): Promise<RuntimeCleanup> {
 		const body = await this.write(
 			`/internal/v1/runtime/workers/${encodeURIComponent(leaseId)}/destroy`,
@@ -629,11 +665,23 @@ export class HttpRuntimeController implements RuntimeController {
 			throw new Error("Runtime write identity is invalid");
 		const unsigned = { schema_version: "v1", ...fields, attempt_id: attemptId, operation_id: operationId };
 		const requestSha256 = canonicalSha256({ ...unsigned, ...hashFields });
-		const body = await this.request(path, {
+		const init: RequestInit = {
 			method: "POST",
 			headers: { accept: "application/json", "content-type": "application/json" },
 			body: JSON.stringify({ ...unsigned, request_sha256: requestSha256 }),
-		});
+		};
+		let body: JsonRecord;
+		try {
+			body = await this.request(path, init);
+		} catch (error) {
+			if (
+				!(error instanceof RuntimeTransportError) ||
+				(fields.request_type !== "runtime_snapshot_patch" && fields.request_type !== "runtime_restore_worker")
+			)
+				throw error;
+			// Reuse the operation identity to retrieve the committed result.
+			body = await this.request(path, init);
+		}
 		if (
 			stringField(body, "attempt_id") !== attemptId ||
 			stringField(body, "operation_id") !== operationId ||
@@ -643,18 +691,30 @@ export class HttpRuntimeController implements RuntimeController {
 		return body;
 	}
 
-	private read(path: string): Promise<JsonRecord> {
-		return this.request(path, { method: "GET", headers: { accept: "application/json" } });
+	private async read(path: string): Promise<JsonRecord> {
+		const init: RequestInit = { method: "GET", headers: { accept: "application/json" } };
+		try {
+			return await this.request(path, init);
+		} catch (error) {
+			if (!(error instanceof RuntimeTransportError)) throw error;
+			return this.request(path, init);
+		}
 	}
 
 	private async request(path: string, init: RequestInit): Promise<JsonRecord> {
-		const response = await this.fetchFn(new URL(path, this.controllerUrl), {
-			...init,
-			signal: AbortSignal.timeout(this.timeoutMs),
-		});
+		let response: Response;
+		try {
+			response = await this.fetchFn(new URL(path, this.controllerUrl), {
+				...init,
+				signal: AbortSignal.timeout(this.timeoutMs),
+			});
+		} catch (error) {
+			throw new RuntimeTransportError("Controller response was lost", { cause: error });
+		}
 		if (!response.ok) {
 			const text = (await response.text()).slice(0, 4_096);
 			let detail = text;
+			let reasonCode: string | undefined;
 			try {
 				const parsed: unknown = JSON.parse(text);
 				if (
@@ -664,18 +724,28 @@ export class HttpRuntimeController implements RuntimeController {
 					typeof (parsed as { detail: unknown }).detail === "string"
 				) {
 					detail = (parsed as { detail: string }).detail;
+					reasonCode = detail;
 				}
 			} catch {
 				// A non-JSON Controller error is still useful diagnostic evidence.
 			}
-			throw new Error(`Controller runtime returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+			throw new RepoToolTransportError(
+				`Controller runtime returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+				response.status,
+				reasonCode,
+			);
 		}
 		if (!response.headers.get("content-type")?.toLowerCase().includes("application/json"))
 			throw new Error("Controller runtime returned non-JSON content");
 		const contentLength = response.headers.get("content-length");
 		if (contentLength !== null && Number(contentLength) > this.maxResponseBytes)
 			throw new Error("Controller runtime response exceeded the byte limit");
-		const bytes = new Uint8Array(await response.arrayBuffer());
+		let bytes: Uint8Array;
+		try {
+			bytes = new Uint8Array(await response.arrayBuffer());
+		} catch (error) {
+			throw new RuntimeTransportError("Controller response body was lost", { cause: error });
+		}
 		if (bytes.byteLength > this.maxResponseBytes)
 			throw new Error("Controller runtime response exceeded the byte limit");
 		try {

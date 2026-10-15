@@ -1,0 +1,136 @@
+{
+	"adapter_sha256": "fd09946d8995076ba05945492d6118d68a895927d7c68f1b60c4dcb58c227263",
+	"base_commit": "b820d8b73eade8bc5b3fbf7e5fe0dd5150de80e2",
+	"candidate_id": "task-environment-candidate-v1-preactjs-preact-4316-d734b68b635f797e8643f268994149658ba194ed5438e435c6b782d5d192ce9e",
+	"candidate_sha256": "2ed0da078e8fe912b35e27ade80c49a95e1ea5cf01a84ce20e318899d7191603",
+	"candidate_type": "task_environment_candidate",
+	"created_at": "2026-07-20T00:15:58.6427679Z",
+	"dataset_lock": {
+		"lock_id": "dataset-v1-g-20260718-135934-066a8f5b6f6b-e451237925674fc6",
+		"lock_sha256": "003c0a34cd85c9254e651ab639a29171677f98e1bb06a8393b14d5893fdef95f"
+	},
+	"instance_id": "preactjs__preact-4316",
+	"official_image_source_lock": {
+		"lock_id": "official-images-v1-set-26-140ebe01ca57c662",
+		"lock_sha256": "e5d03e8cad574d1e707c0e8380a7f7cc3a7bb77fca046361f12d7f53617d0bb3"
+	},
+	"probe_sha256": "ad2a233a557616aa5bb9195f66bb63ba1e1b89157154ad318bde2155b3c70c85",
+	"roles": {
+		"evaluator": {
+			"filesystem_profile": {
+				"profile_id": "task-environment-profile-v1-preactjs-preact-4316-evaluator-filesystem-73383f273eaeadf1efbebf9eeb44f32354203ab0ec3ebf41796a9fb2a173e711",
+				"profile_sha256": "bd8c40c4d3218df9797ee8c554560da1520c27234d820ed60a598ca62b4c81ba",
+				"writable_mounts": [
+					{
+						"destination": "/testbed",
+						"read_write": true,
+						"type": "volume"
+					},
+					{
+						"destination": "/tmp",
+						"read_write": true,
+						"type": "tmpfs"
+					}
+				]
+			},
+			"image": {
+				"local_image_id": "sha256:5bdf97bafee1aa4f930d481898392226367b74895c4bb95d10e02f9291eb3051",
+				"platform": "linux/amd64",
+				"provenance_sha256": "af840924f9e1972f05bca2e039c763752c9de5575d8d3b566baa405dd98bdc0f"
+			},
+			"resource_profile": {
+				"memory_bytes": 8589934592,
+				"memory_swap_bytes": 8589934592,
+				"nano_cpus": 4000000000,
+				"pids_limit": 512,
+				"profile_id": "task-environment-profile-v1-preactjs-preact-4316-evaluator-resource-d93e7a146ee8666f781285f2ee14a544622f21df4997369a8f2aa8592465066b",
+				"profile_sha256": "1a43c01e9dc34066b8951786bb859ba0df03b9810dafa58d4d9c0f0e12c7c194",
+				"timeout_seconds": 300
+			},
+			"role": "evaluator",
+			"runtime_user": {
+				"gid": 0,
+				"uid": 0
+			},
+			"security_profile": {
+				"auto_remove": false,
+				"cap_add": [],
+				"cap_drop": [
+					"ALL"
+				],
+				"devices": [],
+				"docker_socket_allowed": false,
+				"host_bind_mounts_allowed": false,
+				"network_mode": "none",
+				"no_new_privileges": true,
+				"privileged": false,
+				"profile_id": "task-environment-profile-v1-preactjs-preact-4316-evaluator-security-36ca5c0b1e3267914717d9cdbefaa0db46b26c0debe29e0fb484f5a557c0508f",
+				"profile_sha256": "bd94f6b4d52960b2c55d3640ba4548f9018beeebe0fd79b607ec986f6a11bc12",
+				"published_ports_allowed": false,
+				"read_only_root_filesystem": true,
+				"sensitive_environment_allowed": false,
+				"stdin_open": false,
+				"tty": false
+			}
+		},
+		"worker": {
+			"filesystem_profile": {
+				"profile_id": "task-environment-profile-v1-preactjs-preact-4316-worker-filesystem-73383f273eaeadf1efbebf9eeb44f32354203ab0ec3ebf41796a9fb2a173e711",
+				"profile_sha256": "8043fbdfdc162839a896ccca53483d51c1d5ec9034129c48590f56f3d0de3690",
+				"writable_mounts": [
+					{
+						"destination": "/testbed",
+						"read_write": true,
+						"type": "volume"
+					},
+					{
+						"destination": "/tmp",
+						"read_write": true,
+						"type": "tmpfs"
+					}
+				]
+			},
+			"image": {
+				"local_image_id": "sha256:9d05c7c8d95b38bb745b72d28302a5d851ac173b96b425cc6e67ca41fa3d493e",
+				"platform": "linux/amd64",
+				"provenance_sha256": "ef960e3a855d60561e37eee8c6e1f7a5ddcfe2b7f18ce59c6136aac53011c864"
+			},
+			"resource_profile": {
+				"memory_bytes": 8589934592,
+				"memory_swap_bytes": 8589934592,
+				"nano_cpus": 4000000000,
+				"pids_limit": 512,
+				"profile_id": "task-environment-profile-v1-preactjs-preact-4316-worker-resource-1566926a1f183a8e401a5e08e0321cbbe427152a611f1722dda7438daf53614f",
+				"profile_sha256": "1ad082df439ed7fa20866ad2b4bfe400f27e356ef7bd139865234e121f433f9a",
+				"timeout_seconds": 1800
+			},
+			"role": "worker",
+			"runtime_user": {
+				"gid": 65532,
+				"uid": 65532
+			},
+			"security_profile": {
+				"auto_remove": false,
+				"cap_add": [],
+				"cap_drop": [
+					"ALL"
+				],
+				"devices": [],
+				"docker_socket_allowed": false,
+				"host_bind_mounts_allowed": false,
+				"network_mode": "none",
+				"no_new_privileges": true,
+				"privileged": false,
+				"profile_id": "task-environment-profile-v1-preactjs-preact-4316-worker-security-36ca5c0b1e3267914717d9cdbefaa0db46b26c0debe29e0fb484f5a557c0508f",
+				"profile_sha256": "d2117c078ffb3f59617163f94276f42918795640ccbad01156ba28d94d8aef61",
+				"published_ports_allowed": false,
+				"read_only_root_filesystem": true,
+				"sensitive_environment_allowed": false,
+				"stdin_open": false,
+				"tty": false
+			}
+		}
+	},
+	"sanitizer_sha256": "3d1cbbea005c97f65b0abdedfc5d1fbb1fcd5386eff8270c5036626f56466695",
+	"schema_version": "v1"
+}

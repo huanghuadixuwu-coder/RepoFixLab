@@ -1,0 +1,16 @@
+diff --git a/src/diff/props.js b/src/diff/props.js
+index 75016c402579aee756eb579d0213cf89894c5496..7eb88f7a9369d00a9012faa551c8ef648bd58e0e 100644
+--- a/src/diff/props.js
++++ b/src/diff/props.js
+@@ -58,6 +58,11 @@ export function setProperty(dom, name, value, oldValue, isSvg) {
+ 		if (name.toLowerCase() in dom) name = name.toLowerCase().slice(2);
+ 		else name = name.slice(2);
+ 
++		// Some DOM events (focusin, focusout) may not expose
++		// their on* handler property on all DOM elements, so
++		// normalize the casing for those that slip through.
++		if (name === 'FocusIn' || name === 'FocusOut') name = name.toLowerCase();
++
+ 		if (!dom._listeners) dom._listeners = {};
+ 		dom._listeners[name + useCapture] = value;
+ 

@@ -246,6 +246,6 @@ Worker 与 Evaluator 分别管理容器池。领取时检查环境兼容性和�
 | 容器迭代规格与验收记录 | [运行时迭代文档](https://github.com/huanghuadixuwu-coder/RepoFixLab/blob/docker/docs/plans/repofixlab-runtime-iteration.md) |
 | 固定补丁回放基准 | [Docker 基准说明](https://github.com/huanghuadixuwu-coder/RepoFixLab/blob/docker/packages/repofixlab/configs/benchmarks/docker-v1/README.md) |
 
-容器并发迭代已提交至 `docker` 分支。最新失败续跑补充已在本地实现并通过验收，待提交同步。
+容器并发与失败续跑代码已提交至 `docker` 分支并合并至 `main`，对应规格、测试与验收记录随代码交付。
 
 RepoFixLab 基于 Pi Agent 开发，保留原项目的许可证与归属说明。

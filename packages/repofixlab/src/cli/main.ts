@@ -24,16 +24,16 @@ import {
 	type ExperimentPlan,
 	parseExperimentPlan,
 } from "../contracts/experiment-plan.ts";
+import { verifyOfficialImageSourceLockSelfContained } from "../contracts/official-image-source-lock.ts";
 import { stableStringify } from "../contracts/schema-generator.ts";
+import { verifyDatasetLockForTaskEnvironment } from "../contracts/task-environment-lock.ts";
 import {
 	createTaskEnvironmentCandidate,
 	createTaskRoleFactoryProbeRequest,
 	verifyTaskEnvironmentCandidate,
 	verifyTaskRoleFactoryProbeReport,
 } from "../contracts/task-role-factory-probe.ts";
-import { verifyOfficialImageSourceLockSelfContained } from "../contracts/official-image-source-lock.ts";
 import { DATASET_PREPARER_SELF_CHECK_CONSTANTS, SWE_BENCH_HARNESS_REVISION } from "../contracts/v1.ts";
-import { verifyDatasetLockForTaskEnvironment } from "../contracts/task-environment-lock.ts";
 import { readControllerBootstrapHealth } from "../controller/bootstrap-health.ts";
 import {
 	createBootstrapImageProvenanceLockFile,
@@ -45,6 +45,18 @@ import {
 	runBootstrapDoctor,
 	runSmokeDoctor,
 } from "../doctor/index.ts";
+import {
+	createM3RepoStratifiedSplit,
+	type M3SplitManifest,
+	parseM3SamplingMetadataJsonl,
+	verifyM3EligibilityManifest,
+	verifyM3RepoStratifiedSplit,
+} from "../m3/split.ts";
+import { createM6DevCalibrationBatch, verifyM6DevCalibrationBatch } from "../m6/calibration-cohort.ts";
+import { runM6DevCalibrationContinuation } from "../m6/dev-calibration-continuation.ts";
+import { createDefaultM6DevCalibrationDependencies, runM6DevCalibration } from "../m6/dev-calibration-runner.ts";
+import { runM7Batch } from "../m7/batch-runner.ts";
+import type { BatchExecutionSummary } from "../runner/batch-runner.ts";
 import { createDefaultM1RunnerDependencies, type M1RunSummary, runM1Experiment } from "../runner/run-m1.ts";
 import { parseCliArgs } from "./args.ts";
 import {
@@ -58,18 +70,6 @@ import {
 	loadTaskEnvironmentLockRawEvidence,
 	verifyTaskEnvironmentLockEvidenceManifest,
 } from "./task-environment-lock.ts";
-import {
-	createM3RepoStratifiedSplit,
-	parseM3SamplingMetadataJsonl,
-	verifyM3EligibilityManifest,
-	verifyM3RepoStratifiedSplit,
-	type M3SplitManifest,
-} from "../m3/split.ts";
-import { createM6DevCalibrationBatch, verifyM6DevCalibrationBatch } from "../m6/calibration-cohort.ts";
-import { createDefaultM6DevCalibrationDependencies, runM6DevCalibration } from "../m6/dev-calibration-runner.ts";
-import { runM6DevCalibrationContinuation } from "../m6/dev-calibration-continuation.ts";
-import { runM7Batch } from "../m7/batch-runner.ts";
-import type { BatchExecutionSummary } from "../runner/batch-runner.ts";
 
 const DEFAULT_ARTIFACTS_ROOT = "/artifacts";
 const DEFAULT_CONTROLLER_URL = "http://controller:8000";
@@ -213,7 +213,11 @@ export interface CliRuntime {
 		artifactsRoot: string,
 		controllerUrl: string,
 	) => Promise<M1RunSummary>;
-	readonly runM7Experiment: (plan: ExperimentPlan, artifactsRoot: string, controllerUrl: string) => Promise<BatchExecutionSummary>;
+	readonly runM7Experiment: (
+		plan: ExperimentPlan,
+		artifactsRoot: string,
+		controllerUrl: string,
+	) => Promise<BatchExecutionSummary>;
 	readonly resolveInputPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
 	readonly resolveRunConfigPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
 	readonly resolveOutputPath: (artifactsRoot: string, requestedPath: string) => Promise<string>;
@@ -423,7 +427,11 @@ export async function resolveArtifactInputDirectory(artifactsRoot: string, reque
 		const stats = await lstat(current);
 		if (stats.isSymbolicLink()) throw new Error(`Input directory traverses symbolic link ${current}`);
 		if (!stats.isDirectory()) {
-			throw new Error(index === segments.length - 1 ? `Input path is not a directory: ${current}` : `Input parent is not a directory: ${current}`);
+			throw new Error(
+				index === segments.length - 1
+					? `Input path is not a directory: ${current}`
+					: `Input parent is not a directory: ${current}`,
+			);
 		}
 	}
 	const realCandidate = await realpath(candidate);
@@ -603,7 +611,11 @@ export async function runCli(args: readonly string[], runtime: CliRuntime = defa
 				? undefined
 				: await resolveArtifactInputDirectory(runtime.artifactsRoot, parsed.command.resume);
 		const summary = await runM6DevCalibration(
-			{ artifacts_root: runtime.artifactsRoot, calibration_batch: calibrationBatch, ...(resumeDirectory === undefined ? {} : { resume_directory: resumeDirectory }) },
+			{
+				artifacts_root: runtime.artifactsRoot,
+				calibration_batch: calibrationBatch,
+				...(resumeDirectory === undefined ? {} : { resume_directory: resumeDirectory }),
+			},
 			createDefaultM6DevCalibrationDependencies(runtime.controllerUrl),
 		);
 		runtime.stdout(stableStringify(summary));

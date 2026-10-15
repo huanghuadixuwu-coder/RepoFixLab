@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { stableStringify } from "../src/contracts/canonical-json.ts";
+import type { M3SplitManifest } from "../src/m3/split.ts";
 import { createM6DevCalibrationBatch } from "../src/m6/calibration-cohort.ts";
 import {
-	runM6DevCalibration,
 	type M6CalibrationRunReceipt,
 	type M6DevCalibrationDependencies,
+	runM6DevCalibration,
 } from "../src/m6/dev-calibration-runner.ts";
-import type { M3SplitManifest } from "../src/m3/split.ts";
-import { stableStringify } from "../src/contracts/canonical-json.ts";
 import { GlobalBudgetLedger } from "../src/runner/global-budget-ledger.ts";
 
 const CALIBRATION_BATCH = createM6DevCalibrationBatch({
@@ -20,8 +20,8 @@ const CALIBRATION_BATCH = createM6DevCalibrationBatch({
 	dataset_lock_seal_sha256: "a".repeat(64),
 	eligibility_manifest_sha256: "b".repeat(64),
 	sampling_metadata_sha256: "c".repeat(64),
-	split_seed: "test-seed",
-	target_counts: { dev: 3, validation: 0, test: 0 },
+	split_seed: "repofixlab-m3-repo-stratified-v1",
+	target_counts: { dev: 5, validation: 4, test: 17 },
 	assignments: [
 		{ instance_id: "axios__axios-5892", split: "dev" },
 		{ instance_id: "mrdoob__three.js-26589", split: "dev" },
@@ -65,14 +65,21 @@ function completedM4(runDirectory: string, logicalRun: (typeof CALIBRATION_BATCH
 		terminal_status: "completed" as const,
 		run_directory: runDirectory,
 		p0_patch_sha256: null,
+		v1_patch_sha256: null,
+		v2_patch_sha256: null,
 		p1_patch_sha256: null,
+		final_snapshot_id: null,
+		worker_lease_id: null,
 		controlled_verification_sha256: null,
+		controlled_verification_sha256s: [],
 	};
 }
 
 function canonicalHash(value: unknown): string {
 	const normalized = JSON.parse(stableStringify(value));
-	return createHash("sha256").update(`${JSON.stringify(normalized)}\n`).digest("hex");
+	return createHash("sha256")
+		.update(`${JSON.stringify(normalized)}\n`)
+		.digest("hex");
 }
 
 function journalLine(value: Record<string, unknown>): string {
@@ -115,7 +122,10 @@ describe("M6 v2 Dev calibration runner", () => {
 				status: string;
 				protocol_revision: string;
 				run_receipts: readonly unknown[];
-				aggregate: { accounted_tokens: number; global_budget: { accounted_tokens: number; reserved_tokens: number } };
+				aggregate: {
+					accounted_tokens: number;
+					global_budget: { accounted_tokens: number; reserved_tokens: number };
+				};
 				calibrated_estimator: { multiplier: number; framing_margin_tokens: number };
 			};
 			expect(report.status).toBe("pass");
@@ -135,7 +145,12 @@ describe("M6 v2 Dev calibration runner", () => {
 			const calls: number[] = [];
 			const failingDependencies: M6DevCalibrationDependencies = {
 				...dependencies(calls),
-				runProviderSmoke: async () => ({ run_id: "m6-smoke-test", status: "fail", accounted_tokens: 100, token_ledger_sha256: "f".repeat(64) }),
+				runProviderSmoke: async () => ({
+					run_id: "m6-smoke-test",
+					status: "fail",
+					accounted_tokens: 100,
+					token_ledger_sha256: "f".repeat(64),
+				}),
 			};
 			const summary = await runM6DevCalibration(
 				{ artifacts_root: temporaryDirectory, calibration_batch: CALIBRATION_BATCH },
@@ -168,7 +183,17 @@ describe("M6 v2 Dev calibration runner", () => {
 				accounted_tokens: 150,
 				token_ledger_sha256: "f".repeat(64),
 				request_count: 1,
-				observations: [{ request_id: "first:provider:0000", base_input_tokens: 100, reserved_input_tokens: 500, reservation_tokens: 16_884, provider_prompt_tokens: 100, provider_completion_tokens: 50, provider_total_tokens: 150 }],
+				observations: [
+					{
+						request_id: "first:provider:0000",
+						base_input_tokens: 100,
+						reserved_input_tokens: 500,
+						reservation_tokens: 16_884,
+						provider_prompt_tokens: 100,
+						provider_completion_tokens: 50,
+						provider_total_tokens: 150,
+					},
+				],
 				budget_protocol_valid: true,
 				requires_reconciliation: false,
 				failure_reasons: [],
@@ -176,14 +201,58 @@ describe("M6 v2 Dev calibration runner", () => {
 			};
 			const receiptContent = stableStringify(firstReceipt);
 			await writeFile(join(stagingDirectory, "receipts", `${firstRun.run_id}.json`), receiptContent, "utf8");
-			const smoke = { run_id: "m6-smoke-test", status: "pass" as const, accounted_tokens: 100, token_ledger_sha256: "e".repeat(64) };
-			const journalBase = { schema_version: "v2", run_id: runId, calibration_batch_sha256: CALIBRATION_BATCH.calibration_batch_sha256 };
+			const smoke = {
+				run_id: "m6-smoke-test",
+				status: "pass" as const,
+				accounted_tokens: 100,
+				token_ledger_sha256: "e".repeat(64),
+			};
+			const journalBase = {
+				schema_version: "v2",
+				run_id: runId,
+				calibration_batch_sha256: CALIBRATION_BATCH.calibration_batch_sha256,
+			};
 			const events = [
-				{ ...journalBase, event_type: "initialized", logical_run_id: null, receipt_path: null, receipt_sha256: null, smoke: null },
-				{ ...journalBase, event_type: "smoke_started", logical_run_id: null, receipt_path: null, receipt_sha256: null, smoke: null },
-				{ ...journalBase, event_type: "smoke_completed", logical_run_id: null, receipt_path: null, receipt_sha256: null, smoke },
-				{ ...journalBase, event_type: "run_started", logical_run_id: firstRun.run_id, receipt_path: null, receipt_sha256: null, smoke: null },
-				{ ...journalBase, event_type: "run_terminal", logical_run_id: firstRun.run_id, receipt_path: `receipts/${firstRun.run_id}.json`, receipt_sha256: createHash("sha256").update(receiptContent).digest("hex"), smoke: null },
+				{
+					...journalBase,
+					event_type: "initialized",
+					logical_run_id: null,
+					receipt_path: null,
+					receipt_sha256: null,
+					smoke: null,
+				},
+				{
+					...journalBase,
+					event_type: "smoke_started",
+					logical_run_id: null,
+					receipt_path: null,
+					receipt_sha256: null,
+					smoke: null,
+				},
+				{
+					...journalBase,
+					event_type: "smoke_completed",
+					logical_run_id: null,
+					receipt_path: null,
+					receipt_sha256: null,
+					smoke,
+				},
+				{
+					...journalBase,
+					event_type: "run_started",
+					logical_run_id: firstRun.run_id,
+					receipt_path: null,
+					receipt_sha256: null,
+					smoke: null,
+				},
+				{
+					...journalBase,
+					event_type: "run_terminal",
+					logical_run_id: firstRun.run_id,
+					receipt_path: `receipts/${firstRun.run_id}.json`,
+					receipt_sha256: createHash("sha256").update(receiptContent).digest("hex"),
+					smoke: null,
+				},
 			];
 			await writeFile(join(stagingDirectory, "m6-events.jsonl"), events.map(journalLine).join(""), "utf8");
 			const budget = await GlobalBudgetLedger.open(join(stagingDirectory, "global-budget.json"), 22_000_000);
@@ -196,7 +265,11 @@ describe("M6 v2 Dev calibration runner", () => {
 				},
 			};
 			const summary = await runM6DevCalibration(
-				{ artifacts_root: temporaryDirectory, calibration_batch: CALIBRATION_BATCH, resume_directory: stagingDirectory },
+				{
+					artifacts_root: temporaryDirectory,
+					calibration_batch: CALIBRATION_BATCH,
+					resume_directory: stagingDirectory,
+				},
 				resumeDependencies,
 			);
 			expect(summary.terminal_status).toBe("completed");
@@ -205,7 +278,9 @@ describe("M6 v2 Dev calibration runner", () => {
 				run_receipts: readonly { logical_run: { run_id: string } }[];
 			};
 			expect(report.run_receipts).toHaveLength(6);
-			expect(report.run_receipts.filter((receipt) => receipt.logical_run.run_id === firstRun.run_id)).toHaveLength(1);
+			expect(report.run_receipts.filter((receipt) => receipt.logical_run.run_id === firstRun.run_id)).toHaveLength(
+				1,
+			);
 		} finally {
 			await rm(temporaryDirectory, { recursive: true, force: true });
 		}
